@@ -324,11 +324,12 @@ Remaining risks (documented, not silently ignored):
 - Final installer: `installer/output/Selora-IDE-Setup-0.1.0.exe`, 10,059,944
   bytes, SHA-256
   `1156a27ec3c7f8e4be0ef440497ea0eb00911b0271ad9c85a22c383c3214689f`,
-  ProductVersion 0.1.0, Authenticode NotSigned. A new desktop process was not
-  launched after packaging because the user's live conversation holds the
-  application instance; restarting or installing will load the final bundle.
-  The unsigned installer cannot be applied by the in-app updater and remains
-  unpublished.
+  ProductVersion 0.1.0, Authenticode NotSigned. The packaged MAIN release binary
+  then passed the isolated desktop walkthrough 14/14 with zero renderer errors
+  and no findings (`target/release/selora-desktop.exe`). That walkthrough verifies
+  shell, workspace, editor, settings, workflows and Agent-dock mount; it does not
+  prove real-provider streaming or backend child spawning. The unsigned installer
+  cannot be applied by the in-app updater and remains unpublished.
 - Review also caught a pending-retry rejection race introduced by terminal
   metadata retention. Guarded source-session restoration now covers that race,
   with 6 additional regressions (92 targeted agent tests pass, including 45
