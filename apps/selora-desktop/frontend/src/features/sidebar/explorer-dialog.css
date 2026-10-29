@@ -1,0 +1,23 @@
+.explorer-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: var(--c-rgba-0-0-0-0p5);
+}
+.explorer-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+  border: var(--border-hairline);
+  border-radius: 8px;
+  background: var(--ink-mid);
+  color: var(--fg-default);
+  box-shadow: 0 12px 40px var(--c-rgba-0-0-0-0p4);
+}
+.explorer-dialog h3 { margin: 0 0 16px; }
+.explorer-dialog label { display: grid; gap: 8px; }
+.explorer-dialog input { width: 100%; box-sizing: border-box; padding: 8px; }
+.explorer-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.explorer-dialog button { padding: 6px 12px; cursor: pointer; }
+.explorer-dialog [role='alert'] { color: var(--err); }

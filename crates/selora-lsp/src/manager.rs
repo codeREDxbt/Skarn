@@ -11,8 +11,11 @@
 //! What the manager adds on top of raw [`LspClient`]s:
 //! - **lifecycle**: spawns a server the first time a file of its language
 //!   opens (resolving the command via [`LspRegistry`]), reports status for
-//!   the status bar, restarts on request after a crash (§5.6) and replays
-//!   every open document into the fresh server;
+//!   the status bar, restarts a dead server with exponential backoff and a
+//!   retry cap (§5.6), resets the budget after a stable run and replays every
+//!   open document into the fresh server;
+//! - **isolation**: position requests run in their own tasks with a deadline,
+//!   so a hung server can never stall the manager's document-sync loop;
 //! - **debounce**: `didChange` is held for [`DEBOUNCE`] after the last edit
 //!   (deliverable 4: full text per commit, 250 ms) so a fast typist doesn't
 //!   flood the server;
@@ -32,7 +35,9 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::{sleep_until, Instant, Sleep};
 
-use crate::client::{spawn_process, ClientEvent, LaunchedServer, LspClient, ServerStatus};
+use crate::client::{
+    spawn_process, ClientEvent, LaunchedServer, LspClient, ServerStatus, REQUEST_TIMEOUT,
+};
 use crate::position;
 use crate::registry::{LanguageId, LspRegistry, ServerSpec};
 use crate::uri::{path_to_uri, uri_to_path};
@@ -40,6 +45,20 @@ use crate::uri::{path_to_uri, uri_to_path};
 /// `didChange` debounce (deliverable 4): a commit's full text is sent this
 /// long after the last edit.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// First automatic-restart delay; doubles per attempt up to
+/// [`MAX_RESTART_DELAY`].
+pub const RESTART_BASE_DELAY: Duration = Duration::from_millis(500);
+
+/// Upper bound on one automatic-restart delay.
+pub const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
+
+/// Automatic restarts allowed before the manager gives up and waits for the
+/// user (status bar restart). A stable run resets the budget.
+pub const MAX_RESTARTS: u32 = 5;
+
+/// A server must stay up this long for its restart budget to reset.
+pub const STABLE_AFTER: Duration = Duration::from_secs(60);
 
 /// How far in the future the idle debounce timer sleeps (a year — never
 /// fires; re-armed whenever a change lands).
@@ -72,6 +91,24 @@ pub enum LspEffect {
     Completion { path: PathBuf, position: Position },
     /// Restart a (dead) server — the status bar button (§5.6).
     Restart(LanguageId),
+}
+
+/// The three position requests the manager serves off its main loop.
+#[derive(Debug, Clone, Copy)]
+enum PositionRequest {
+    Hover,
+    Definition,
+    Completion,
+}
+
+impl PositionRequest {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Hover => "textDocument/hover",
+            Self::Definition => "textDocument/definition",
+            Self::Completion => "textDocument/completion",
+        }
+    }
 }
 
 /// Messages LSP sends *to* the main thread (the app's `AppMessage` variants
@@ -177,6 +214,16 @@ pub struct LspManagerConfig {
     pub root: Option<PathBuf>,
     /// `didChange` hold-off (default [`DEBOUNCE`]).
     pub debounce: Duration,
+    /// Deadline for one hover/definition/completion request (default
+    /// [`REQUEST_TIMEOUT`]).
+    pub request_timeout: Duration,
+    /// First automatic-restart delay (default [`RESTART_BASE_DELAY`]).
+    pub restart_base: Duration,
+    /// Automatic restarts before giving up until the user restarts
+    /// (default [`MAX_RESTARTS`]).
+    pub max_restarts: u32,
+    /// Uptime that resets the restart budget (default [`STABLE_AFTER`]).
+    pub stable_after: Duration,
     /// Server launcher (default: real processes).
     pub launcher: Launcher,
 }
@@ -187,6 +234,10 @@ impl LspManagerConfig {
             registry,
             root: None,
             debounce: DEBOUNCE,
+            request_timeout: REQUEST_TIMEOUT,
+            restart_base: RESTART_BASE_DELAY,
+            max_restarts: MAX_RESTARTS,
+            stable_after: STABLE_AFTER,
             launcher: Arc::new(spawn_process),
         }
     }
@@ -221,6 +272,21 @@ struct Doc {
     text: String,
 }
 
+/// The bounded retry state of one language's automatic restarts.
+#[derive(Default)]
+struct RestartState {
+    /// Retries already scheduled for the current crash streak.
+    attempts: u32,
+    /// The cap was reached; only a manual restart may spawn again.
+    exhausted: bool,
+    /// When the last successful handshake completed; the budget resets once
+    /// this is older than `stable_after` at the next death.
+    healthy_since: Option<Instant>,
+    /// The scheduled retry: `(token, due)`. A stale timer's token no longer
+    /// matches and is ignored (manual restart supersedes it).
+    pending: Option<(u64, Instant)>,
+}
+
 struct Manager {
     notify: Notify,
     event_tx: UnboundedSender<LspEvent>,
@@ -236,11 +302,18 @@ struct Manager {
     pending_changes: HashSet<PathBuf>,
     /// The debounce timer; reset to `SLEEP_NEVER` while idle.
     debounce_sleep: Pin<Box<Sleep>>,
+    /// Per-language crash streak / backoff schedule.
+    restarts: HashMap<LanguageId, RestartState>,
+    /// Fires when a backoff delay elapses (token-checked by the manager).
+    restart_tx: UnboundedSender<(LanguageId, u64)>,
+    restart_rx: UnboundedReceiver<(LanguageId, u64)>,
+    next_restart_token: u64,
 }
 
 impl Manager {
     fn new(notify: Notify, event_tx: UnboundedSender<LspEvent>, config: LspManagerConfig) -> Self {
         let (client_tx, client_rx) = unbounded_channel();
+        let (restart_tx, restart_rx) = unbounded_channel();
         Self {
             notify,
             event_tx,
@@ -252,6 +325,10 @@ impl Manager {
             client_tx,
             pending_changes: HashSet::new(),
             debounce_sleep: Box::pin(sleep_until(Instant::now() + SLEEP_NEVER)),
+            restarts: HashMap::new(),
+            restart_tx,
+            restart_rx,
+            next_restart_token: 0,
         }
     }
 
@@ -271,6 +348,11 @@ impl Manager {
                 }
                 _ = &mut self.debounce_sleep => {
                     self.flush_changes().await;
+                }
+                due = self.restart_rx.recv() => {
+                    if let Some((language, token)) = due {
+                        self.retry_if_due(language, token).await;
+                    }
                 }
             }
         }
@@ -383,95 +465,191 @@ impl Manager {
     }
 
     async fn hover(&mut self, path: PathBuf, position: Position) {
-        let Some(result) = self
-            .request_position(&path, position, "textDocument/hover")
-            .await
-        else {
-            return;
-        };
-        let content = result.and_then(|value| {
-            serde_json::from_value::<lsp_types::Hover>(value)
-                .ok()
-                .and_then(shape_hover)
-        });
-        self.send(LspEvent::Hover {
-            path,
-            position,
-            content,
-        });
+        self.spawn_position_request(path, position, PositionRequest::Hover)
+            .await;
     }
 
     async fn definition(&mut self, path: PathBuf, position: Position) {
-        let Some(result) = self
-            .request_position(&path, position, "textDocument/definition")
-            .await
-        else {
-            return;
-        };
-        let locations = result
-            .and_then(|value| {
-                serde_json::from_value::<lsp_types::GotoDefinitionResponse>(value).ok()
-            })
-            .map(definition_locations)
-            .unwrap_or_default();
-        self.send(LspEvent::Definition {
-            path,
-            position,
-            locations,
-        });
+        self.spawn_position_request(path, position, PositionRequest::Definition)
+            .await;
     }
 
     async fn completion(&mut self, path: PathBuf, position: Position) {
-        let Some(result) = self
-            .request_position(&path, position, "textDocument/completion")
-            .await
-        else {
-            return;
-        };
-        let items = result
-            .and_then(|value| serde_json::from_value::<lsp_types::CompletionResponse>(value).ok())
-            .map(completion_items)
-            .unwrap_or_default();
-        self.send(LspEvent::Completions {
-            path,
-            position,
-            items,
-        });
+        self.spawn_position_request(path, position, PositionRequest::Completion)
+            .await;
     }
 
     /// The shared body of hover/definition/completion: find the session and
-    /// document, convert the position, run the request. `None` = no
-    /// session/document for the path (nothing to ask). A failed request
-    /// yields `Some(None)`: stale/dead-server results are dropped silently
-    /// (§5.5) — the status events carry the real errors.
-    async fn request_position(
+    /// document, convert the position, then run the request **off** the
+    /// manager loop.
+    ///
+    /// A request runs in its own task with [`LspManagerConfig::request_timeout`],
+    /// so a server that never answers cannot hold up later `didChange`/
+    /// `didSave` effects. A failed, timed-out or dead-server request emits
+    /// nothing here: the lifecycle events carry the real error (§5.5).
+    async fn spawn_position_request(
         &mut self,
-        path: &Path,
+        path: PathBuf,
         position: Position,
-        method: &str,
-    ) -> Option<Option<serde_json::Value>> {
+        kind: PositionRequest,
+    ) {
         // The debounced didChange may not have reached the server yet, while
         // the position below is converted against the newest text. Flush
         // first so the request is computed on a revision the server has
         // actually seen (otherwise hover/definition/completion can land on a
         // stale document).
-        if self.pending_changes.contains(path) {
+        if self.pending_changes.contains(&path) {
             self.flush_changes().await;
         }
-        let language = self.docs.get(path)?.language;
-        let client = self.sessions.get(&language)?.clone();
-        let text = self.docs.get(path)?.text.clone();
+        let Some(language) = self.docs.get(&path).map(|doc| doc.language) else {
+            return;
+        };
+        let Some(client) = self.sessions.get(&language).cloned() else {
+            return;
+        };
+        let Some(text) = self.docs.get(&path).map(|doc| doc.text.clone()) else {
+            return;
+        };
         let lsp_position = position::to_lsp(&text, position);
         let params = serde_json::json!({
-            "textDocument": { "uri": path_to_uri(path) },
+            "textDocument": { "uri": path_to_uri(&path) },
             "position": { "line": lsp_position.line, "character": lsp_position.character },
         });
-        Some(client.request(method, params).await.ok())
+        let timeout = self.config.request_timeout;
+        let event_tx = self.event_tx.clone();
+        let notify = Arc::clone(&self.notify);
+        tokio::spawn(async move {
+            let Ok(value) = client
+                .request_with_timeout(kind.method(), params, timeout)
+                .await
+            else {
+                return;
+            };
+            let event = match kind {
+                PositionRequest::Hover => LspEvent::Hover {
+                    path,
+                    position,
+                    content: serde_json::from_value::<lsp_types::Hover>(value)
+                        .ok()
+                        .and_then(shape_hover),
+                },
+                PositionRequest::Definition => LspEvent::Definition {
+                    path,
+                    position,
+                    locations: serde_json::from_value::<lsp_types::GotoDefinitionResponse>(value)
+                        .ok()
+                        .map(definition_locations)
+                        .unwrap_or_default(),
+                },
+                PositionRequest::Completion => LspEvent::Completions {
+                    path,
+                    position,
+                    items: serde_json::from_value::<lsp_types::CompletionResponse>(value)
+                        .ok()
+                        .map(completion_items)
+                        .unwrap_or_default(),
+                },
+            };
+            if event_tx.send(event).is_ok() {
+                notify();
+            }
+        });
     }
 
     async fn restart(&mut self, language: LanguageId) {
+        // A manual restart is an explicit user action: clear the crash streak
+        // and supersede any pending backoff timer.
+        self.restarts.remove(&language);
         if let Some(client) = self.sessions.remove(&language) {
             client.shutdown();
+        }
+        self.ensure_session(language).await;
+        if self.sessions.contains_key(&language) {
+            self.replay_open_docs(language).await;
+        }
+    }
+
+    /// Schedule the next automatic restart for a dead server. Exponential
+    /// backoff (base doubling, capped) and a hard retry cap; a run that
+    /// stayed healthy for `stable_after` resets the budget first.
+    fn schedule_restart(&mut self, language: LanguageId, reason: &str) {
+        let now = Instant::now();
+        let stable_after = self.config.stable_after;
+        let max_restarts = self.config.max_restarts;
+        let base = self.config.restart_base;
+        let schedule = {
+            let state = self.restarts.entry(language).or_default();
+            if state
+                .healthy_since
+                .take()
+                .is_some_and(|since| now.duration_since(since) >= stable_after)
+            {
+                state.attempts = 0;
+                state.exhausted = false;
+            }
+            // Any manual or earlier schedule is superseded by this death.
+            state.pending = None;
+            if state.attempts >= max_restarts {
+                state.exhausted = true;
+                None
+            } else {
+                state.exhausted = false;
+                let delay = backoff_delay(base, state.attempts);
+                state.attempts += 1;
+                self.next_restart_token += 1;
+                Some((delay, self.next_restart_token))
+            }
+        };
+
+        let Some((delay, token)) = schedule else {
+            self.send(LspEvent::ServerStatus {
+                server: language,
+                status: ServerStatus::Dead(format!(
+                    "{reason}; automatic restart stopped after {max_restarts} attempts \
+                     (restart manually to retry)"
+                )),
+            });
+            return;
+        };
+        let note = if let Some(state) = self.restarts.get_mut(&language) {
+            state.pending = Some((token, now + delay));
+            // Surface the scheduled retry: the status model has no separate
+            // "restarting" state, so the failed reason says what happens next
+            // instead of leaving the shell on a bare crash.
+            Some(format!(
+                "{reason}; restarting in {} ms (attempt {}/{max_restarts})",
+                delay.as_millis(),
+                state.attempts
+            ))
+        } else {
+            None
+        };
+        if let Some(reason) = note {
+            self.send(LspEvent::ServerStatus {
+                server: language,
+                status: ServerStatus::Dead(reason),
+            });
+        }
+        let tx = self.restart_tx.clone();
+        tokio::spawn(async move {
+            sleep_until(Instant::now() + delay).await;
+            let _ = tx.send((language, token));
+        });
+    }
+
+    /// A backoff timer fired: restart only if this is still the live
+    /// schedule (a manual restart clears `pending`, so its stale token loses).
+    async fn retry_if_due(&mut self, language: LanguageId, token: u64) {
+        let live = self
+            .restarts
+            .get(&language)
+            .and_then(|state| state.pending)
+            .is_some_and(|(scheduled, _)| scheduled == token);
+        if !live {
+            return;
+        }
+        if let Some(state) = self.restarts.get_mut(&language) {
+            state.pending = None;
         }
         self.ensure_session(language).await;
         if self.sessions.contains_key(&language) {
@@ -508,6 +686,16 @@ impl Manager {
         if self.sessions.contains_key(&language) {
             return;
         }
+        // A crash streak owns spawning: while a retry is pending (or the cap
+        // is reached) an `Open`/`Change` must not bypass the backoff. Typing
+        // stays local; document sync resumes with the retry.
+        if self
+            .restarts
+            .get(&language)
+            .is_some_and(|state| state.pending.is_some() || state.exhausted)
+        {
+            return;
+        }
         if !self.config.registry.enabled() {
             // The settings master switch is off: stay silent rather than
             // claiming the server is missing.
@@ -522,10 +710,12 @@ impl Manager {
         let launched = match (self.config.launcher)(&spec) {
             Ok(launched) => launched,
             Err(error) => {
+                let reason = format!("spawn failed: {error}");
                 self.send(LspEvent::ServerStatus {
                     server: language,
-                    status: ServerStatus::Dead(format!("spawn failed: {error}")),
+                    status: ServerStatus::Dead(reason.clone()),
                 });
+                self.schedule_restart(language, &reason);
                 return;
             }
         };
@@ -545,14 +735,27 @@ impl Manager {
     fn handle_client_event(&mut self, language: LanguageId, event: ClientEvent) {
         match event {
             ClientEvent::Status(status) => {
-                if let ServerStatus::Dead(_) = status {
-                    // §5.6: the session is gone until the user restarts it.
+                let dead_reason = match &status {
+                    ServerStatus::Dead(reason) => Some(reason.clone()),
+                    _ => None,
+                };
+                if dead_reason.is_some() {
+                    // §5.6: the session is gone; fail fast until a restart.
                     self.sessions.remove(&language);
+                } else if matches!(status, ServerStatus::Ready) {
+                    // Track uptime; the budget resets only after a stable run.
+                    if let Some(state) = self.restarts.get_mut(&language) {
+                        state.healthy_since = Some(Instant::now());
+                        state.pending = None;
+                    }
                 }
                 self.send(LspEvent::ServerStatus {
                     server: language,
                     status,
                 });
+                if let Some(reason) = dead_reason {
+                    self.schedule_restart(language, &reason);
+                }
             }
             ClientEvent::Diagnostics { uri, diagnostics } => {
                 let Some(path) = uri_to_path(&uri) else {
@@ -585,6 +788,13 @@ impl Manager {
             (self.notify)();
         }
     }
+}
+
+/// Exponential backoff for retry number `attempt` (0-based): base, 2×base,
+/// 4×base, … capped at [`MAX_RESTART_DELAY`].
+fn backoff_delay(base: Duration, attempt: u32) -> Duration {
+    base.saturating_mul(1u32 << attempt.min(16))
+        .min(MAX_RESTART_DELAY)
 }
 
 impl Doc {
@@ -728,6 +938,30 @@ mod tests {
         UnboundedReceiver<LspEvent>,
         Arc<Mutex<Vec<FakeHandle>>>,
     ) {
+        // Long backoff: a test that drives restarts by hand never races the
+        // automatic timer.
+        manager_harness_with(
+            debounce,
+            with_server,
+            Duration::from_secs(60),
+            MAX_RESTARTS,
+            STABLE_AFTER,
+        )
+        .await
+    }
+
+    /// [`manager_harness`] with the restart tunables overridden.
+    async fn manager_harness_with(
+        debounce: Duration,
+        with_server: bool,
+        restart_base: Duration,
+        max_restarts: u32,
+        stable_after: Duration,
+    ) -> (
+        UnboundedSender<LspEffect>,
+        UnboundedReceiver<LspEvent>,
+        Arc<Mutex<Vec<FakeHandle>>>,
+    ) {
         let mut registry = LspRegistry::new(LspServerPaths::default()).with_search_dirs(vec![]);
         if with_server {
             registry.register(
@@ -744,6 +978,10 @@ mod tests {
             registry,
             root: None,
             debounce,
+            request_timeout: REQUEST_TIMEOUT,
+            restart_base,
+            max_restarts,
+            stable_after,
             launcher,
         };
         let (effect_tx, effect_rx) = unbounded_channel();
@@ -780,6 +1018,20 @@ mod tests {
         })
         .await
         .expect("timed out waiting for a matching event")
+    }
+
+    /// Drain until the server reports Ready.
+    async fn await_ready(events: &mut UnboundedReceiver<LspEvent>) {
+        let _ = event_until(events, |event| {
+            matches!(
+                event,
+                LspEvent::ServerStatus {
+                    status: ServerStatus::Ready,
+                    ..
+                }
+            )
+        })
+        .await;
     }
 
     /// An absolute sample path (uri round-trips need a real absolute path —
@@ -1354,6 +1606,188 @@ mod tests {
                 .is_err(),
             "no event for an unopened path"
         );
+    }
+
+    #[tokio::test]
+    async fn unanswered_position_request_does_not_block_document_sync() {
+        let (effect_tx, mut events, handles) =
+            manager_harness(Duration::from_millis(30), true).await;
+        let path = sample_path();
+        let _ = effect_tx.send(Open {
+            path: path.clone(),
+            text: "fn a()".into(),
+        });
+        let _ = event_until(&mut events, |event| {
+            matches!(
+                event,
+                LspEvent::ServerStatus {
+                    status: ServerStatus::Ready,
+                    ..
+                }
+            )
+        })
+        .await;
+        let fake = handles.lock().expect("handles lock")[0].clone();
+        let _ = fake.next_seen().await; // initialize
+        let _ = fake.next_seen().await; // initialized
+        let _ = fake.next_seen().await; // didOpen
+
+        // The fake never answers this hover; the request stays in flight.
+        let _ = effect_tx.send(Hover {
+            path: path.clone(),
+            position: Position::new(0, 1),
+        });
+        let request = fake.next_seen().await;
+        assert_eq!(request["method"], "textDocument/hover");
+
+        // Typing continues to reach the server while the hover is pending:
+        // the manager's loop never awaits the request.
+        let _ = effect_tx.send(Change {
+            path: path.clone(),
+            text: "fn a() {}".into(),
+        });
+        let change = fake.next_seen().await;
+        assert_eq!(
+            change["method"], "textDocument/didChange",
+            "document sync must not wait on a hung request"
+        );
+        assert_eq!(change["params"]["contentChanges"][0]["text"], "fn a() {}");
+    }
+
+    #[tokio::test]
+    async fn crash_restarts_with_backoff_and_stops_at_the_retry_cap() {
+        let (effect_tx, mut events, handles) = manager_harness_with(
+            Duration::from_millis(20),
+            true,
+            Duration::from_millis(15),
+            2,
+            Duration::from_secs(60),
+        )
+        .await;
+        let path = sample_path();
+        let _ = effect_tx.send(Open {
+            path: path.clone(),
+            text: "fn main() {}".into(),
+        });
+        let _ = event_until(&mut events, |event| {
+            matches!(
+                event,
+                LspEvent::ServerStatus {
+                    status: ServerStatus::Ready,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        // Two crashes are each followed by an automatic restart.
+        for expected_launches in 2..=3 {
+            let fake = handles.lock().expect("handles lock")[expected_launches - 2].clone();
+            fake.die();
+            let _ = event_until(&mut events, |event| {
+                matches!(
+                    event,
+                    LspEvent::ServerStatus {
+                        status: ServerStatus::Dead(reason),
+                        ..
+                    } if reason.contains("restarting in")
+                )
+            })
+            .await;
+            let _ = event_until(&mut events, |event| {
+                matches!(
+                    event,
+                    LspEvent::ServerStatus {
+                        status: ServerStatus::Ready,
+                        ..
+                    }
+                )
+            })
+            .await;
+            assert_eq!(
+                handles.lock().expect("handles lock").len(),
+                expected_launches,
+                "the manager relaunched the server"
+            );
+        }
+
+        // The third crash exceeds the cap: a typed failure, no more launches.
+        let fake = handles.lock().expect("handles lock")[2].clone();
+        fake.die();
+        match event_until(&mut events, |event| {
+            matches!(
+                event,
+                LspEvent::ServerStatus {
+                    status: ServerStatus::Dead(reason),
+                    ..
+                } if reason.contains("automatic restart stopped")
+            )
+        })
+        .await
+        {
+            LspEvent::ServerStatus {
+                status: ServerStatus::Dead(reason),
+                ..
+            } => assert!(reason.contains("2 attempts"), "reason: {reason}"),
+            other => panic!("expected the capped Dead event, got {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            handles.lock().expect("handles lock").len(),
+            3,
+            "the cap prevents an infinite crash loop"
+        );
+
+        // Typing after the cap is still local and safe (document sync just has
+        // no session to reach; the change effect is consumed without panic).
+        let _ = effect_tx.send(Change {
+            path,
+            text: "fn main() { fixed() }".into(),
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    #[tokio::test]
+    async fn stable_run_resets_the_restart_budget() {
+        let (effect_tx, mut events, handles) = manager_harness_with(
+            Duration::from_millis(20),
+            true,
+            Duration::from_millis(10),
+            1,
+            Duration::from_millis(30),
+        )
+        .await;
+        let path = sample_path();
+        let _ = effect_tx.send(Open {
+            path: path.clone(),
+            text: "fn a() {}".into(),
+        });
+        await_ready(&mut events).await;
+
+        // First crash consumes the single retry.
+        handles.lock().expect("handles lock")[0].die();
+        await_ready(&mut events).await;
+        assert_eq!(handles.lock().expect("handles lock").len(), 2);
+
+        // Stay up past `stable_after`, then crash again: the budget reset, so
+        // a second automatic restart is allowed instead of hitting the cap.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        handles.lock().expect("handles lock")[1].die();
+        await_ready(&mut events).await;
+        assert_eq!(
+            handles.lock().expect("handles lock").len(),
+            3,
+            "a stable run re-arms the restart budget"
+        );
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        let base = Duration::from_millis(100);
+        assert_eq!(backoff_delay(base, 0), Duration::from_millis(100));
+        assert_eq!(backoff_delay(base, 1), Duration::from_millis(200));
+        assert_eq!(backoff_delay(base, 2), Duration::from_millis(400));
+        assert_eq!(backoff_delay(base, 40), MAX_RESTART_DELAY);
     }
 
     #[test]

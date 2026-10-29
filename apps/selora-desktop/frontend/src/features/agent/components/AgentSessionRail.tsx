@@ -139,8 +139,9 @@ void agentStore.requestNewSession().then((ok) => {
           <div className="session-rail-subtitle">Resume session</div>
           {resumable.map((session) => {
             const resume = () => {
-              agentStore.resumeSession(session.id);
-              onClose?.();
+              void agentStore.requestSwitchSession(session.id).then((ok) => {
+                if (ok) onClose?.();
+              });
             };
             return (
               <div className="session-item-wrap" key={session.id}>

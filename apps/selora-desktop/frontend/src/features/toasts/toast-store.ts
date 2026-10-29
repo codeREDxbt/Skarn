@@ -8,6 +8,7 @@
 // history (newest first, max 50) persisted under `selora:notification_history`.
 import { readTokenNumber } from '../layout/dom-tokens';
 import type { ProtocolError, ToastSeverity } from '../../bridge/bridge';
+import { playCue } from '../sound/sound-store';
 
 /** ARCHITECTURE §8.2: 4s for info/success (calm), 8s for warning/error. */
 export const TOAST_CALM_MS = 4000;
@@ -251,6 +252,8 @@ export const toastStore = {
     const id = nextLocalId;
     nextLocalId -= 1;
     push({ id, severity, message });
+    // Optional UI cue: silent unless the user enabled sounds.
+    playCue(severity === 'error' ? 'error' : 'notify');
     return id;
   },
 

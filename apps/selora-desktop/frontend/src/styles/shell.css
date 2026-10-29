@@ -439,7 +439,7 @@
 
 .titlebar-search-trigger:hover .titlebar-search-icon {
   opacity: 1;
-  color: var();
+  color: var(--moonlight-300, #e4e9f2);
 }
 
 .titlebar-search-text {
@@ -1010,7 +1010,7 @@
 }
 
 .activity-motion-toggle.is-active {
-  color: var();
+  color: var(--moonlight-400, #cdd6e4);
 }
 
 .activity-spacer {
@@ -2448,4 +2448,21 @@
 .toast-open:hover,
 .toast-open:focus-visible {
   background: var(--ink-hi);
+}
+.problem-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-muted, var(--c-a1a1aa));
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.problem-copy-btn:hover {
+  color: var(--fg-default, var(--c-e4e4e7));
+  background: var(--c-rgba-255-255-255-0p08);
 }

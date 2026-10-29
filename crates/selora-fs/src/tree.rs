@@ -16,17 +16,36 @@
 //!
 //! Folders with more than [`MAX_CHILDREN`] entries are returned partial
 //! with a "load more" marker (ARCHITECTURE.md §4.4 — rendering 50k nodes
-//! is a v2 problem).
+//! is a v2 problem). The whole walk is also bounded by [`MAX_TREE_NODES`]
+//! and [`MAX_TREE_DEPTH`]: a huge or pathological tree returns a partial
+//! tree instead of blocking the worker for minutes.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
 
 /// Per-directory cap after which [`build_tree`] returns a partial node
 /// (ARCHITECTURE.md §4.4).
 pub const MAX_CHILDREN: usize = 2000;
+
+/// Total nodes the walker may visit in one build. The per-directory cap alone
+/// does not help a repo with 500k files spread over many folders: the walk
+/// still visits every one before the UI shows anything. That took minutes on
+/// a cold disk, so the walk stops here and the affected directories are
+/// marked truncated.
+pub const MAX_TREE_NODES: usize = 50_000;
+
+/// Maximum directory depth the walker descends. Guards against exotic deep
+/// trees (and keeps `materialize`'s recursion well inside the stack).
+pub const MAX_TREE_DEPTH: usize = 64;
+
+/// Wall-clock budget for one tree build. A node cap alone still allows a slow
+/// network share to spend minutes on 50k `stat` calls; this bounds the wait
+/// and returns the partial tree.
+pub const MAX_TREE_BUILD: Duration = Duration::from_secs(5);
 
 /// Label rendered by the view for a truncated directory's marker row.
 pub const LOAD_MORE_LABEL: &str = "Load more";
@@ -74,6 +93,9 @@ struct ArenaNode {
     path: PathBuf,
     is_dir: bool,
     children: Vec<usize>,
+    /// The walk stopped inside this directory (node/depth cap), so the view
+    /// must offer its "load more" marker even when the child list fits.
+    truncated: bool,
 }
 
 /// Build the file tree for `root` with the default [`MAX_CHILDREN`] cap.
@@ -83,13 +105,44 @@ struct ArenaNode {
 /// dot-files and dot-directories such as `.git` and `.gitignore` itself —
 /// are skipped (ARCHITECTURE.md §4.3). A missing or unreadable `root`
 /// yields an empty tree, not an error: the caller shows an empty sidebar.
+///
+/// The walk is bounded by [`MAX_TREE_NODES`], [`MAX_TREE_DEPTH`] and
+/// [`MAX_TREE_BUILD`], so a huge or pathological tree returns a partial tree
+/// instead of blocking the worker for minutes.
 pub fn build_tree(root: &Path) -> FileTreeNode {
-    build_tree_with_limit(root, MAX_CHILDREN)
+    build_tree_with_limits(root, MAX_CHILDREN, MAX_TREE_NODES, MAX_TREE_DEPTH)
 }
 
 /// [`build_tree`] with an explicit per-directory cap (used by tests and,
 /// later, by "load more").
 pub fn build_tree_with_limit(root: &Path, max_children: usize) -> FileTreeNode {
+    build_tree_with_limits(root, max_children, MAX_TREE_NODES, MAX_TREE_DEPTH)
+}
+
+/// [`build_tree`] with every bound explicit (tests use small caps).
+pub fn build_tree_with_limits(
+    root: &Path,
+    max_children: usize,
+    max_nodes: usize,
+    max_depth: usize,
+) -> FileTreeNode {
+    build_tree_with_deadline(
+        root,
+        max_children,
+        max_nodes,
+        max_depth,
+        Instant::now() + MAX_TREE_BUILD,
+    )
+}
+
+/// [`build_tree_with_limits`] plus an explicit wall-clock deadline.
+fn build_tree_with_deadline(
+    root: &Path,
+    max_children: usize,
+    max_nodes: usize,
+    max_depth: usize,
+    deadline: Instant,
+) -> FileTreeNode {
     let root_name = file_name_of(root);
     if !root.exists() {
         return FileTreeNode {
@@ -116,6 +169,7 @@ pub fn build_tree_with_limit(root: &Path, max_children: usize) -> FileTreeNode {
         path: root.to_path_buf(),
         is_dir: true,
         children: Vec::new(),
+        truncated: false,
     }];
     // Stack of arena indices of the currently-open directory chain; the
     // walker yields depth-first pre-order, so an entry at depth `d` is a
@@ -129,11 +183,16 @@ pub fn build_tree_with_limit(root: &Path, max_children: usize) -> FileTreeNode {
         .ignore(true) // respect .ignore files
         .build();
 
+    let mut capped = false;
     for entry in walker.flatten() {
         if entry.depth() == 0 {
             continue; // the root itself
         }
         let depth = entry.depth();
+        if arena.len() >= max_nodes || depth > max_depth || Instant::now() >= deadline {
+            capped = true;
+            break;
+        }
         while stack.len() > depth {
             stack.pop();
         }
@@ -149,11 +208,20 @@ pub fn build_tree_with_limit(root: &Path, max_children: usize) -> FileTreeNode {
             path: entry.path().to_path_buf(),
             is_dir,
             children: Vec::new(),
+            truncated: false,
         });
         if let Some(&parent) = stack.last() {
             arena[parent].children.push(idx);
         }
         stack.push(idx);
+    }
+    if capped {
+        // Mark the cut point and the root: the UI then shows "load more"
+        // instead of pretending the tree is complete.
+        if let Some(&last) = stack.last() {
+            arena[last].truncated = true;
+        }
+        arena[0].truncated = true;
     }
 
     materialize(&arena, 0, max_children)
@@ -164,8 +232,12 @@ pub fn build_tree_with_limit(root: &Path, max_children: usize) -> FileTreeNode {
 fn materialize(arena: &[ArenaNode], idx: usize, max_children: usize) -> FileTreeNode {
     let node = &arena[idx];
     let mut children: Vec<usize> = node.children.clone();
-    children.sort_by(|&a, &b| compare_children(arena, a, b));
-    let truncated = node.is_dir && children.len() > max_children;
+    // One lowercase allocation per child instead of two per comparison.
+    children.sort_by_cached_key(|&child| {
+        let node = &arena[child];
+        (!node.is_dir, node.name.to_lowercase(), node.name.clone())
+    });
+    let truncated = node.is_dir && (node.truncated || children.len() > max_children);
     if children.len() > max_children {
         children.truncate(max_children);
     }
@@ -178,22 +250,6 @@ fn materialize(arena: &[ArenaNode], idx: usize, max_children: usize) -> FileTree
             .map(|child| materialize(arena, child, max_children))
             .collect(),
         truncated,
-    }
-}
-
-/// Directories first, then files; alphabetical (case-insensitive, exact
-/// as the tie-break).
-fn compare_children(arena: &[ArenaNode], a: usize, b: usize) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let (x, y) = (&arena[a], &arena[b]);
-    match (x.is_dir, y.is_dir) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => x
-            .name
-            .to_lowercase()
-            .cmp(&y.name.to_lowercase())
-            .then_with(|| x.name.cmp(&y.name)),
     }
 }
 
@@ -623,6 +679,61 @@ mod tests {
     #[test]
     fn build_tree_default_cap_is_2000() {
         assert_eq!(MAX_CHILDREN, 2000);
+    }
+
+    #[test]
+    fn build_tree_node_cap_stops_the_walk_and_marks_the_cut() {
+        let root = temp_root("node-cap");
+        for i in 0..10 {
+            touch_owned(&root, format!("f{i}.txt"));
+        }
+
+        let started = std::time::Instant::now();
+        let tree = build_tree_with_limits(&root, 100, 4, 64);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the capped walk must return quickly"
+        );
+        assert!(tree.truncated, "root must advertise the cut");
+        assert!(
+            tree.children.len() < 10,
+            "the walk must stop at the node cap, got {}",
+            tree.children.len()
+        );
+    }
+
+    #[test]
+    fn build_tree_depth_cap_stops_descent() {
+        let root = temp_root("depth-cap");
+        touch(&root, "a/b/c/deep.txt");
+
+        let tree = build_tree_with_limits(&root, 100, 1000, 2);
+        assert!(tree.truncated);
+        let b = tree
+            .child("a")
+            .and_then(|a| a.child("b"))
+            .expect("a/b exists");
+        assert!(b.truncated, "the last descended directory is marked");
+        assert!(b.child("c").is_none(), "descent stopped at the depth cap");
+    }
+
+    #[test]
+    fn build_tree_default_bounds_are_documented_values() {
+        assert_eq!(MAX_TREE_NODES, 50_000);
+        assert_eq!(MAX_TREE_DEPTH, 64);
+        assert_eq!(MAX_TREE_BUILD, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn build_tree_deadline_returns_a_partial_tree() {
+        let root = temp_root("deadline");
+        for i in 0..10 {
+            touch_owned(&root, format!("f{i}.txt"));
+        }
+        // A deadline already in the past stops before the first entry.
+        let tree = build_tree_with_deadline(&root, 100, 1000, 64, Instant::now());
+        assert!(tree.truncated);
+        assert!(tree.children.is_empty());
     }
 
     #[test]

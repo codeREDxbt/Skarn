@@ -2,9 +2,9 @@
 //!
 //! The release pipeline publishes `Selora-IDE-Setup-<version>.exe` and its
 //! `.sha256` on every GitHub release. This module checks for a newer tag,
-//! downloads the installer, verifies the published digest, and hands the file
-//! to Windows. The installer's `AppId` is stable, so it upgrades the existing
-//! per-user install in place: no uninstall step, no settings loss.
+//! downloads the installer, verifies the published digest and Authenticode
+//! signature, and hands the file to Windows. The installer's `AppId` is stable,
+//! so it upgrades the existing per-user install in place: no settings loss.
 //!
 //! Nothing is downloaded until the user answers the startup prompt (or presses
 //! Install in the About dialog); the check itself is one GitHub API GET.
@@ -128,10 +128,45 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), ProtocolErrorDt
             .await
             .map_err(map_net)?;
 
+    if let Err(error) = verify_authenticode(&setup) {
+        let _ = std::fs::remove_file(&setup);
+        return Err(error);
+    }
     launch_installer(&setup)?;
     // The installer closes/replaces this executable; exit before it tries.
     app.exit(0);
     Ok(())
+}
+
+#[cfg(windows)]
+fn verify_authenticode(setup: &std::path::Path) -> Result<(), ProtocolErrorDto> {
+    // Pass the path through the environment, not PowerShell command text.
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "if ((Get-AuthenticodeSignature -LiteralPath $env:SELORA_UPDATE_INSTALLER).Status -ne 'Valid') { exit 1 }",
+        ])
+        .env("SELORA_UPDATE_INSTALLER", setup)
+        .output()
+        .map_err(|error| update_error(format!("Could not verify installer signature: {error}"), false))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(update_error(
+            "Installer Authenticode signature is not valid; refusing to install it.",
+            false,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn verify_authenticode(_: &std::path::Path) -> Result<(), ProtocolErrorDto> {
+    Err(update_error(
+        "Automatic installer updates are supported on Windows only.",
+        false,
+    ))
 }
 
 /// Spawn `cmd /c start /wait <setup> /SILENT ... && start <exe>` detached.
@@ -193,5 +228,24 @@ mod tests {
     fn the_update_staging_dir_is_per_user() {
         let dir = update_dir();
         assert!(dir.ends_with("updates") || dir.ends_with("selora-updates"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsigned_or_missing_installer_is_rejected() {
+        let missing = update_dir().join("selora-nonexistent-signature-test.exe");
+        assert!(verify_authenticode(&missing).is_err());
+        let unsigned =
+            std::env::temp_dir().join(format!("selora-unsigned-{}.exe", std::process::id()));
+        std::fs::write(&unsigned, b"unsigned installer").unwrap();
+        let result = verify_authenticode(&unsigned);
+        std::fs::remove_file(&unsigned).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn installer_verification_is_windows_only() {
+        assert!(verify_authenticode(std::path::Path::new("installer.exe")).is_err());
     }
 }

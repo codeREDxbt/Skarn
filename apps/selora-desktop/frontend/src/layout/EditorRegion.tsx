@@ -332,7 +332,7 @@ export function EditorRegion() {
         tabs={tabViews}
         activeTabId={editor.activeBufferId}
         onSelectTab={(id) => editorStore.setActive(id)}
-        onCloseTab={(id) => editorStore.closeBuffer(id)}
+        onCloseTab={(id, discardDirty) => editorStore.closeBuffer(id, discardDirty)}
         onSaveTab={(id) => editorStore.saveBuffer(id)}
         onTabMenuAction={handleTabMenuAction}
       />

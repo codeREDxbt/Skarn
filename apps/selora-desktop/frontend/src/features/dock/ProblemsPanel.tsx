@@ -4,6 +4,8 @@ import { getAppSnapshot, subscribeApp } from '../../app/app-store';
 import type { Diagnostic } from '../../bridge/bridge';
 import { Icon } from '../../components/Icon';
 import { editorStore } from '../editor/editor-store';
+import { diagnosticClipboardText } from '../agent/components/chat-safety';
+import { toastStore } from '../toasts/toast-store';
 
 export type ProblemSeverity = Diagnostic['severity'];
 type FilterType = 'all' | ProblemSeverity;
@@ -32,6 +34,7 @@ function severityIcon(severity: ProblemSeverity) {
 export function ProblemsPanel() {
   const app = useSyncExternalStore(subscribeApp, getAppSnapshot);
   const diagnostics = app.bootstrap?.diagnostics ?? [];
+  const workspaceRoot = app.bootstrap?.workspace.root ?? null;
 
   const [activeFilter, setActiveFilter] = useState<FilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -242,6 +245,23 @@ export function ProblemsPanel() {
                             </span>
                           </span>
                         </button>
+                        <button
+                          type="button"
+                          className="problem-copy-btn"
+                          aria-label={`Copy diagnostic for ${problem.path}`}
+                          title="Copy diagnostic"
+                          onClick={async () => {
+                            try {
+                              if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+                              await navigator.clipboard.writeText(diagnosticClipboardText(workspaceRoot, problem));
+                              toastStore.pushLocal('info', 'Copied diagnostic');
+                            } catch {
+                              toastStore.pushLocal('error', 'Could not copy diagnostic');
+                            }
+                          }}
+                        >
+                          <Icon name="copy" size={12} />
+                        </button>
                       </div>
                     );
                   })}
@@ -254,4 +274,3 @@ export function ProblemsPanel() {
     </div>
   );
 }
-

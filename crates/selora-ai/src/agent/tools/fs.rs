@@ -26,6 +26,33 @@ use crate::chat_types::ToolResult;
 
 use super::MAX_OUTPUT_BYTES;
 
+/// Heuristic for paths that commonly contain credentials. This is not a sandbox.
+pub(crate) fn is_secret_path(path: &str) -> bool {
+    path.replace('\\', "/").split('/').any(|part| {
+        let name = part.to_ascii_lowercase();
+        name == ".env"
+            || name.starts_with(".env.")
+            || name.ends_with(".pem")
+            || name.ends_with(".key")
+            || name.ends_with(".p12")
+            || name.ends_with(".pfx")
+            || name == ".npmrc"
+            || name == ".pypirc"
+            || name.contains("credential")
+            || name.contains("secret")
+            || name.contains("password")
+    })
+}
+
+fn reject_secret(root: &Path, resolved: &Path) -> Result<(), String> {
+    let rel = rel_display(root, resolved);
+    if is_secret_path(&rel) {
+        Err(format!("refusing to expose secret-looking path `{rel}`"))
+    } else {
+        Ok(())
+    }
+}
+
 /// §17.2 "Bounded I/O": a **full** read is ≤4MB — a larger file is refused,
 /// and the error names the cap and the actual size. A read with
 /// `start_line`/`end_line` streams only that window ([`read_line_slice`]),
@@ -241,6 +268,9 @@ pub(crate) fn read_file(
         Err(e) => return ToolResult::error(id, e),
     };
     let rel = rel_display(root, &resolved);
+    if let Err(message) = reject_secret(root, &resolved) {
+        return ToolResult::error(id, message);
+    }
 
     let meta = match std::fs::metadata(&resolved) {
         Ok(m) => m,
@@ -408,6 +438,9 @@ pub(crate) fn list_dir(root: &Path, id: &str, path: &str) -> ToolResult {
         Err(e) => return ToolResult::error(id, e),
     };
     let rel = rel_display(root, &resolved);
+    if let Err(message) = reject_secret(root, &resolved) {
+        return ToolResult::error(id, message);
+    }
     if !resolved.is_dir() {
         return ToolResult::error(id, format!("`{rel}` is not a directory"));
     }
@@ -421,6 +454,9 @@ pub(crate) fn list_dir(root: &Path, id: &str, path: &str) -> ToolResult {
         } else {
             rel_display(root, &child.path)
         };
+        if is_secret_path(&child_rel) {
+            continue;
+        }
         out.push_str(&child_rel);
         if child.is_dir {
             out.push('/');
@@ -454,6 +490,7 @@ pub(crate) fn fuzzy_find(root: &Path, id: &str, query: &str) -> ToolResult {
     let tree = selora_fs::tree::build_tree(root);
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     collect_files(&tree, root, &mut items);
+    items.retain(|(path, _)| !is_secret_path(&rel_display(root, path)));
     let matches = selora_fs::fuzzy::fuzzy_find(query, &items);
     if matches.is_empty() {
         // No match is a (successful) empty answer, not a tool error.
@@ -517,6 +554,14 @@ pub(crate) fn search_files(root: &Path, id: &str, query: &str) -> ToolResult {
             content: format!("no matches for `{query}`"),
         };
     }
+    let hits: Vec<_> = hits
+        .into_iter()
+        .filter(|hit| {
+            let path = std::fs::canonicalize(&hit.path).unwrap_or_else(|_| hit.path.clone());
+            !is_secret_path(&rel_display(root, &path))
+                && !is_secret_path(&rel_display(root, &hit.path))
+        })
+        .collect();
     let total = hits.len();
     let mut out = String::new();
     for hit in hits.iter().take(MAX_SEARCH_HITS) {
@@ -554,6 +599,7 @@ pub(crate) fn plan_write(
     content: &str,
 ) -> Result<(String, String), String> {
     let resolved = resolve_rooted(root, path)?;
+    reject_secret(root, &resolved)?;
     if same_path(&resolved, root) {
         return Err("refusing to operate on the workspace root itself".to_owned());
     }
@@ -612,6 +658,7 @@ pub(crate) fn plan_edit(
     replace_all: bool,
 ) -> Result<(String, String), String> {
     let resolved = resolve_rooted(root, path)?;
+    reject_secret(root, &resolved)?;
     if same_path(&resolved, root) {
         return Err("refusing to operate on the workspace root itself".to_owned());
     }
@@ -1209,6 +1256,27 @@ mod tests {
 
     fn read(root: &Path, path: &str) -> ToolResult {
         read_file(root, "call_1", path, None, None)
+    }
+
+    #[test]
+    fn secret_paths_are_blocked_from_reads_and_diff_planning() {
+        let root = temp_root("secret-guard");
+        touch(&root, "Credentials/config.txt", "private-value\n");
+        touch(&root, "public.txt", "public-value\n");
+        assert!(is_secret_path("folder\\.ENV.production"));
+        assert!(is_secret_path("Credentials/config.txt"));
+        assert!(!read(&root, "Credentials/config.txt").ok);
+        assert!(!list_dir(&root, "id", "Credentials").ok);
+        assert!(plan_write(&root, "Credentials/config.txt", "new").is_err());
+        assert!(plan_edit(&root, "Credentials/config.txt", "private", "new", false).is_err());
+        assert!(read(&root, "public.txt").ok);
+        assert!(!list_dir(&root, "id", ".").content.contains("Credentials"));
+        assert!(!fuzzy_find(&root, "id", "config")
+            .content
+            .contains("Credentials"));
+        assert!(!search_files(&root, "id", "private-value")
+            .content
+            .contains("private-value\n"));
     }
 
     // -- §17.2 path rooting ----------------------------------------------------

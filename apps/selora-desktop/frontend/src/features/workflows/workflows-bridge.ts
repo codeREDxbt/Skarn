@@ -180,6 +180,7 @@ export function toWorkflowStoreEvent(event: FrontendEvent): WorkflowStoreEvent |
         ...(status ? { status } : {}),
         tokens: event.payload.tokens,
         cost_usd: event.payload.cost_usd,
+        ...(event.payload.phase_usage ? { phase_usage: event.payload.phase_usage } : {}),
         error: event.payload.error ?? null,
       };
     }

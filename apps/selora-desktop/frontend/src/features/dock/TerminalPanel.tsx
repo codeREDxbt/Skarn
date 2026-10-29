@@ -19,6 +19,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from '../../components/Icon';
 import { currentEnvelopeContext } from '../../app/app-store';
+import { editorStore } from '../editor/editor-store';
 import {
   terminalStore,
   terminalTabLabel,
@@ -31,14 +32,18 @@ import {
   terminalFontFamily,
   terminalFontSize,
 } from './terminal-theme';
+import { findTerminalLinks, resolveWorkspacePath } from './terminal-links';
 
 const INITIAL_COLS = 80;
 const INITIAL_ROWS = 24;
+const MAX_TERMINAL_COLS = 1000;
+const MAX_TERMINAL_ROWS = 1000;
 
 export type TerminalHandle = {
   focus: () => void;
   copySelection: () => Promise<boolean>;
   pasteClipboard: () => Promise<void>;
+  find: (query: string, direction: 'next' | 'previous') => boolean;
 };
 
 function errorText(cause: unknown): string {
@@ -56,8 +61,8 @@ export function estimateTerminalGrid(element: HTMLElement | null): { cols: numbe
   if (rect.width < 80 || rect.height < 40) {
     return { cols: INITIAL_COLS, rows: INITIAL_ROWS };
   }
-  const cols = Math.max(20, Math.floor((rect.width - 24) / 7.2));
-  const rows = Math.max(5, Math.floor((rect.height - 24) / 16));
+  const cols = Math.min(MAX_TERMINAL_COLS, Math.max(20, Math.floor((rect.width - 24) / 7.2)));
+  const rows = Math.min(MAX_TERMINAL_ROWS, Math.max(5, Math.floor((rect.height - 24) / 16)));
   return { cols, rows };
 }
 
@@ -185,6 +190,56 @@ function TerminalView({
     const resizeDisposable = live.onResize(({ cols, rows }) => sendResize(cols, rows));
     const outputUnsubscribe = terminalStore.subscribeOutput(terminalId, (data) => live.write(data));
 
+    const linkProvider = live.registerLinkProvider?.({
+      provideLinks: (bufferLineNumber: number, callback: (links: Array<{
+        range: { start: { x: number; y: number }; end: { x: number; y: number } };
+        text: string;
+        activate: () => void;
+      }> | undefined) => void) => {
+        const line = terminalRef.current?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString() ?? '';
+        const links = findTerminalLinks(line);
+        callback(links.length === 0 ? undefined : links.map((link) => ({
+          range: {
+            start: { x: link.start + 1, y: bufferLineNumber },
+            end: { x: link.start + link.length, y: bufferLineNumber },
+          },
+          text: line.slice(link.start, link.start + link.length),
+          activate: () => {
+            const target = resolveWorkspacePath(link.path, editorStore.getSnapshot().workspaceRoot);
+            if (!target) {
+              onNotice('That terminal path is outside the open workspace.');
+              return;
+            }
+            void editorStore.openPathAtLine(target, link.line);
+          },
+        })));
+      },
+    });
+
+    let previousMatch: { query: string; row: number; column: number } | null = null;
+    const find = (query: string, direction: 'next' | 'previous'): boolean => {
+      const needle = query.toLocaleLowerCase();
+      if (!needle) return false;
+      const buffer = live.buffer.active;
+      const matches: Array<{ row: number; column: number }> = [];
+      for (let row = 0; row < buffer.length; row += 1) {
+        const text = buffer.getLine(row)?.translateToString() ?? '';
+        const lower = text.toLocaleLowerCase();
+        for (let column = lower.indexOf(needle); column >= 0; column = lower.indexOf(needle, column + 1)) {
+          matches.push({ row, column });
+        }
+      }
+      if (!matches.length) return false;
+      const index = previousMatch?.query === needle
+        ? matches.findIndex((match) => match.row === previousMatch?.row && match.column === previousMatch?.column)
+        : -1;
+      const next = matches[index < 0 ? (direction === 'next' ? 0 : matches.length - 1) : (index + (direction === 'next' ? 1 : -1) + matches.length) % matches.length];
+      previousMatch = { query: needle, ...next };
+      live.select(next.column, next.row, query.length);
+      live.scrollToLine(next.row);
+      return true;
+    };
+
     live.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
       const modifier = event.ctrlKey || event.metaKey;
@@ -194,6 +249,11 @@ function TerminalView({
       }
       if (modifier && event.shiftKey && event.code === 'KeyV') {
         void pasteClipboard();
+        return false;
+      }
+      if (modifier && !event.shiftKey && event.code === 'KeyF') {
+        event.preventDefault();
+        document.getElementById('terminal-search')?.focus();
         return false;
       }
       if (modifier && !event.shiftKey && event.code === 'KeyC' && live.hasSelection()) {
@@ -232,6 +292,7 @@ function TerminalView({
       focus: () => live.focus(),
       copySelection,
       pasteClipboard,
+      find,
     });
 
     return () => {
@@ -239,13 +300,14 @@ function TerminalView({
       dataDisposable.dispose();
       resizeDisposable.dispose();
       outputUnsubscribe();
+      linkProvider?.dispose();
       mutationObserver?.disconnect();
       resizeObserver?.disconnect();
       fitRef.current = () => undefined;
       terminalRef.current = null;
       live.dispose();
     };
-  }, [session.terminal_id, attempt, copySelection, pasteClipboard, register]);
+  }, [session.terminal_id, attempt, copySelection, pasteClipboard, register, onNotice]);
 
   useEffect(() => {
     if (!active || failure) return;
@@ -334,6 +396,7 @@ export function TerminalPanel() {
   const handles = useRef(new Map<string, TerminalHandle>());
   const started = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const register = useCallback((terminalId: string, handle: TerminalHandle | null) => {
     if (handle) handles.current.set(terminalId, handle);
@@ -397,6 +460,10 @@ export function TerminalPanel() {
   const paste = () => {
     const handle = state.active_id ? handles.current.get(state.active_id) : undefined;
     void handle?.pasteClipboard();
+  };
+  const searchTerminal = (direction: 'next' | 'previous') => {
+    const handle = state.active_id ? handles.current.get(state.active_id) : undefined;
+    if (!handle || !handle.find(searchQuery, direction)) setNotice('No terminal match found.');
   };
 
   let body: ReactNode;
@@ -483,6 +550,35 @@ export function TerminalPanel() {
           />
         </div>
         <div className="dock-toolbar-right">
+          <label className="terminal-search-label" htmlFor="terminal-search">
+            Find
+          </label>
+          <input
+            id="terminal-search"
+            className="terminal-search-input"
+            type="search"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                searchTerminal(event.shiftKey ? 'previous' : 'next');
+              }
+              if (event.key === 'Escape') setSearchQuery('');
+            }}
+            placeholder="Search terminal"
+            aria-label="Search terminal output"
+          />
+          <button
+            type="button"
+            className="terminal-action"
+            aria-label="Find next terminal match"
+            title="Find next terminal match"
+            onClick={() => searchTerminal('next')}
+            disabled={!activeSession || !searchQuery}
+          >
+            <span aria-hidden="true">⌕</span>
+          </button>
           <ActionButton label="Copy terminal selection" icon="copy" onClick={copy} disabled={!activeSession} />
           <ActionButton label="Paste into terminal" icon="paste" onClick={paste} disabled={!activeSession} />
         </div>

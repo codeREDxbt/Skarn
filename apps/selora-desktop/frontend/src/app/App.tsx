@@ -17,6 +17,7 @@ import { currentEnvelopeContext, getAppSnapshot, retryBootstrap, subscribeApp } 
 import { openExternal, openFolderAt, pickFolder } from '../bridge/bridge';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { editorStore } from '../features/editor/editor-store';
+import { startEditorPersistence } from '../features/editor/editor-persistence';
 import { toastStore } from '../features/toasts/toast-store';
 import { AppRuntime } from './providers';
 import { ShellGrid } from '../layout/ShellGrid';
@@ -59,6 +60,7 @@ function ErrorScreen({ error, onRetry }: { error: string; onRetry: () => void })
 
 function AppInner() {
   const app = useSyncExternalStore(subscribeApp, getAppSnapshot);
+  useEffect(() => startEditorPersistence(), []);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cheatSheetOpen, setCheatSheetOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);

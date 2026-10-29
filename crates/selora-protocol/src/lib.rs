@@ -453,6 +453,16 @@ pub struct SettingsPatchDto {
     /// untouched; the About dialog's manual check ignores this flag.
     #[serde(default)]
     pub check_for_updates: Option<bool>,
+    /// Settings > AI Gateway "Assistant providers": the ids the user turned
+    /// off. `Some` replaces the whole list (an empty list re-enables every
+    /// provider); `None` leaves it untouched. The desktop validates each id
+    /// against `selora_settings::KNOWN_PROVIDER_IDS`.
+    #[serde(default)]
+    pub disabled_providers: Option<Vec<String>>,
+    /// Workspace trust for the agent's shell tool: risky commands need both
+    /// trust and an approval. `None` leaves the stored value untouched.
+    #[serde(default)]
+    pub workspace_trusted: Option<bool>,
 }
 
 /// Default history page size for `GitLog` when the caller omits `limit`.
@@ -682,6 +692,9 @@ pub enum FrontendCommand {
     OpenExternal {
         url: String,
     },
+    /// Open the app-data log directory (the rotating panic/fatal log) in the
+    /// OS file manager. Needs no workspace: it is a support action.
+    OpenLogs,
     SettingsUpdate {
         patch: SettingsPatchDto,
     },
@@ -1039,6 +1052,15 @@ pub struct SettingsViewDto {
     /// manual check in the About dialog is unaffected.
     #[serde(default = "default_check_for_updates")]
     pub check_for_updates: bool,
+    /// Providers the user turned off in Settings > AI Gateway. Selection and
+    /// visibility only: the desktop never disconnects, switches a live
+    /// model, or makes a network call because a provider is listed here.
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
+    /// Whether the user trusted this workspace to run risky agent shell
+    /// commands. Read-only commands on the allowlist run regardless.
+    #[serde(default)]
+    pub workspace_trusted: bool,
 }
 /// Phase Z2 serde defaults (§5.1 / §4.2): every field is defaulted so a
 /// partial or pre-Z2 `LayoutDto` JSON deserializes — the values are §1.1's
@@ -1922,6 +1944,11 @@ pub struct WorkflowFinishedDto {
     pub cost_usd: f64,
     #[serde(default = "default_workflow_max_cost_usd")]
     pub max_cost_usd: f64,
+    /// Additive per-phase receipt usage available when the terminal event is
+    /// emitted. Older producers omit this field and the panel keeps its prior
+    /// snapshot unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_usage: Vec<WorkflowPhaseUsageDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -2395,6 +2422,8 @@ mod tests {
                 editor_tab_size: 4,
                 editor_word_wrap: false,
                 check_for_updates: true,
+                disabled_providers: vec![],
+                workspace_trusted: false,
             },
             // §1.1: the Z1 stub values (280/220, agent dock open) were
             // diagnostic placeholders — Z2's fixture carries the table's
@@ -2458,6 +2487,14 @@ mod tests {
         assert!(!view.editor_word_wrap);
         assert_eq!(view.keybind_fuzzy_find, "Ctrl+P");
         assert_eq!(view.keybind_save, "Ctrl+S");
+        assert!(
+            view.disabled_providers.is_empty(),
+            "a pre-feature view has no providers disabled"
+        );
+        assert!(
+            !view.workspace_trusted,
+            "a pre-feature view is untrusted by default"
+        );
     }
 
     /// The patch is additive: missing fields are `None`, so an old frontend
@@ -2475,6 +2512,62 @@ mod tests {
         assert!(patch.keybind_fuzzy_find.is_none());
         assert!(patch.keybind_toggle_chat.is_none());
         assert!(patch.keybind_save.is_none());
+        assert!(patch.disabled_providers.is_none());
+        assert!(patch.workspace_trusted.is_none());
+    }
+
+    /// Workspace trust: the view reports it and the patch can set it, both
+    /// directions surviving serde (the desktop persists it to settings.json).
+    #[test]
+    fn settings_workspace_trust_round_trip() {
+        let view: SettingsViewDto = serde_json::from_str(
+            r#"{"reduced_motion":false,"theme":"selora-dark","workspace_trusted":true}"#,
+        )
+        .expect("view with trust parses");
+        assert!(view.workspace_trusted);
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["workspace_trusted"],
+            serde_json::json!(true)
+        );
+
+        let patch: SettingsPatchDto =
+            serde_json::from_str(r#"{"workspace_trusted":false}"#).expect("trust patch parses");
+        assert_eq!(patch.workspace_trusted, Some(false));
+        let patch: SettingsPatchDto =
+            serde_json::from_str(r#"{"workspace_trusted":true}"#).expect("trust on patch parses");
+        assert_eq!(patch.workspace_trusted, Some(true));
+    }
+
+    /// Settings > AI Gateway: the disabled list survives the wire in both
+    /// directions, and an old view without the field still parses.
+    #[test]
+    fn settings_disabled_providers_round_trip() {
+        let view: SettingsViewDto = serde_json::from_str(
+            r#"{"reduced_motion":false,"theme":"selora-dark","disabled_providers":["deepseek","custom"]}"#,
+        )
+        .expect("view with providers parses");
+        assert_eq!(view.disabled_providers, vec!["deepseek", "custom"]);
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["disabled_providers"],
+            serde_json::json!(["deepseek", "custom"])
+        );
+        assert_eq!(
+            serde_json::from_value::<SettingsViewDto>(json).unwrap(),
+            view
+        );
+
+        let patch: SettingsPatchDto =
+            serde_json::from_str(r#"{"disabled_providers":[]}"#).expect("empty list is a patch");
+        assert_eq!(patch.disabled_providers.as_deref(), Some(&[][..]));
+
+        let patch: SettingsPatchDto = serde_json::from_str(r#"{"disabled_providers":["ollama"]}"#)
+            .expect("patch with providers parses");
+        assert_eq!(
+            patch.disabled_providers.as_deref(),
+            Some(&["ollama".to_string()][..])
+        );
     }
     #[test]
     fn phase9d_resume_picker_and_compaction_failure_round_trip() {
@@ -2663,6 +2756,11 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&FrontendCommand::SaveLayout).unwrap(),
             r#"{"type":"save_layout"}"#
+        );
+        // P2: the support action for the rotating crash log.
+        assert_eq!(
+            serde_json::to_string(&FrontendCommand::OpenLogs).unwrap(),
+            r#"{"type":"open_logs"}"#
         );
     }
     #[test]
@@ -3628,6 +3726,7 @@ mod tests {
             tokens: 1200,
             cost_usd: 0.12,
             max_cost_usd: 5.0,
+            phase_usage: Vec::new(),
             error: error.map(str::to_owned),
         }
     }
@@ -3913,6 +4012,26 @@ mod tests {
         .unwrap();
         assert_eq!(persisted.phase_usage[0].phase, "scan");
         assert_eq!(persisted.phase_usage[0].tokens, 0);
+
+        // The terminal `workflow_finished` event carries the same additive
+        // list. An older payload omits it and loads with an empty vector.
+        let finished = workflow_finished(WorkflowStatus::Completed, None);
+        let encoded = serde_json::to_value(&finished).unwrap();
+        assert!(encoded.get("phase_usage").is_none());
+        let with_usage = WorkflowFinishedDto {
+            phase_usage: vec![usage],
+            ..finished
+        };
+        let encoded = serde_json::to_value(&with_usage).unwrap();
+        assert_eq!(encoded["phase_usage"][0]["phase"], "scan");
+        assert_eq!(encoded["phase_usage"][0]["tokens"], 1200);
+        let decoded: WorkflowFinishedDto = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, with_usage);
+        let older: WorkflowFinishedDto = serde_json::from_str(
+            r#"{"run_id":"run-1","request_id":"request-1","status":"completed","tokens":1200,"cost_usd":0.12,"max_cost_usd":5.0}"#,
+        )
+        .unwrap();
+        assert!(older.phase_usage.is_empty());
     }
 
     #[test]

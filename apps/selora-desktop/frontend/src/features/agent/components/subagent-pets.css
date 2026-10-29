@@ -8,12 +8,14 @@
   align-items: center;
   gap: 4px;
   height: 22px;
-  min-width: 0;
+  /* Never collapse to zero: under pressure the strip shrinks to one 22px
+     badge and scrolls, so the first pet stays visible and clickable. */
+  min-width: 28px;
   max-width: 360px;
   padding: 0 1px;
   overflow-x: auto;
   overflow-y: hidden;
-  flex-shrink: 1;
+  flex: 0 1 auto;
   scrollbar-width: none;
   /* Pets are controls: never a window-drag surface. */
   -webkit-app-region: no-drag;

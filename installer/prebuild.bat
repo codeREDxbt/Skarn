@@ -9,6 +9,12 @@ rem runtime DLL the release binary actually imports beside it, fetches the
 rem WebView2 Evergreen bootstrapper when it is not already cached, and runs
 rem Inno Setup with /DMyAppVersion, /DMyTargetDir, and /DMyCrtDlls.
 rem
+rem After the compile it verifies the setup's ProductVersion against the
+rem workspace version (read from the exe), writes the CI-shaped SHA-256
+rem sidecar, re-hashes the file, and reports the Authenticode status. An
+rem unsigned local build (NotSigned) is expected and does not fail; a setup
+rem whose hash contradicts its signature does.
+rem
 rem ISCC.exe is located by installer\find-iscc.ps1: SELORA_ISCC, PATH, the
 rem standard Inno Setup 6/7 directories, then the uninstall registry. The
 rem compiler's own install location no longer decides where the setup lands:
@@ -106,8 +112,9 @@ if errorlevel 1 (
 set "SETUP=%OUTPUT_DIR%\Selora-IDE-Setup-%VERSION%.exe"
 
 rem Remove a previous artifact for this version first: if ISCC fails, a stale
-rem setup must not survive to look like a fresh build.
+rem setup (and its checksum) must not survive to look like a fresh build.
 if exist "%SETUP%" del /q "%SETUP%" >nul 2>&1
+if exist "%SETUP%.sha256" del /q "%SETUP%.sha256" >nul 2>&1
 
 rem /DMyTargetDir and /DMyCrtDlls keep the installer in step with whatever was
 rem actually built and staged; selora-ide.iss defaults them for a hand-run ISCC.
@@ -123,7 +130,24 @@ if not exist "%SETUP%" (
     exit /b 1
 )
 
+rem Post-build contract: the compiled setup's ProductVersion must match the
+rem workspace version, and the checksum sidecar must hold exactly one
+rem CI-shaped line. Hash the file twice so a checksum generated from a
+rem changing file cannot pass. The Authenticode status is reported, not
+rem enforced: an unsigned local build (NotSigned) is expected, while a
+rem signature that contradicts the file's hash is an error.
+set "SELORA_SETUP=%SETUP%"
+set "SELORA_SETUP_VERSION=%VERSION%"
+set "SELORA_CHECKSUM=%SETUP%.sha256"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $setup=$env:SELORA_SETUP; $version=$env:SELORA_SETUP_VERSION; $checksum=$env:SELORA_CHECKSUM; if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw ('missing ' + $setup) }; $product=([string](Get-Item -LiteralPath $setup).VersionInfo.ProductVersion).Trim(); if ($product -ne $version) { throw ('ProductVersion ' + $product + ' does not match ' + $version) }; $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); $name=Split-Path -Leaf $setup; $line=$hash + '  ' + $name; [IO.File]::WriteAllText($checksum, $line + [char]13 + [char]10, (New-Object System.Text.ASCIIEncoding)); $written=(Get-Content -LiteralPath $checksum -Raw).Trim(); if ($written -ne $line) { throw ('checksum file holds ' + $written + ', expected ' + $line) }; if ($written -notmatch '^[0-9a-f]{64}  Selora-IDE-Setup-\d+\.\d+\.\d+\.exe$') { throw ('checksum line has an unexpected shape: ' + $written) }; $again=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); if ($again -ne $hash) { throw 'the installer changed while the checksum was generated' }; $sig=Get-AuthenticodeSignature -LiteralPath $setup; if ($sig.Status -eq 'HashMismatch') { throw 'the installer hash does not match its Authenticode signature' }; Write-Output ('prebuild: product version ' + $product); Write-Output ('prebuild: sha256 ' + $hash); if ($sig.Status -eq 'Valid') { Write-Output ('prebuild: authenticode Valid (' + $sig.SignerCertificate.Subject + ')') } else { Write-Output ('prebuild: authenticode ' + $sig.Status) }"
+if errorlevel 1 (
+    echo prebuild: installer verification failed 1>&2
+    if exist "%SETUP%.sha256" del /q "%SETUP%.sha256" >nul 2>&1
+    exit /b 1
+)
+
 for %%s in ("%SETUP%") do echo prebuild: wrote "%SETUP%" (%%~zs bytes)
+echo prebuild: wrote "%SETUP%.sha256"
 exit /b 0
 
 
@@ -248,6 +272,7 @@ echo.
 echo Builds installer\output\Selora-IDE-Setup-^<version^>.exe from an existing
 echo release binary: target\release\selora-desktop.exe, or
 echo %%CARGO_TARGET_DIR%%\release\selora-desktop.exe when CARGO_TARGET_DIR is set.
+echo Writes the matching .sha256 next to it and reports the Authenticode status.
 echo.
 echo Requires Inno Setup 6.3 or newer ^(or 7.x^) and the MSVC x64 toolset.
 echo ISCC.exe is found via SELORA_ISCC, PATH, the standard 6/7 install

@@ -12,28 +12,174 @@ use uuid::Uuid;
 use crate::chat_types::ToolCall;
 use crate::types::{ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model, SeloraStatus};
 
-/// 60s to establish the connection (ARCHITECTURE.md §6.1).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-/// 5min read timeout: SSE bodies stream for a long time, but any single read
+/// 15s to establish the connection (ARCHITECTURE.md §6.1). A host that
+/// cannot answer a TCP/TLS handshake in this window is unreachable, not slow.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 2min read timeout: SSE bodies stream for a long time, but any single read
 /// gap longer than this is a dead stream. Deliberately *not* an overall
 /// request timeout, so long streams stay alive while data keeps flowing.
-const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const READ_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// Overall deadline for one non-streaming gateway request (models, ghost
+/// text, whole-reply chat), retries included. A hung gateway surfaces a typed
+/// timeout instead of blocking the caller forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// Deadline to receive an SSE response's headers. The stream body itself is
+/// bounded by [`READ_TIMEOUT`] per read, never by this deadline.
+const STREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
+/// The reachability ping must answer quickly or it is not useful.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for an error body before giving up on it.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The SSE sentinel that terminates a chat stream.
 const DONE_SENTINEL: &str = "[DONE]";
 /// The instruction that turns a chat model into a completion engine for
 /// ghost text: continuation only, never prose.
 const GHOST_SYSTEM_PROMPT: &str = "You are an inline code completion engine. You are given the code before the caret. Reply with ONLY the continuation that could be typed next at the caret — no prose, no explanation, no code fences, no repetition of the given code.";
-/// Backoff schedule for HTTP 429/5xx retries (1s, 2s, 4s — the §6.5 hard cap
-/// of 8s bounds any future extension of this schedule).
-const HTTP_RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-];
-/// Backoff for the single network-error retry (ARCHITECTURE.md §6.5).
-const NET_RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Backoff for transport errors (ARCHITECTURE.md §6.5): 500ms, then 1s.
+const NET_RETRY_BASE: Duration = Duration::from_millis(500);
+/// Attempts on a transient HTTP status (408/429/5xx): three retries.
+const MAX_HTTP_RETRIES: usize = 3;
+/// Attempts on a transport error (connect refused, reset, timeout).
+const MAX_NET_RETRIES: usize = 2;
+/// Hard cap for any single backoff sleep (§6.5's 8s ceiling).
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
+/// Maximum jitter added on top of a backoff delay (percent of the delay).
+const RETRY_JITTER_PERCENT: u64 = 25;
+/// Prefix of every timeout message carried by [`SeloraError::Net`]. The
+/// shared error type has no timeout variant, so this marker is the typed
+/// contract: [`classify_failure`] and [`is_timeout`] key off it.
+pub const TIMEOUT_MARKER: &str = "timeout: ";
 /// How much of a gateway error body to surface in the error message.
 const MAX_ERROR_BODY_CHARS: usize = 512;
+
+/// The user-facing class of a gateway failure.
+///
+/// `selora-core`'s [`SeloraError`] is a shared contract (it has no timeout
+/// variant), so this classification is the typed view the shells map onto
+/// protocol error codes. It never inspects secrets: only variants and the
+/// bounded, already-redacted message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayFailure {
+    /// The gateway did not answer inside the bounded deadline.
+    Timeout,
+    /// The key is missing, invalid, or not authorized (401/403).
+    Auth,
+    /// The host could not be reached (offline, DNS, connection refused).
+    Network,
+    /// The gateway answered 408/429/5xx even after the retry budget.
+    Unavailable,
+    /// The gateway refused a non-transient request (400/404/422/...).
+    Rejected,
+    /// The gateway answered with something this client cannot parse.
+    InvalidResponse,
+}
+
+/// Classify a client failure for error codes and user-facing copy.
+pub fn classify_failure(error: &SeloraError) -> GatewayFailure {
+    match error {
+        SeloraError::Auth(_) => GatewayFailure::Auth,
+        SeloraError::Net(message) if message.starts_with(TIMEOUT_MARKER) => GatewayFailure::Timeout,
+        SeloraError::Net(_) => GatewayFailure::Network,
+        SeloraError::Ai(message) => {
+            if message.contains("gateway unavailable") {
+                GatewayFailure::Unavailable
+            } else if message.contains("gateway rejected") {
+                GatewayFailure::Rejected
+            } else {
+                GatewayFailure::InvalidResponse
+            }
+        }
+        _ => GatewayFailure::InvalidResponse,
+    }
+}
+
+/// True when `error` is the bounded-deadline timeout this client produces.
+pub fn is_timeout(error: &SeloraError) -> bool {
+    classify_failure(error) == GatewayFailure::Timeout
+}
+
+/// A short, user-readable sentence for `error`. Never contains the API key:
+/// gateway bodies are redacted before they are stored in the error, and this
+/// function only adds fixed copy (or the already-safe error text).
+pub fn user_message(error: &SeloraError) -> String {
+    match classify_failure(error) {
+        GatewayFailure::Timeout => {
+            "The AI gateway did not answer in time. Check your connection and try again.".into()
+        }
+        GatewayFailure::Auth => {
+            "The API key was rejected. Check the key in Settings, then try again.".into()
+        }
+        GatewayFailure::Network => {
+            "Cannot reach the AI gateway. Check your internet connection and try again.".into()
+        }
+        GatewayFailure::Unavailable => {
+            "The AI gateway is temporarily unavailable. Try again in a moment.".into()
+        }
+        GatewayFailure::Rejected | GatewayFailure::InvalidResponse => error.to_string(),
+    }
+}
+
+/// The exponential backoff delay for `attempt` (0-based) over `base`, capped
+/// at [`MAX_RETRY_DELAY`]. Jitter is applied separately by [`with_jitter`].
+fn retry_delay(base: Duration, attempt: usize) -> Duration {
+    let factor = 1u32.checked_shl(attempt.min(16) as u32).unwrap_or(u32::MAX);
+    base.saturating_mul(factor).min(MAX_RETRY_DELAY)
+}
+
+/// Add up to [`RETRY_JITTER_PERCENT`] jitter so synchronized clients do not
+/// retry in lockstep. The spread seed is cheap process time, not a secret.
+fn with_jitter(delay: Duration) -> Duration {
+    let spread_ms = (delay.as_millis() as u64).saturating_mul(RETRY_JITTER_PERCENT) / 100;
+    if spread_ms == 0 {
+        return delay;
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
+        .unwrap_or(0);
+    delay + Duration::from_millis(seed % spread_ms)
+}
+
+/// Format a bounded duration for an error message (`50ms` / `90s`).
+fn describe_duration(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}s", duration.as_secs())
+    }
+}
+
+/// The one timeout error shape: [`SeloraError::Net`] with the typed marker.
+fn timeout_error(what: &str, budget: Duration) -> SeloraError {
+    SeloraError::Net(format!(
+        "{TIMEOUT_MARKER}{what} timed out after {}",
+        describe_duration(budget)
+    ))
+}
+
+/// True when a transport error is worth retrying. Builder/decode failures are
+/// deterministic and would fail identically on every attempt.
+fn is_transient_transport(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+/// True for the transient HTTP statuses worth retrying: request timeout,
+/// rate limit, and every 5xx. 401/403/400 and the rest of the 4xx range are
+/// never retried.
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error()
+}
+
+/// Sleep `delay`, but never past `deadline`. Returns `false` when the
+/// deadline would be crossed (the caller surfaces a typed timeout).
+async fn sleep_within(deadline: tokio::time::Instant, delay: Duration) -> bool {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if delay >= remaining {
+        return false;
+    }
+    tokio::time::sleep(delay).await;
+    true
+}
 
 /// Client for the Selora gateway.
 ///
@@ -46,7 +192,13 @@ pub struct SeloraClient {
     http: reqwest::Client,
     /// Test seam: the production retry policy with millisecond delays.
     net_retry_delay: Duration,
-    http_retry_delays: [Duration; 3],
+    http_retry_delay: Duration,
+    max_net_retries: usize,
+    max_http_retries: usize,
+    /// Overall deadline for one non-streaming request (retries included).
+    request_timeout: Duration,
+    /// Deadline to receive a streaming response's headers.
+    stream_response_timeout: Duration,
 }
 
 impl fmt::Debug for SeloraClient {
@@ -75,8 +227,12 @@ impl SeloraClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key: api_key.to_owned(),
             http,
-            net_retry_delay: NET_RETRY_DELAY,
-            http_retry_delays: HTTP_RETRY_DELAYS,
+            net_retry_delay: NET_RETRY_BASE,
+            http_retry_delay: Duration::from_secs(1),
+            max_net_retries: MAX_NET_RETRIES,
+            max_http_retries: MAX_HTTP_RETRIES,
+            request_timeout: REQUEST_TIMEOUT,
+            stream_response_timeout: STREAM_RESPONSE_TIMEOUT,
         }
     }
 
@@ -105,7 +261,7 @@ impl SeloraClient {
         let http = self.http.clone();
 
         let response_res = self
-            .send_with_retry(|| {
+            .send_with_retry("model catalog", self.request_timeout, || {
                 let mut req = http.get(&url);
                 if !api_key.trim().is_empty() {
                     req = req.bearer_auth(&api_key);
@@ -117,18 +273,15 @@ impl SeloraClient {
             .await;
 
         let text = match response_res {
-            Ok(resp) => resp
-                .text()
-                .await
-                .map_err(|err| SeloraError::Ai(format!("invalid models response: {err}")))?,
+            Ok(resp) => self.read_text(resp, "model catalog").await?,
             Err(err) => {
                 // If standard /v1/models failed, check if this is an Ollama host and try /api/tags
                 let base = self.base_url.trim_end_matches('/');
                 if base.contains("11434") || base.contains("ollama") {
                     let tags_url = format!("{base}/api/tags");
-                    if let Ok(resp) = self.http.get(&tags_url).send().await {
+                    if let Ok(resp) = self.bounded_get(&tags_url).await {
                         if resp.status().is_success() {
-                            if let Ok(tags_text) = resp.text().await {
+                            if let Ok(tags_text) = self.read_text(resp, "model catalog").await {
                                 let models = parse_models_from_json(&tags_text);
                                 if !models.is_empty() {
                                     return Ok(models);
@@ -153,9 +306,9 @@ impl SeloraClient {
             let base = self.base_url.trim_end_matches('/');
             if base.contains("11434") || base.contains("ollama") {
                 let tags_url = format!("{base}/api/tags");
-                if let Ok(resp) = self.http.get(&tags_url).send().await {
+                if let Ok(resp) = self.bounded_get(&tags_url).await {
                     if resp.status().is_success() {
-                        if let Ok(tags_text) = resp.text().await {
+                        if let Ok(tags_text) = self.read_text(resp, "model catalog").await {
                             models = parse_models_from_json(&tags_text);
                         }
                     }
@@ -195,7 +348,7 @@ impl SeloraClient {
         let body = req.clone().with_stream(true);
 
         let response = match self
-            .send_with_retry(|| {
+            .send_with_retry("chat stream", self.stream_response_timeout, || {
                 let mut http_req = self.http.post(&url);
                 if !self.api_key.trim().is_empty() {
                     http_req = http_req.bearer_auth(&self.api_key);
@@ -400,12 +553,11 @@ impl SeloraClient {
         );
 
         let response = self
-            .send_with_retry(|| self.http.post(&url).bearer_auth(&self.api_key).json(&body))
+            .send_with_retry("ghost completion", self.request_timeout, || {
+                self.http.post(&url).bearer_auth(&self.api_key).json(&body)
+            })
             .await?;
-        let reply: CompletionResponse = response
-            .json()
-            .await
-            .map_err(|err| SeloraError::Ai(format!("invalid completion response: {err}")))?;
+        let reply: CompletionResponse = self.read_json(response, "ghost completion").await?;
 
         Ok(reply
             .choices
@@ -437,12 +589,11 @@ impl SeloraClient {
         let body = req.with_stream(false);
 
         let response = self
-            .send_with_retry(|| self.http.post(&url).bearer_auth(&self.api_key).json(&body))
+            .send_with_retry("chat completion", self.request_timeout, || {
+                self.http.post(&url).bearer_auth(&self.api_key).json(&body)
+            })
             .await?;
-        let reply: CompletionResponse = response
-            .json()
-            .await
-            .map_err(|err| SeloraError::Ai(format!("invalid completion response: {err}")))?;
+        let reply: CompletionResponse = self.read_json(response, "chat completion").await?;
 
         Ok(reply
             .choices
@@ -462,49 +613,68 @@ impl SeloraClient {
     /// "disconnected". The latency rides along for the status bar.
     pub async fn status(&self) -> SeloraStatus {
         let started = Instant::now();
-        match self.http.head(&self.base_url).send().await {
-            Ok(_) => SeloraStatus::Connected {
+        let ping = self.http.head(&self.base_url).send();
+        match tokio::time::timeout(STATUS_TIMEOUT, ping).await {
+            Ok(Ok(_)) => SeloraStatus::Connected {
                 model: None,
                 latency_ms: started.elapsed().as_millis() as u32,
             },
-            Err(_) => SeloraStatus::Disconnected,
+            // A timeout or a transport failure both mean "not reachable right now".
+            Ok(Err(_)) | Err(_) => SeloraStatus::Disconnected,
         }
     }
 
-    /// Send a request under the §6.5 retry policy:
+    /// Send a request under the §6.5 retry policy, bounded by `budget`:
     ///
-    /// * network error → one retry after `net_retry_delay`;
-    /// * 429/5xx → up to three retries on the `http_retry_delays` schedule;
-    /// * 401 → no retry, `SeloraError::Auth`;
-    /// * any other 4xx → no retry, surface the gateway's message.
+    /// * transport error → up to [`Self::max_net_retries`] retries with
+    ///   exponential backoff and jitter;
+    /// * 408/429/5xx → up to [`Self::max_http_retries`] retries on the same
+    ///   capped backoff;
+    /// * 401/403 → no retry, `SeloraError::Auth`;
+    /// * any other 4xx → no retry, surface the gateway's message;
+    /// * the whole exchange (including backoff sleeps) is bounded by
+    ///   `budget`; an overrun is a typed timeout, never a hang.
     ///
     /// `build_request` is re-invoked per attempt because `RequestBuilder`
-    /// is not reusable.
+    /// is not reusable. Retries happen on one logical request, so a user turn
+    /// is never duplicated.
     async fn send_with_retry(
         &self,
+        what: &str,
+        budget: Duration,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, SeloraError> {
         let mut network_retries = 0;
         let mut http_retries = 0;
+        let deadline = tokio::time::Instant::now() + budget;
 
         loop {
-            match build_request().send().await {
-                Ok(response) => {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout_error(what, budget));
+            }
+            let sent = tokio::time::timeout(remaining, build_request().send()).await;
+            match sent {
+                Err(_) => return Err(timeout_error(what, budget)),
+                Ok(Ok(response)) => {
                     let status = response.status();
                     if status.is_success() {
                         return Ok(response);
                     }
-                    if status.as_u16() == 401 {
+                    if status.as_u16() == 401 || status.as_u16() == 403 {
                         let body = self.error_body(response).await;
                         return Err(SeloraError::Auth(format!(
-                            "key invalid or not authorized (HTTP 401{body})"
+                            "key invalid or not authorized (HTTP {status}{body})"
                         )));
                     }
-                    if status.as_u16() == 429 || status.is_server_error() {
-                        if http_retries < self.http_retry_delays.len() {
-                            let delay = self.http_retry_delays[http_retries];
+                    if is_transient_status(status) {
+                        if http_retries < self.max_http_retries {
+                            let delay =
+                                with_jitter(retry_delay(self.http_retry_delay, http_retries));
                             http_retries += 1;
-                            tokio::time::sleep(delay).await;
+                            if !sleep_within(deadline, delay).await {
+                                return Err(timeout_error(what, budget));
+                            }
                             continue;
                         }
                         let body = self.error_body(response).await;
@@ -517,15 +687,62 @@ impl SeloraClient {
                         "gateway rejected request (HTTP {status}){body}"
                     )));
                 }
-                Err(err) => {
-                    if network_retries < 1 {
+                Ok(Err(err)) => {
+                    if is_transient_transport(&err) && network_retries < self.max_net_retries {
+                        let delay = with_jitter(retry_delay(self.net_retry_delay, network_retries));
                         network_retries += 1;
-                        tokio::time::sleep(self.net_retry_delay).await;
+                        if !sleep_within(deadline, delay).await {
+                            return Err(timeout_error(what, budget));
+                        }
                         continue;
                     }
-                    return Err(SeloraError::Net(format!("request failed: {err}")));
+                    if err.is_timeout() {
+                        return Err(timeout_error(what, budget));
+                    }
+                    return Err(SeloraError::Net(format!(
+                        "cannot reach the AI gateway ({}): request failed",
+                        self.base_url
+                    )));
                 }
             }
+        }
+    }
+
+    /// One bounded GET, used by the Ollama fallback probes. No retries: a
+    /// fallback that hangs would defeat the timeout it exists beside.
+    async fn bounded_get(&self, url: &str) -> Result<reqwest::Response, SeloraError> {
+        match tokio::time::timeout(STATUS_TIMEOUT, self.http.get(url).send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err(SeloraError::Net(
+                "cannot reach the AI gateway: fallback request failed".into(),
+            )),
+            Err(_) => Err(timeout_error("model catalog", STATUS_TIMEOUT)),
+        }
+    }
+
+    /// Read a response body as text under the error-body deadline.
+    async fn read_text(
+        &self,
+        response: reqwest::Response,
+        what: &str,
+    ) -> Result<String, SeloraError> {
+        match tokio::time::timeout(ERROR_BODY_TIMEOUT, response.text()).await {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(err)) => Err(SeloraError::Ai(format!("invalid {what} response: {err}"))),
+            Err(_) => Err(timeout_error(what, ERROR_BODY_TIMEOUT)),
+        }
+    }
+
+    /// Parse a JSON response body under the error-body deadline.
+    async fn read_json<T: serde::de::DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+        what: &str,
+    ) -> Result<T, SeloraError> {
+        match tokio::time::timeout(ERROR_BODY_TIMEOUT, response.json::<T>()).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(err)) => Err(SeloraError::Ai(format!("invalid {what} response: {err}"))),
+            Err(_) => Err(timeout_error(what, ERROR_BODY_TIMEOUT)),
         }
     }
 
@@ -533,7 +750,12 @@ impl SeloraClient {
     /// message. The gateway's own words are surfaced, never paraphrased
     /// (RISKS.md §8) — but the API key is scrubbed if a proxy echoes it back.
     async fn error_body(&self, response: reqwest::Response) -> String {
-        let text = response.text().await.unwrap_or_default();
+        let text = match tokio::time::timeout(ERROR_BODY_TIMEOUT, response.text()).await {
+            Ok(Ok(text)) => text,
+            // A slow or unreadable error body must not turn a clear failure
+            // into a hang; the status code still identifies it.
+            Ok(Err(_)) | Err(_) => return String::new(),
+        };
         let text = text.trim();
         if text.is_empty() {
             return String::new();
@@ -821,7 +1043,7 @@ mod tests {
         // Same retry policy, millisecond delays: retries stay observable
         // without slowing the suite down.
         client.net_retry_delay = Duration::from_millis(2);
-        client.http_retry_delays = [Duration::from_millis(2); 3];
+        client.http_retry_delay = Duration::from_millis(2);
         client
     }
 
@@ -1252,9 +1474,145 @@ mod tests {
         let client = test_client(&format!("http://127.0.0.1:{port}"));
         let err = client.list_models().await.unwrap_err();
         assert!(
-            matches!(&err, SeloraError::Net(msg) if msg.contains("request failed")),
-            "expected Net error, got: {err:?}"
+            matches!(&err, SeloraError::Net(msg) if msg.contains("cannot reach the AI gateway")),
+            "expected a readable Net error, got: {err:?}"
         );
+        assert_eq!(classify_failure(&err), GatewayFailure::Network);
+        assert!(!is_timeout(&err));
+        let message = user_message(&err);
+        assert!(
+            message.contains("internet connection"),
+            "network copy must be actionable: {message}"
+        );
+        assert!(!message.contains(TEST_KEY), "key leaked: {message}");
+    }
+
+    #[test]
+    fn backoff_is_capped_exponential_and_jitter_stays_bounded() {
+        let base = Duration::from_secs(1);
+        assert_eq!(retry_delay(base, 0), Duration::from_secs(1));
+        assert_eq!(retry_delay(base, 1), Duration::from_secs(2));
+        assert_eq!(retry_delay(base, 2), Duration::from_secs(4));
+        assert_eq!(retry_delay(base, 3), Duration::from_secs(8));
+        // The §6.5 ceiling holds for every later attempt.
+        assert_eq!(retry_delay(base, 9), MAX_RETRY_DELAY);
+        assert_eq!(retry_delay(base, usize::MAX), MAX_RETRY_DELAY);
+
+        let delay = Duration::from_millis(2000);
+        for _ in 0..32 {
+            let jittered = with_jitter(delay);
+            assert!(jittered >= delay, "jitter must only add: {jittered:?}");
+            assert!(
+                jittered <= delay + delay * RETRY_JITTER_PERCENT as u32 / 100,
+                "jitter exceeded its cap: {jittered:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_chat_403_is_an_auth_error_with_no_retry() {
+        let server = MockServer::start().await;
+        let _mock = Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("key not allowed"))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = client.stream_chat(chat_request(), tx).await.unwrap_err();
+
+        assert!(matches!(&err, SeloraError::Auth(msg) if msg.contains("403")));
+        assert_eq!(classify_failure(&err), GatewayFailure::Auth);
+        assert!(
+            user_message(&err).contains("Check the key in Settings"),
+            "bad-key copy must be actionable"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_timeout_is_typed_and_bounded() {
+        let server = MockServer::start().await;
+        let _mock = Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(400))
+                    .set_body_json(models_json()),
+            )
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let mut client = test_client(&server.uri());
+        client.request_timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        let err = client.list_models().await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(is_timeout(&err), "expected a typed timeout, got: {err:?}");
+        assert_eq!(classify_failure(&err), GatewayFailure::Timeout);
+        assert!(
+            matches!(&err, SeloraError::Net(msg) if msg.starts_with(TIMEOUT_MARKER) && msg.contains("model catalog")),
+            "timeout must name the request: {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the deadline must be enforced, took {elapsed:?}"
+        );
+        assert!(user_message(&err).contains("did not answer in time"));
+    }
+
+    #[tokio::test]
+    async fn stream_chat_header_timeout_ends_the_turn_typed() {
+        let server = MockServer::start().await;
+        let _mock = Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(400))
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let mut client = test_client(&server.uri());
+        client.stream_response_timeout = Duration::from_millis(50);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let err = client.stream_chat(chat_request(), tx).await.unwrap_err();
+
+        assert!(is_timeout(&err), "expected a typed timeout, got: {err:?}");
+        let events = drain(&mut rx);
+        assert!(
+            matches!(events.first(), Some(ChatEvent::Error(error)) if is_timeout(error)),
+            "the timeout must be surfaced as a terminal error event: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ChatEvent::Done(_))),
+            "a timed-out turn must not report Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_request_is_never_retried() {
+        let server = MockServer::start().await;
+        let _mock = Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad model"))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let mut request = chat_request();
+        request.messages.clear(); // a gateway would reject this
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = client.stream_chat(request, tx).await.unwrap_err();
+        assert_eq!(classify_failure(&err), GatewayFailure::Rejected);
     }
 
     #[tokio::test]

@@ -774,16 +774,18 @@ async fn stream_round_gated<C: ChatStream>(
     let end = loop {
         tokio::select! {
             biased;
-            event = rx.recv(), if rx_open => match event {
-                Some(event) => absorb(event, &mut accumulator, &mut text, events, &mut ui_gone),
-                None => { rx_open = false; }
-            },
+            // Stop and the deadline are polled before the delta channel:
+            // a chatty stream must not starve the user's cancel.
             decision = decisions.recv(), if decisions_open => match decision {
                 Some((_, AgentDecision::Stop)) => break StreamEnd::Stopped,
                 Some(_) => {}
                 None => { decisions_open = false; }
             },
             _ = &mut sleep, if deadline.is_some() => break StreamEnd::TimeUp,
+            event = rx.recv(), if rx_open => match event {
+                Some(event) => absorb(event, &mut accumulator, &mut text, events, &mut ui_gone),
+                None => { rx_open = false; }
+            },
             receipt = &mut fut => break StreamEnd::Receipt(receipt),
         }
     };
@@ -1931,6 +1933,131 @@ mod tests {
     // -----------------------------------------------------------------------
     // Scenario 3: a Stop mid-tool aborts and kills the child
     // -----------------------------------------------------------------------
+
+    /// A chat backend that streams two deltas and then never resolves: the
+    /// shape of a slow gateway the user stops mid-answer.
+    struct DeltasThenStall {
+        requests: Arc<Mutex<Vec<ChatRequest>>>,
+    }
+
+    impl ChatStream for DeltasThenStall {
+        fn stream_round(
+            &mut self,
+            request: ChatRequest,
+            events: mpsc::UnboundedSender<ChatEvent>,
+        ) -> ChatRoundFuture<'_> {
+            self.requests.lock().expect("requests lock").push(request);
+            Box::pin(async move {
+                let _ = events.send(ChatEvent::Delta("partial ".into()));
+                let _ = events.send(ChatEvent::Delta("answer".into()));
+                // Never resolves: only Stop (dropping this future) ends it.
+                std::future::pending::<()>().await;
+                unreachable!("the pending stream never resolves")
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_mid_stream_keeps_the_partial_text_and_the_history() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let chat = DeltasThenStall {
+            requests: requests.clone(),
+        };
+        let (runner, _runner_state) = MockRunner::new(Vec::<(&str, MockTool)>::new());
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut recorder = Recorder::new(events_rx);
+        let (decision_tx, decision_rx) = mpsc::unbounded_channel::<TurnDecision>();
+        let input = TurnInput::new(model(), conversation()).with_manifest(manifest());
+        let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
+
+        // Wait until both deltas reached the UI (the bubble is mid-answer).
+        let mut streamed = String::new();
+        while streamed.len() < "partial answer".len() {
+            let event = recorder.rx.recv().await.expect("events channel open");
+            let delta = match &event {
+                AgentEvent::Delta(delta) => Some(delta.clone()),
+                _ => None,
+            };
+            recorder.seen.push(event);
+            if let Some(delta) = delta {
+                streamed.push_str(&delta);
+            }
+        }
+        assert_eq!(streamed, "partial answer");
+
+        decision_tx
+            .send((Uuid::nil(), AgentDecision::Stop))
+            .expect("stop");
+        let report = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("Stop must end a stalled stream, not hang")
+            .expect("turn task joins");
+
+        assert_eq!(report.end, TurnEnd::StoppedByUser);
+        assert!(!report.summary.completed);
+        // The partial answer is kept, not discarded.
+        assert_eq!(report.final_message, "partial answer");
+        // History is intact: the user turn remains and no assistant message
+        // is invented for a cancelled round.
+        assert_eq!(report.conversation, conversation());
+        assert_eq!(
+            requests.lock().expect("requests lock").len(),
+            1,
+            "a stopped stream is never re-sent"
+        );
+
+        let events = recorder.all_events();
+        assert_eq!(
+            count(&events, |event| matches!(event, AgentEvent::TurnDone(_))),
+            1
+        );
+        assert!(
+            matches!(
+                events.iter().rev().find(|event| matches!(event, AgentEvent::Delta(_))),
+                Some(AgentEvent::Delta(delta)) if delta == "answer"
+            ),
+            "streamed text must reach the UI before the stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_ends_the_turn_cleanly_with_partial_text() {
+        let (chat, requests) = ScriptedChat::new(vec![ScriptedRound {
+            events: vec![text_delta("half an ")],
+            receipt: receipt(0.0, 1, 1),
+            delay: None,
+            error: Some(SeloraError::Net(
+                "timeout: chat stream timed out after 90s".into(),
+            )),
+        }]);
+        let (runner, _runner_state) = MockRunner::new(Vec::<(&str, MockTool)>::new());
+        let input = TurnInput::new(model(), conversation()).with_manifest(manifest());
+        let (report, mut events_rx) = run_turn(chat, runner, input).await;
+
+        assert!(
+            matches!(&report.end, TurnEnd::Failed(message) if message.contains("timed out")),
+            "expected a typed failure, got: {:?}",
+            report.end
+        );
+        assert!(!report.summary.completed);
+        assert_eq!(report.final_message, "half an ");
+        assert_eq!(report.conversation, conversation());
+        assert_eq!(requests.lock().expect("requests lock").len(), 1);
+        let events = drain_remaining(&mut events_rx);
+        assert_eq!(
+            count(&events, |event| matches!(event, AgentEvent::TurnDone(_))),
+            1,
+            "the failed turn still ends with exactly one TurnDone"
+        );
+        assert_eq!(
+            count(&events, |event| matches!(
+                event,
+                AgentEvent::ToolCallStarted(_)
+            )),
+            0,
+            "a failed stream never starts tools"
+        );
+    }
 
     #[tokio::test]
     async fn stop_mid_tool_ends_the_turn_and_kills_the_child() {

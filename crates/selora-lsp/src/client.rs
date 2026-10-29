@@ -48,6 +48,11 @@ use crate::registry::ServerSpec;
 /// the server dead.
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Default deadline for a client request. The actor keeps running, so a
+/// server that accepts a request but never answers must not leave the caller
+/// parked forever (a caller in the manager's loop would stall document sync).
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reserved request id of the `initialize` handshake.
 const INITIALIZE_ID: u64 = 0;
 
@@ -171,8 +176,22 @@ impl LspClient {
     }
 
     /// A request: returns when the server answers, or with an error when the
-    /// server dies (or answered with a JSON-RPC error).
+    /// server dies (or answered with a JSON-RPC error). Bounded by
+    /// [`REQUEST_TIMEOUT`].
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, SeloraError> {
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::request`] with an explicit deadline. A timeout is a typed
+    /// error, not a silent hang; the server stays alive and later responses
+    /// for the abandoned id are dropped as stale.
+    pub async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, SeloraError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::Request {
@@ -181,7 +200,13 @@ impl LspClient {
                 reply: reply_tx,
             })
             .map_err(|_| dead(&self.name))?;
-        reply_rx.await.map_err(|_| dead(&self.name))?
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(reply) => reply.map_err(|_| dead(&self.name))?,
+            Err(_) => Err(SeloraError::Lsp(format!(
+                "{} request `{method}` timed out after {timeout:?}",
+                self.name
+            ))),
+        }
     }
 
     /// Graceful shutdown (`shutdown` request, `exit` notification, kill).
@@ -634,6 +659,10 @@ impl Actor {
             } => {
                 let id = self.next_id;
                 self.next_id += 1;
+                // A timed-out caller drops its reply receiver; prune those
+                // slots so a server that never answers cannot grow the table
+                // without bound.
+                self.pending.retain(|_, reply| !reply.is_closed());
                 self.pending.insert(id, reply);
                 if let Err(error) =
                     write_message(writer, &jsonrpc::client_request(id, &method, &params)).await
@@ -1106,6 +1135,35 @@ mod tests {
         // After death, new calls fail instead of silently no-op'ing.
         let error = client.notify("textDocument/didOpen", json!({})).await;
         assert!(error.is_err(), "calls on a dead client must fail");
+    }
+
+    /// A server that accepts a request but never answers must time out with a
+    /// typed error instead of parking the caller forever.
+    #[tokio::test]
+    async fn unanswered_request_times_out() {
+        let (client, fake, mut events) = spawn_with_fake().await;
+        await_ready(&mut events).await;
+
+        let started = std::time::Instant::now();
+        let error = client
+            .request_with_timeout("hover", json!({}), Duration::from_millis(40))
+            .await
+            .expect_err("no answer");
+        assert!(error.to_string().contains("timed out"), "got {error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the timeout must fire promptly"
+        );
+
+        // The request did reach the server; timing out is not a write failure.
+        let _ = fake.next_seen().await;
+        // The actor still answers later requests (it was not killed).
+        fake.respond(json!({ "contents": "ok" }));
+        let value = client
+            .request_with_timeout("hover", json!({}), Duration::from_secs(1))
+            .await
+            .expect("second request");
+        assert_eq!(value["contents"], "ok");
     }
 
     /// The real-process crash path: a child that exits immediately closes

@@ -33,6 +33,7 @@
    ========================================================================== */
 
 :root {
+  --font-scale: 1;
   /* --- 1. Color tokens -------------------------------------------------- */
 
   /* 1.1 The ink ramp (DESIGN_TOKENS.md §1.1; selora-tokens/src/lib.rs:22-27) */
@@ -137,18 +138,18 @@
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 
   /* 2.2 Type scale — size / line-height pairs (§2.2; lib.rs:78-84) */
-  --type-xs: 11px;
-  --type-xs-lh: 16px; /* status bar, micro-labels, tooltips */
-  --type-sm: 12px;
-  --type-sm-lh: 18px; /* file tree rows, secondary UI */
-  --type-md: 13px;
-  --type-md-lh: 20px; /* default body, editor text, menus */
-  --type-lg: 15px;
-  --type-lg-lh: 24px; /* headings, modal titles, panel titles */
-  --type-xl: 18px;
-  --type-xl-lh: 26px; /* app title in the title bar, splash */
-  --type-xxl: 24px;
-  --type-xxl-lh: 32px; /* first-run / agent welcome heading */
+  --type-xs: calc(11px * var(--font-scale));
+  --type-xs-lh: calc(16px * var(--font-scale)); /* status bar, micro-labels, tooltips */
+  --type-sm: calc(12px * var(--font-scale));
+  --type-sm-lh: calc(18px * var(--font-scale)); /* file tree rows, secondary UI */
+  --type-md: calc(13px * var(--font-scale));
+  --type-md-lh: calc(20px * var(--font-scale)); /* default body, editor text, menus */
+  --type-lg: calc(15px * var(--font-scale));
+  --type-lg-lh: calc(24px * var(--font-scale)); /* headings, modal titles, panel titles */
+  --type-xl: calc(18px * var(--font-scale));
+  --type-xl-lh: calc(26px * var(--font-scale)); /* app title in the title bar, splash */
+  --type-xxl: calc(24px * var(--font-scale));
+  --type-xxl-lh: calc(32px * var(--font-scale)); /* first-run / agent welcome heading */
 
   /* 2.3 Weights (§2.3). There is no 700 anywhere in the IDE. */
   --weight-regular: 400;
@@ -222,6 +223,14 @@
   --chrome-panel-header-h: 24px; /* UI_SPEC.md §2.2 sidebar header */
   --chrome-tabbar-h: 32px; /* UI_SPEC.md §3.1 */
   --chrome-agent-header-h: 40px; /* REVAMP_SPEC.md §3 chat header */
+}
+
+:root[data-font-scale="large"] {
+  --font-scale: 1.15;
+}
+
+:root[data-font-scale="x-large"] {
+  --font-scale: 1.3;
 }
 
 /* --------------------------------------------------------------------------

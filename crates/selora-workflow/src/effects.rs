@@ -1076,3 +1076,74 @@ fn truncate_summary(path: &str) -> String {
 pub fn is_side_effecting_tool(tool: &str) -> bool {
     matches!(tool, "write_file" | "edit_file" | "delete_file" | "bash")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{is_side_effecting_tool, stable_effect_id, ToolEffectLedger, ToolEffectStep};
+
+    fn step(step_id: &str, agent: Option<&str>) -> ToolEffectStep {
+        ToolEffectStep {
+            step_id: step_id.to_owned(),
+            agent: agent.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn effect_identity_binds_call_to_step_and_agent() {
+        let first = step("1", Some("reviewer"));
+        let second = step("2", Some("reviewer"));
+        let other_agent = step("1", Some("fixer"));
+
+        let base = stable_effect_id("run-1", Some(&first), "call-1", "write_file");
+        assert_eq!(
+            base,
+            stable_effect_id("run-1", Some(&first), "call-1", "write_file")
+        );
+        assert_ne!(
+            base,
+            stable_effect_id("run-1", Some(&second), "call-1", "write_file")
+        );
+        assert_ne!(
+            base,
+            stable_effect_id("run-1", Some(&other_agent), "call-1", "write_file")
+        );
+        // The same call at the run root is not the step's effect.
+        assert_ne!(
+            base,
+            stable_effect_id("run-1", None, "call-1", "write_file")
+        );
+        // Attribution never changes the side-effecting tool set.
+        assert!(is_side_effecting_tool("write_file"));
+        assert!(!is_side_effecting_tool("read_file"));
+    }
+
+    #[test]
+    fn ledger_persists_step_and_agent_on_the_started_record() {
+        let root = std::env::temp_dir().join(format!(
+            "selora-workflow-effects-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = root.join("tool-effects.jsonl");
+        let ledger =
+            ToolEffectLedger::open_path(path.clone(), "run-1".to_owned()).expect("open ledger");
+        let step = step("3", Some("writer"));
+        let begin = ledger
+            .begin_effect(
+                Some(&step),
+                "call-1",
+                "write_file",
+                serde_json::json!({"path": "src/lib.rs", "content": "x"}),
+            )
+            .expect("record start");
+        assert!(begin.must_execute());
+
+        let data = std::fs::read_to_string(&path).expect("read ledger");
+        let record: serde_json::Value =
+            serde_json::from_str(data.lines().next().expect("one record")).expect("json");
+        assert_eq!(record["step"]["step_id"], "3");
+        assert_eq!(record["step"]["agent"], "writer");
+        assert_eq!(record["call_id"], "call-1");
+        assert_eq!(record["tool"], "write_file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

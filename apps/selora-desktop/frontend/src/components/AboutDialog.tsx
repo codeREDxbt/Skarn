@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MetalBrand } from '../features/onboarding/BrandFx';
 import { toastStore } from '../features/toasts/toast-store';
 import { currentEnvelopeContext } from '../app/app-store';
-import { openExternal } from '../bridge/bridge';
+import { openExternal, openLogs } from '../bridge/bridge';
 import '../styles/onboarding.css';
 
 declare const __APP_VERSION__: string;
@@ -145,6 +145,18 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
     }
   };
 
+  const runOpenLogs = () => {
+    const context = currentEnvelopeContext();
+    if (!context) {
+      toastStore.pushLocal('error', 'Cannot open logs: no workspace context.');
+      return;
+    }
+    void openLogs(context).catch((cause: unknown) => {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      toastStore.pushLocal('error', `Could not open logs: ${message}`);
+    });
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     event.stopPropagation();
     if (event.key === 'Escape') {
@@ -224,6 +236,9 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
             disabled={checking}
           >
             {checking ? 'Checking…' : 'Check for updates'}
+          </button>
+          <button type="button" className="about-button" onClick={runOpenLogs}>
+            Open logs
           </button>
           <button ref={closeRef} type="button" className="about-button" onClick={onClose}>
             Close

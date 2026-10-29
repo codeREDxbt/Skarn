@@ -79,8 +79,8 @@
 //!   `ShellExecuteEx` launch started by the shell service), which is not a
 //!   `CreateProcess` descendant and never a job member. Known broker launch
 //!   forms in the confirmed command text are refused before PowerShell is
-//!   spawned (`workflow_broker`); a confirmed interpreter can still carry
-//!   broker code in an argument. See that module for the exact limit.
+//!   spawned (`workflow_broker`); obfuscated broker code can still evade the
+//!   lexical policy. See that module for the exact limit.
 //! * The legacy `with_chat` synchronous fake is cooperative only around the
 //!   closure. Real turns cancel HTTP, parked approvals and running tools promptly.
 //! * `git.log` and any `git.*` call with a `base` use the `git` CLI, because
@@ -206,6 +206,7 @@ pub struct WorkflowHostConfig {
     pub max_items: usize,
     /// Timeout when the script does not pass `timeoutMs`.
     pub default_timeout_ms: u64,
+    pub workspace_trusted: bool,
     /// Test seam; `None` means the real streaming agent-turn path.
     pub chat: Option<ChatFn>,
     /// Per-run tool-effect ledger: `(path, run id)`.
@@ -234,6 +235,7 @@ impl WorkflowHostConfig {
             max_output_bytes: MAX_OUTPUT_BYTES,
             max_items: MAX_ITEMS,
             default_timeout_ms: DEFAULT_WORLD_TIMEOUT_MS,
+            workspace_trusted: false,
             chat: None,
             tool_effect_ledger: None,
             model_metadata: None,
@@ -259,6 +261,13 @@ impl WorkflowHostConfig {
     #[must_use]
     pub fn with_approval_handler(mut self, handler: WorkflowApprovalHandler) -> Self {
         self.approval_handler = Some(handler);
+        self
+    }
+
+    /// Workflow subagents obey the user's workspace-trust setting.
+    #[must_use]
+    pub fn with_workspace_trusted(mut self, trusted: bool) -> Self {
+        self.workspace_trusted = trusted;
         self
     }
 
@@ -384,20 +393,19 @@ impl EffectRecorder {
 
     /// Record and resolve the start of one tool call. On a completed attempt
     /// the same call must not run again; never run it on error.
-    fn begin(&self, call: &selora_ai::ToolCall) -> Result<selora_workflow::EffectBegin, String> {
+    fn begin_with_step(
+        &self,
+        call: &selora_ai::ToolCall,
+        step: Option<&selora_workflow::ToolEffectStep>,
+    ) -> Result<selora_workflow::EffectBegin, String> {
         let ledger = self
             .ledger
             .as_ref()
             .map_err(|error| format!("tool effect ledger unavailable: {error}"))?;
-        let step = self
-            .step
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
         let arguments: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
         ledger
             .begin_effect(
-                step.as_ref(),
+                step,
                 &call.id,
                 &call.name,
                 selora_workflow::redacted_tool_arguments(&call.name, &arguments),
@@ -1027,10 +1035,9 @@ impl WorkflowHost {
         if cmd.trim().is_empty() {
             return Err(HostError::new("`world.run` needs a command"));
         }
-        // Refuse known broker launch forms before PowerShell exists. A WMI,
-        // Task Scheduler or Explorer broker creates the process outside this
-        // job, where the post-exit audit cannot see or kill it.
-        if let Some(refusal) = crate::workflow_broker::refusal(cmd) {
+        // Refuse known broker launch forms before PowerShell exists. Scan both
+        // command text and runtime arguments before a broker can escape this job.
+        if let Some(refusal) = crate::workflow_broker::refusal_in_parts(cmd, args) {
             return Err(HostError::new(refusal));
         }
 
@@ -1109,14 +1116,12 @@ impl WorkflowHost {
         // capture joins, so a grandchild holding the inherited pipes cannot
         // block the run. The job handle stays open until both readers are done.
         let containment = child.terminate_job().err();
-        // Membership is read back after the kill. A non-empty job is a
-        // containment failure, not a successful command with debris.
-        let audit = if containment.is_none() {
-            audit_quiet_job(&child)
-        } else {
-            None
-        };
-        let containment = containment.or(audit);
+        // Membership is read back after every cleanup attempt. A non-empty job
+        // is a containment failure, not a successful command with debris.
+        if containment.is_some() {
+            child.kill_and_reap();
+        }
+        let containment = merge_containment(containment, audit_quiet_job(&child));
         if containment.is_some() {
             // The audit (or the kill) failed. Reap the direct child so the
             // capture readers cannot block on its handles.
@@ -1473,7 +1478,72 @@ fn cancelled_error() -> HostError {
 fn stop_process_tree(child: &mut WorldProcess) -> Option<HostError> {
     let containment = child.terminate_job().err();
     child.kill_and_reap();
-    containment.or_else(|| audit_quiet_job(child))
+    merge_containment(containment, audit_quiet_job(child))
+}
+
+fn merge_containment(first: Option<HostError>, second: Option<HostError>) -> Option<HostError> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(HostError::new(format!(
+            "{}; additionally: {}",
+            first.message, second.message
+        ))),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::{merge_containment, HostError};
+
+    #[test]
+    fn cleanup_preserves_kill_and_audit_failures() {
+        let merged = merge_containment(
+            Some(HostError::new("kill failed")),
+            Some(HostError::new("audit found member 42")),
+        )
+        .expect("merged error");
+        assert_eq!(
+            merged.message,
+            "kill failed; additionally: audit found member 42"
+        );
+    }
+}
+
+#[cfg(test)]
+mod effect_binding_tests {
+    use super::EffectRecorder;
+    use selora_workflow::ToolEffectStep;
+
+    #[test]
+    fn same_call_in_different_steps_has_distinct_durable_identity() {
+        let root = tempfile::tempdir().expect("workspace");
+        let path = root.path().join("tool-effects.jsonl");
+        let recorder = EffectRecorder::new(path.clone(), "run-1".to_owned());
+        let call = selora_ai::ToolCall {
+            id: "same-call".to_owned(),
+            name: "write_file".to_owned(),
+            arguments: "{}".to_owned(),
+        };
+        for (step_id, agent) in [("1", "first"), ("2", "second")] {
+            let step = ToolEffectStep {
+                step_id: step_id.into(),
+                agent: Some(agent.into()),
+            };
+            recorder
+                .begin_with_step(&call, Some(&step))
+                .expect("record effect");
+        }
+        let data = std::fs::read_to_string(path).expect("read ledger");
+        let records: Vec<serde_json::Value> = data
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["step"]["step_id"], "1");
+        assert_eq!(records[1]["step"]["step_id"], "2");
+        assert_ne!(records[0]["effect_id"], records[1]["effect_id"]);
+    }
 }
 
 /// Wait (bounded) for the stopped job to become empty, then report any member

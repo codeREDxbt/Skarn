@@ -31,6 +31,16 @@ pub enum GitError {
         operation: &'static str,
         message: String,
     },
+    /// A network operation exceeded its wall-clock bound and was stopped, so a
+    /// dead remote, a stalled transport helper or a blocking credential prompt
+    /// can never hang the request path forever. `detail` is already redacted
+    /// and bounded, like [`GitError::Network`].
+    #[error("git {operation} timed out after {seconds}s and was stopped: {detail}")]
+    Timeout {
+        operation: &'static str,
+        seconds: u64,
+        detail: String,
+    },
     /// A Selora-side precondition failed (empty commit message, a bare repo,
     /// no git identity configured, no remote, a conflict that needs an
     /// explicit resolution…).
@@ -46,6 +56,7 @@ impl GitError {
             Self::PathEscape { .. } => "path_escape",
             Self::InvalidName { .. } => "invalid_name",
             Self::Network { .. } => "network",
+            Self::Timeout { .. } => "network_timeout",
             Self::Other(_) => "git",
         }
     }

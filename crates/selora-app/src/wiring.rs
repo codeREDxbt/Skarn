@@ -762,6 +762,7 @@ pub fn spawn_agent(
     let client = SeloraClient::new(&base_url, &api_key);
     let chat = selora_ai::ClientChatStream::new(client);
     let tool_settings = selora_ai::AgentToolSettings {
+        workspace_trusted: request.agent.workspace_trusted,
         shell: request.agent.shell.clone(),
         auto_approve_commands: request.agent.auto_approve_commands.clone(),
         // The Brave key maps into the router's `skip_serializing` field —
@@ -1884,7 +1885,10 @@ mod tests {
         }
     }
 
-    fn agent_request(agent: selora_settings::AgentSettings) -> AgentTurnRequest {
+    fn agent_request(mut agent: selora_settings::AgentSettings) -> AgentTurnRequest {
+        // These wiring tests exercise the tool loop, not workspace trust;
+        // grant it so risky bash commands can reach their approval cards.
+        agent.workspace_trusted = true;
         AgentTurnRequest {
             model: agent_model(),
             conversation: vec![selora_ai::ChatMessage::user("edit it")],

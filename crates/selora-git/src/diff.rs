@@ -4,8 +4,17 @@
 //! Structured, not text: the shell can paint it in any read-only surface
 //! later. Origin letters are git's own: `'+'` added, `'-'` removed,
 //! `' '` context, `'\\'` "no newline at end of file".
+//!
+//! Both bounds below keep a large or minified file from turning one diff into
+//! an unbounded allocation (and an unbounded IPC payload): the collector stops
+//! at the cap and reports [`FileDiff::truncated`].
 
 use std::path::PathBuf;
+
+/// The most lines one [`FileDiff`] may carry.
+pub const MAX_DIFF_LINES: usize = 20_000;
+/// The most bytes one [`FileDiff`] may carry across its lines.
+pub const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 
 /// The diff of a single file on one side of a row: HEAD → index
 /// ([`crate::GitRepo::diff_index`]) or index → working tree
@@ -15,6 +24,10 @@ pub struct FileDiff {
     /// Repo-relative path with `/` separators.
     pub path: PathBuf,
     pub hunks: Vec<Hunk>,
+    /// Whether [`MAX_DIFF_LINES`] / [`MAX_DIFF_BYTES`] cut the patch short.
+    /// [`FileDiff::to_unified`] then ends with a visible notice, so a partial
+    /// diff is never mistaken for the whole change.
+    pub truncated: bool,
 }
 
 impl FileDiff {
@@ -30,7 +43,7 @@ impl FileDiff {
     /// DiffView widget paints it directly.
     pub fn to_unified(&self) -> String {
         let mut out = String::new();
-        if self.is_empty() {
+        if self.is_empty() && !self.truncated {
             return out;
         }
         out.push_str(&format!("--- a/{}\n", self.path.to_string_lossy()));
@@ -46,6 +59,9 @@ impl FileDiff {
                     other => out.push_str(&format!("{other}{}\n", line.content)),
                 }
             }
+        }
+        if self.truncated {
+            out.push_str("[diff truncated: the file is too large or binary to show in full]\n");
         }
         out
     }
@@ -79,6 +95,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn to_unified_announces_a_truncated_patch() {
+        let diff = FileDiff {
+            path: PathBuf::from("big.min.js"),
+            hunks: vec![Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![DiffLine {
+                    origin: '+',
+                    old_no: None,
+                    new_no: Some(1),
+                    content: "x".into(),
+                }],
+            }],
+            truncated: true,
+        };
+        assert!(diff
+            .to_unified()
+            .ends_with("[diff truncated: the file is too large or binary to show in full]\n"));
+    }
+
+    #[test]
     fn to_unified_renders_headers_hunks_and_lines() {
         let diff = FileDiff {
             path: PathBuf::from("src/main.rs"),
@@ -102,6 +141,7 @@ mod tests {
                     },
                 ],
             }],
+            truncated: false,
         };
         let text = diff.to_unified();
         assert_eq!(

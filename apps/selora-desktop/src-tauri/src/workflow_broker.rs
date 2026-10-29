@@ -16,10 +16,8 @@
 //!
 //! # Exact limit
 //!
-//! The scan is a policy, not a security boundary. It sees the confirmed
-//! command text only; `world.run` arguments are data and are not scanned, so a
-//! confirmed general-purpose interpreter (`powershell`, `pwsh`, `cmd`) can
-//! still carry broker code in an argument. Obfuscated PowerShell (string
+//! The scan is a policy, not a security boundary. It scans both confirmed
+//! command text and runtime arguments, but obfuscated PowerShell (string
 //! concatenation, `[scriptblock]::Create`, aliases) can spell a token
 //! differently. Those forms are not refused, and a process they hand to a
 //! broker still escapes the Job Object. Keep such commands out of the
@@ -48,6 +46,7 @@ const BROKER_LAUNCHES: &[(&str, &str)] = &[
         "start-scheduledtask",
         "Task Scheduler (`Start-ScheduledTask`)",
     ),
+    ("invoke-item", "the shell broker (`Invoke-Item`)"),
     (
         "shell.application",
         "the shell broker (`Shell.Application`)",
@@ -56,20 +55,28 @@ const BROKER_LAUNCHES: &[(&str, &str)] = &[
     ("explorer.exe", "the Explorer broker (`explorer.exe`)"),
 ];
 
-/// Why `world.run` must refuse this command, or `None` when it may run.
+/// Refuse broker launch forms in both the confirmed command and runtime data.
 ///
-/// The match is ASCII case-insensitive and whole-token, so `wmic` does not
-/// fire inside `wmicrometer`. `ShellExecute` is matched as a prefix because
-/// its API name carries an `Ex`/`ExW` suffix.
+/// Runtime arguments are encoded into the PowerShell invocation as literals,
+/// but a confirmed interpreter can execute those literals as code. Scan them
+/// before spawning so a broker token cannot bypass this gate through `args`.
 #[must_use]
-pub(crate) fn refusal(command: &str) -> Option<String> {
+pub(crate) fn refusal_in_parts(command: &str, arguments: &[String]) -> Option<String> {
     let lowered = command.to_ascii_lowercase();
-    let (token, what) = BROKER_LAUNCHES.iter().find(|(token, _)| {
-        if *token == "shellexecute" {
-            lowered.contains(token)
-        } else {
-            contains_token(&lowered, token)
-        }
+    let match_token = |text: &str| {
+        BROKER_LAUNCHES.iter().find(|(token, _)| {
+            if *token == "shellexecute" {
+                text.contains(token)
+            } else {
+                contains_token(text, token)
+            }
+        })
+    };
+    let (token, what) = match_token(&lowered).or_else(|| {
+        arguments
+            .iter()
+            .map(|argument| argument.to_ascii_lowercase())
+            .find_map(|argument| match_token(&argument))
     })?;
     Some(format!(
         "`world.run` refused `{token}`: {what} lets a Windows broker create the process outside \
@@ -100,7 +107,11 @@ fn is_separator(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::refusal;
+    use super::refusal_in_parts;
+
+    fn refusal(command: &str) -> Option<String> {
+        refusal_in_parts(command, &[])
+    }
 
     #[test]
     fn refuses_known_broker_launch_forms() {
@@ -146,5 +157,17 @@ mod tests {
         assert!(refusal("wmics").is_none());
         assert!(refusal("notwmic").is_none());
         assert!(refusal("Get-Content shellexecute.txt").is_some());
+    }
+
+    #[test]
+    fn refuses_broker_forms_carried_by_runtime_arguments() {
+        assert!(refusal_in_parts(
+            "powershell",
+            &["Invoke-WmiMethod -Class Win32_Process".into()]
+        )
+        .is_some());
+        assert!(refusal_in_parts("Write-Output", &["wmic process call create".into()]).is_some());
+        assert!(refusal_in_parts("Write-Output", &["INVOKE-ITEM file.exe".into()]).is_some());
+        assert!(refusal_in_parts("Write-Output", &["wmicrometer".into()]).is_none());
     }
 }

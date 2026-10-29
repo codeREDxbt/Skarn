@@ -367,10 +367,18 @@ pub fn transcript_conversation(entries: &[TranscriptEntry]) -> Vec<ChatMessage> 
 }
 
 /// The durable store rooted at one workspace.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentSessionStore {
     root: PathBuf,
-    redaction_key: Option<String>,
+    redaction_keys: Vec<String>,
+}
+
+impl std::fmt::Debug for AgentSessionStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentSessionStore")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentSessionStore {
@@ -378,7 +386,7 @@ impl AgentSessionStore {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
         Self {
             root: workspace_root.as_ref().join(AGENT_SESSIONS_DIR),
-            redaction_key: None,
+            redaction_keys: Vec::new(),
         }
     }
 
@@ -386,7 +394,9 @@ impl AgentSessionStore {
     /// persisted field; this is defence in depth.
     pub fn with_redaction_key(mut self, key: impl Into<String>) -> Self {
         let key = key.into();
-        self.redaction_key = if key.is_empty() { None } else { Some(key) };
+        if !key.is_empty() && !self.redaction_keys.contains(&key) {
+            self.redaction_keys.push(key);
+        }
         self
     }
 
@@ -645,13 +655,28 @@ impl AgentSessionStore {
     }
 
     fn scrub(&self, text: &str) -> String {
-        match &self.redaction_key {
-            Some(key) => text.replace(key, "[REDACTED]"),
-            None => text.to_owned(),
-        }
+        let mut keys = self.redaction_keys.clone();
+        keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        keys.iter()
+            .fold(text.to_owned(), |text, key| text.replace(key, "[REDACTED]"))
     }
 
     fn scrub_value(&self, mut value: Value) -> Value {
+        fn embedded(value: Value, key: &str) -> Value {
+            match value {
+                Value::String(text) => Value::String(text.replace(key, "[REDACTED]")),
+                Value::Array(items) => {
+                    Value::Array(items.into_iter().map(|item| embedded(item, key)).collect())
+                }
+                Value::Object(items) => Value::Object(
+                    items
+                        .into_iter()
+                        .map(|(name, item)| (name.replace(key, "[REDACTED]"), embedded(item, key)))
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
         fn walk(value: &mut Value, key: &str) {
             match value {
                 Value::String(text) => *text = text.replace(key, "[REDACTED]"),
@@ -661,14 +686,25 @@ impl AgentSessionStore {
                     }
                 }
                 Value::Object(map) => {
-                    for item in map.values_mut() {
+                    for (name, item) in map.iter_mut() {
+                        if name == "arguments" {
+                            if let Value::String(text) = item {
+                                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                                    *text = serde_json::to_string(&embedded(parsed, key))
+                                        .expect("JSON serializes");
+                                    continue;
+                                }
+                            }
+                        }
                         walk(item, key);
                     }
                 }
                 Value::Null | Value::Bool(_) | Value::Number(_) => {}
             }
         }
-        if let Some(key) = &self.redaction_key {
+        let mut keys = self.redaction_keys.clone();
+        keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        for key in &keys {
             walk(&mut value, key);
         }
         value

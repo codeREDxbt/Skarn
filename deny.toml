@@ -1,9 +1,8 @@
 # cargo-deny configuration for Selora IDE.
 # NOTE: the file name `deny.toml` is what cargo-deny auto-discovers (not
-# `cargo-deny.toml`, despite what RELEASE.md §7.1 says — one-line doc fix
-# pending).
-# The license gate is part of the merge gate (AGENT_ORCHESTRATION.md §5):
-# any crate with a non-MIT-compatible license fails the build (RISKS.md §9).
+# `cargo-deny.toml`).
+# The license gate is part of the merge gate: any crate with a
+# non-MIT-compatible license fails the build.
 
 [advisories]
 version = 2
@@ -28,7 +27,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    # nucleo-matcher (PLAN.md §4.4 mandates this crate): MPL-2.0 is
+    # nucleo-matcher (the fuzzy matcher): MPL-2.0 is
     # file-level copyleft — its terms apply only to nucleo's own files and
     # do not infect our MIT code. Fine as a dependency.
     "MPL-2.0",

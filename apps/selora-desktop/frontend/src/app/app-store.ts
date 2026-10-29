@@ -29,7 +29,7 @@ import {
   installWorkflowHandlers,
   toWorkflowStoreEvent,
 } from '../features/workflows/workflows-bridge';
-import { applyAppearance } from '../features/theme/theme';
+import { applyAppearance, watchSystemTheme } from '../features/theme/theme';
 import { terminalStore } from '../features/dock/terminal-store';
 
 export type AppPhase = 'connecting' | 'ready' | 'error';
@@ -83,6 +83,7 @@ let lastSequence: number | null = null;
 let generation = 0;
 let started = false;
 let unlisten: (() => void) | null = null;
+let stopSystemTheme: (() => void) | null = null;
 const liveBuffer: EventEnvelope[] = [];
 let draining = false;
 /**
@@ -118,6 +119,12 @@ function notify(): void {
     bufferConflicts: state.bufferConflicts,
   };
   for (const listener of listeners) listener();
+}
+
+function applyBootstrapAppearance(bootstrap: BootstrapState): void {
+  stopSystemTheme?.();
+  applyAppearance(bootstrap.settings);
+  stopSystemTheme = watchSystemTheme(bootstrap.settings.theme);
 }
 
 export function subscribeApp(listener: Listener): () => void {
@@ -189,7 +196,7 @@ export async function refreshBootstrap(): Promise<BootstrapState | null> {
   try {
     const bootstrap = await getBootstrapState();
     state = { ...state, bootstrap, phase: 'ready' };
-    applyAppearance(bootstrap.settings);
+    applyBootstrapAppearance(bootstrap);
     layoutStore.hydrate(bootstrap);
     agentStore.hydrate(bootstrap);
     workflowsStore.hydratePersisted(bootstrap.workflows ?? []);
@@ -216,7 +223,7 @@ async function runBootstrapFlow(): Promise<void> {
     const bootstrap = await getBootstrapState();
     if (gen !== generation) return;
     state = { ...state, phase: 'ready', bootstrap, error: null };
-    applyAppearance(bootstrap.settings);
+    applyBootstrapAppearance(bootstrap);
     layoutStore.hydrate(bootstrap);
     agentStore.hydrate(bootstrap);
     workflowsStore.hydratePersisted(bootstrap.workflows ?? []);
@@ -324,7 +331,7 @@ function reduceEvent(event: EventEnvelope): void {
         bufferConflicts:
           previousWorkspaceId === nextWorkspaceId ? state.bufferConflicts : {},
       };
-      applyAppearance(payload.payload.settings);
+      applyBootstrapAppearance(payload.payload);
       layoutStore.hydrate(payload.payload);
       agentStore.hydrate(payload.payload);
       if (previousWorkspaceId !== nextWorkspaceId) terminalStore.reset();
@@ -583,6 +590,8 @@ function discardHeldState(): void {
   lastSequence = null;
   unlisten?.();
   unlisten = null;
+  stopSystemTheme?.();
+  stopSystemTheme = null;
   toastStore.clearAll();
   layoutStore.reset();
   agentStore.reset();

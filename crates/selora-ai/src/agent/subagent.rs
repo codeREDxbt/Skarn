@@ -565,7 +565,11 @@ struct RuntimeInner {
     /// §19.3: the desktop relay's event sink. Broadcast alone can drop an
     /// event emitted before its receiver subscribes, so the session installs
     /// one sink at construction time.
-    sink: Mutex<Option<mpsc::UnboundedSender<SubagentEvent>>>,
+    sink: Mutex<Option<mpsc::Sender<SubagentEvent>>>,
+    /// Reserved terminal delivery: one slot per child, independent of the
+    /// bounded activity sink. A full sink can never lose the event that
+    /// retires a child from the UI.
+    terminals: Mutex<BTreeMap<ChildId, SubagentEvent>>,
     /// Pending child cards: the single-use decision route. `decide` removes
     /// the entry before forwarding, so a duplicate is inert.
     decisions: Mutex<BTreeMap<ApprovalId, mpsc::UnboundedSender<TurnDecision>>>,
@@ -622,6 +626,7 @@ impl SubagentRuntime {
                 events,
                 changed,
                 sink: Mutex::new(None),
+                terminals: Mutex::new(BTreeMap::new()),
                 decisions: Mutex::new(BTreeMap::new()),
                 child_cards: Mutex::new(BTreeMap::new()),
                 steering: Mutex::new(BTreeMap::new()),
@@ -629,18 +634,77 @@ impl SubagentRuntime {
         }
     }
 
-    /// Install the session relay's event sink. Every event is also broadcast;
-    /// the sink guarantees delivery even when no broadcast receiver exists
-    /// yet.
-    pub fn set_event_sink(&self, sink: mpsc::UnboundedSender<SubagentEvent>) {
+    /// Install the session relay's event sink. Activity and card events share
+    /// the bounded sink (an overflow cancels the child); terminal events use
+    /// the reserved slot in [`Self::take_sink_terminal`] and are never dropped.
+    pub fn set_event_sink(&self, sink: mpsc::Sender<SubagentEvent>) {
         *self.inner.sink.lock().expect("subagent sink lock") = Some(sink);
     }
 
     fn emit(&self, event: SubagentEvent) {
-        if let Some(sink) = self.inner.sink.lock().expect("subagent sink lock").as_ref() {
-            let _ = sink.send(event.clone());
+        if matches!(
+            &event,
+            SubagentEvent::Completed(_) | SubagentEvent::Cancelled { .. }
+        ) {
+            // Reserved capacity: a terminal does not compete with activity for
+            // the bounded sink, so overflow cannot strand a child in the UI.
+            self.defer_sink_terminal(event.clone());
+            let _ = self.inner.events.send(event);
+            return;
         }
+        let failed = self
+            .inner
+            .sink
+            .lock()
+            .expect("subagent sink lock")
+            .as_ref()
+            .is_some_and(|sink| sink.try_send(event.clone()).is_err());
+        let child = match &event {
+            SubagentEvent::Activity(activity) => Some(activity.child_id.clone()),
+            SubagentEvent::ApprovalNeeded(card) => Some(card.child_id.clone()),
+            _ => None,
+        };
         let _ = self.inner.events.send(event);
+        if failed {
+            if let Some(child) = child {
+                self.cancel_child(&child);
+            }
+        }
+    }
+
+    /// Keep a terminal event in its reserved per-child slot until the relay
+    /// takes it. At most one terminal is retained per child, so the queue is
+    /// bounded by the number of children.
+    pub fn defer_sink_terminal(&self, event: SubagentEvent) {
+        let child = match &event {
+            SubagentEvent::Completed(completion) => &completion.child_id,
+            SubagentEvent::Cancelled { child_id, .. } => child_id,
+            _ => return,
+        };
+        self.inner
+            .terminals
+            .lock()
+            .expect("subagent terminal lock")
+            .entry(child.clone())
+            .or_insert(event);
+        // Wake a relay parked on the change watch even when the bounded sink
+        // is full and no further activity arrives.
+        self.inner.changed.send_modify(|sequence| *sequence += 1);
+    }
+
+    /// Take one reserved terminal for the session relay.
+    pub fn take_sink_terminal(&self) -> Option<SubagentEvent> {
+        self.inner
+            .terminals
+            .lock()
+            .expect("subagent terminal lock")
+            .pop_first()
+            .map(|(_, event)| event)
+    }
+
+    /// Observe changes that can make a deferred terminal available.
+    pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
+        self.inner.changed.subscribe()
     }
 
     /// Register a child's steer queue. The driver owns the receiver and
@@ -1714,9 +1778,142 @@ mod tests {
     }
 
     #[test]
+    fn full_event_sink_cancels_child_and_invalidates_approval() {
+        let runtime = SubagentRuntime::new();
+        runtime.register(request("session", "child-1")).unwrap();
+        let (sink, _receiver) = mpsc::channel(1);
+        runtime.set_event_sink(sink);
+        runtime.emit_activity(SubagentActivity::new(
+            "child-1",
+            "session",
+            SubagentActivityKind::Delta {
+                message_id: "message".into(),
+                sequence: 1,
+                text: "first".into(),
+            },
+        ));
+        let id = uuid::Uuid::new_v4();
+        let (decisions, _rx) = mpsc::unbounded_channel();
+        runtime.register_decision("child-1", id, decisions);
+        runtime.emit_child_card(SubagentCard {
+            child_id: "child-1".into(),
+            parent_session: "session".into(),
+            approval_id: id,
+            card: ApprovalCard::Command {
+                command: "danger".into(),
+            },
+        });
+        assert_eq!(runtime.child_state("child-1"), Some(ChildState::Cancelled));
+        assert_eq!(
+            runtime.decide(id, (id, super::super::AgentDecision::Approve)),
+            Err(SubagentControlError::StaleApproval)
+        );
+        assert!(
+            matches!(runtime.take_sink_terminal(), Some(SubagentEvent::Cancelled { child_id, .. }) if child_id == "child-1")
+        );
+        assert!(runtime.take_sink_terminal().is_none());
+    }
+
+    #[test]
+    fn full_event_sink_retains_completion_until_relay_takes_it() {
+        let runtime = SubagentRuntime::new();
+        runtime.register(request("session", "child-1")).unwrap();
+        let (sink, _receiver) = mpsc::channel(1);
+        runtime.set_event_sink(sink);
+        runtime.emit_activity(SubagentActivity::new(
+            "child-1",
+            "session",
+            SubagentActivityKind::Delta {
+                message_id: "message".into(),
+                sequence: 1,
+                text: "first".into(),
+            },
+        ));
+        assert!(runtime.complete("child-1", ChildOutcome::success("done")));
+        assert!(
+            matches!(runtime.take_sink_terminal(), Some(SubagentEvent::Completed(completion)) if completion.final_message == "done")
+        );
+        assert!(runtime.take_sink_terminal().is_none());
+    }
+
+    #[test]
+    fn terminal_events_reserve_delivery_when_the_sink_is_full() {
+        let runtime = SubagentRuntime::new();
+        runtime.register(request("session", "child-1")).unwrap();
+        runtime.register(request("session", "child-2")).unwrap();
+        let (sink, mut receiver) = mpsc::channel(1);
+        runtime.set_event_sink(sink);
+        // Fill the bounded sink: no capacity is left for anything else.
+        runtime.emit_activity(SubagentActivity::new(
+            "child-1",
+            "session",
+            SubagentActivityKind::Delta {
+                message_id: "message".into(),
+                sequence: 1,
+                text: "first".into(),
+            },
+        ));
+        assert!(runtime.complete("child-1", ChildOutcome::success("done")));
+        assert!(runtime.complete("child-2", ChildOutcome::success("also")));
+        let terminals: Vec<SubagentEvent> =
+            std::iter::from_fn(|| runtime.take_sink_terminal()).collect();
+        assert_eq!(terminals.len(), 2, "one reserved terminal per child");
+        assert!(terminals.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Completed(completion)
+                if completion.child_id == "child-1" && completion.final_message == "done"
+        )));
+        assert!(terminals.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Completed(completion) if completion.child_id == "child-2"
+        )));
+        // The reserved terminal never displaced or duplicated queued activity.
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SubagentEvent::Activity(activity) if activity.child_id == "child-1"
+        ));
+        assert!(receiver.try_recv().is_err());
+        assert!(runtime.take_sink_terminal().is_none());
+    }
+
+    #[test]
+    fn cancellation_is_delivered_while_the_sink_stays_full() {
+        let runtime = SubagentRuntime::new();
+        runtime.register(request("session", "child-1")).unwrap();
+        let (sink, mut receiver) = mpsc::channel(1);
+        runtime.set_event_sink(sink);
+        runtime.emit_activity(SubagentActivity::new(
+            "child-1",
+            "session",
+            SubagentActivityKind::Delta {
+                message_id: "message".into(),
+                sequence: 1,
+                text: "first".into(),
+            },
+        ));
+        // The card overflows the sink, so the child is cancelled. Its terminal
+        // must still reach the relay even though the sink remains full.
+        runtime.emit_child_card(SubagentCard {
+            child_id: "child-1".into(),
+            parent_session: "session".into(),
+            approval_id: uuid::Uuid::new_v4(),
+            card: ApprovalCard::Command {
+                command: "danger".into(),
+            },
+        });
+        assert_eq!(runtime.child_state("child-1"), Some(ChildState::Cancelled));
+        assert!(matches!(
+            runtime.take_sink_terminal(),
+            Some(SubagentEvent::Cancelled { child_id, .. }) if child_id == "child-1"
+        ));
+        assert!(receiver.try_recv().is_ok(), "queued activity is untouched");
+        assert!(runtime.take_sink_terminal().is_none());
+    }
+
+    #[test]
     fn event_sink_receives_cards_without_a_broadcast_subscriber() {
         let runtime = SubagentRuntime::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+        let (tx, mut rx) = mpsc::channel::<SubagentEvent>(32);
         runtime.set_event_sink(tx);
         runtime.emit_child_card(SubagentCard {
             child_id: "child-1".into(),

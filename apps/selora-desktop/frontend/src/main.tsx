@@ -16,6 +16,7 @@ import { App } from './app/App';
 import './styles/base.css';
 import './styles/animations.css';
 import './styles/shell.css';
+import './styles/theme-galaxy.css';
 import './styles/agent.css';
 import './styles/editor.css';
 

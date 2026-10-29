@@ -298,6 +298,7 @@ export type WorkflowFinishedEvent = {
   status?: 'completed' | 'failed' | 'stopped';
   tokens?: number;
   cost_usd?: number;
+  phase_usage?: WorkflowPhaseUsage[];
   error?: string | null;
   at?: string | null;
 };
@@ -1072,6 +1073,10 @@ export const workflowsStore: WorkflowsStore = {
             status,
             tokens: event.tokens ?? run.tokens,
             cost_usd: event.cost_usd ?? run.cost_usd,
+            phase_usage:
+              event.phase_usage && event.phase_usage.length > 0
+                ? phaseUsageRows(event.phase_usage)
+                : run.phase_usage,
             error: event.error ?? run.error,
             finished_at: at ?? run.finished_at,
             stop_requested: false,

@@ -9,6 +9,13 @@
 //! URLs keep their host but lose any userinfo, and credential-shaped
 //! `key=value` pairs are masked. Output is bounded.
 //!
+//! Every operation is bounded in wall-clock time ([`NETWORK_TIMEOUT`]): the
+//! child is polled rather than waited on forever, and a run that overruns is
+//! killed (with its transport helper) and reported as
+//! [`GitError::Timeout`]. Pipes are drained concurrently and captured with a
+//! fixed cap, so a chatty remote cannot exhaust memory and a full stderr pipe
+//! cannot deadlock the wait.
+//!
 //! Force is never used: `push` builds `refs/heads/<branch>:refs/heads/<branch>`
 //! and rejects force refspec syntax during branch-name validation.
 
@@ -16,10 +23,35 @@ use crate::branch::validate_branch_name;
 use crate::merge::ConflictEntry;
 use crate::{branch_name, GitError, GitRepo};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 /// The output bound for one network operation.
 pub const MAX_NETWORK_TEXT: usize = 2000;
+
+/// Wall-clock bound for one fetch / pull / push.
+///
+/// A dead remote, a stalled `ssh` helper or a credential agent waiting on a
+/// dialog would otherwise block the command forever. Three minutes covers a
+/// large fetch on a slow link; anything longer is reported as
+/// [`GitError::Timeout`] and the user can retry.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Bytes kept from each of git's two output streams. The rest is still read
+/// (and discarded) so git never blocks on a full pipe.
+pub const MAX_NETWORK_CAPTURE_BYTES: usize = 64 * 1024;
+
+/// How often the bounded wait re-checks the child.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// How long the pipe readers may take to finish after the child is gone.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// The hint attached to a timeout when git printed nothing useful.
+const TIMEOUT_HINT: &str =
+    "the remote did not answer in time; check the network, the remote URL and your credentials, \
+     then retry";
 
 /// Which network operation produced an outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,10 +84,22 @@ pub struct RemoteOutcome {
 
 impl GitRepo {
     /// Fetch from `remote` (default: the current branch's remote, else
-    /// `origin`, else the only configured remote).
+    /// `origin`, else the only configured remote). Bounded by
+    /// [`NETWORK_TIMEOUT`].
     pub fn fetch(&self, remote: Option<&str>) -> Result<RemoteOutcome, GitError> {
+        self.fetch_with_timeout(remote, NETWORK_TIMEOUT)
+    }
+
+    /// [`GitRepo::fetch`] with an explicit wall-clock bound. The wait polls the
+    /// child, so a run past `timeout` is killed and reported as
+    /// [`GitError::Timeout`] instead of hanging.
+    pub fn fetch_with_timeout(
+        &self,
+        remote: Option<&str>,
+        timeout: Duration,
+    ) -> Result<RemoteOutcome, GitError> {
         let remote = self.resolve_remote(remote)?;
-        let summary = self.run_git(RemoteOperation::Fetch, &remote, None)?;
+        let summary = self.run_git(RemoteOperation::Fetch, &remote, None, timeout)?;
         Ok(RemoteOutcome {
             operation: RemoteOperation::Fetch,
             remote,
@@ -66,11 +110,22 @@ impl GitRepo {
 
     /// Pull into the current branch. `branch` overrides the remote branch
     /// name (default: the checked-out branch). Merge conflicts are returned as
-    /// an outcome, not hidden behind a generic CLI failure.
+    /// an outcome, not hidden behind a generic CLI failure. Bounded by
+    /// [`NETWORK_TIMEOUT`].
     pub fn pull(
         &self,
         remote: Option<&str>,
         branch: Option<&str>,
+    ) -> Result<RemoteOutcome, GitError> {
+        self.pull_with_timeout(remote, branch, NETWORK_TIMEOUT)
+    }
+
+    /// [`GitRepo::pull`] with an explicit wall-clock bound.
+    pub fn pull_with_timeout(
+        &self,
+        remote: Option<&str>,
+        branch: Option<&str>,
+        timeout: Duration,
     ) -> Result<RemoteOutcome, GitError> {
         let remote = self.resolve_remote(remote)?;
         let branch = match branch {
@@ -80,7 +135,7 @@ impl GitRepo {
             }
             None => self.require_current_branch()?,
         };
-        let summary = self.run_git(RemoteOperation::Pull, &remote, Some(&branch))?;
+        let summary = self.run_git(RemoteOperation::Pull, &remote, Some(&branch), timeout)?;
         let conflicts = self.merge_conflicts()?;
         Ok(RemoteOutcome {
             operation: RemoteOperation::Pull,
@@ -91,10 +146,21 @@ impl GitRepo {
     }
 
     /// Push the current branch (or `branch`) to `remote`, never forced.
+    /// Bounded by [`NETWORK_TIMEOUT`].
     pub fn push(
         &self,
         remote: Option<&str>,
         branch: Option<&str>,
+    ) -> Result<RemoteOutcome, GitError> {
+        self.push_with_timeout(remote, branch, NETWORK_TIMEOUT)
+    }
+
+    /// [`GitRepo::push`] with an explicit wall-clock bound.
+    pub fn push_with_timeout(
+        &self,
+        remote: Option<&str>,
+        branch: Option<&str>,
+        timeout: Duration,
     ) -> Result<RemoteOutcome, GitError> {
         let remote = self.resolve_remote(remote)?;
         let branch = match branch {
@@ -107,7 +173,7 @@ impl GitRepo {
             }
             None => self.require_current_branch()?,
         };
-        let summary = self.run_git(RemoteOperation::Push, &remote, Some(&branch))?;
+        let summary = self.run_git(RemoteOperation::Push, &remote, Some(&branch), timeout)?;
         Ok(RemoteOutcome {
             operation: RemoteOperation::Push,
             remote,
@@ -180,6 +246,7 @@ impl GitRepo {
         operation: RemoteOperation,
         remote: &str,
         branch: Option<&str>,
+        timeout: Duration,
     ) -> Result<String, GitError> {
         // Fixed argv: program + argument vector, no shell, no interpolation of
         // paths or refs into a command string. `--` terminates options.
@@ -236,7 +303,7 @@ impl GitRepo {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let mut child = command.spawn().map_err(|err| GitError::Network {
+        let child = command.spawn().map_err(|err| GitError::Network {
             operation: operation.as_str(),
             message: if err.kind() == std::io::ErrorKind::NotFound {
                 "the `git` executable was not found on PATH".to_owned()
@@ -244,35 +311,10 @@ impl GitRepo {
                 sanitize_remote_text(&format!("cannot start git: {err}"))
             },
         })?;
-        // Drain both pipes concurrently: reading stdout to EOF first can
-        // deadlock when git fills the stderr pipe buffer (a chatty credential
-        // helper or a remote error).
-        let stdout_pipe = child.stdout.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.read_to_end(&mut bytes);
-                bytes
-            })
-        });
-        let stderr_pipe = child.stderr.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.read_to_end(&mut bytes);
-                bytes
-            })
-        });
-        let status = child.wait().map_err(|err| GitError::Network {
-            operation: operation.as_str(),
-            message: sanitize_remote_text(&format!("cannot wait for git: {err}")),
-        })?;
-        let stdout = stdout_pipe
-            .and_then(|handle| handle.join().ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default();
-        let stderr = stderr_pipe
-            .and_then(|handle| handle.join().ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default();
+        let run = run_captured(child, operation, timeout)?;
+        let status = run.status;
+        let stdout = run.stdout;
+        let stderr = run.stderr;
 
         if !status.success() {
             // A pull that produced conflicts is a merge state, not an opaque
@@ -312,6 +354,143 @@ impl GitRepo {
             summary
         })
     }
+}
+
+/// What one bounded git run produced.
+#[derive(Debug)]
+struct NetworkRun {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+/// Wait for `child`, capture both pipes with a fixed cap, and kill the whole
+/// run when `timeout` elapses.
+///
+/// The two readers are detached threads that send their bounded capture over a
+/// channel: a transport helper that inherited the pipes and outlived a timeout
+/// can therefore never make this function block on `join`.
+fn run_captured(
+    mut child: Child,
+    operation: RemoteOperation,
+    timeout: Duration,
+) -> Result<NetworkRun, GitError> {
+    let stdout_pipe = child.stdout.take().map(capture_stream);
+    let stderr_pipe = child.stderr.take().map(capture_stream);
+    let status = match wait_with_timeout(&mut child, timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            terminate_tree(&mut child);
+            // Partial output from a killed run still explains the timeout far
+            // better than a generic hint, so drain what the pipes already hold.
+            let stdout = drain(stdout_pipe);
+            let stderr = drain(stderr_pipe);
+            let detail = sanitize_remote_text(if stderr.trim().is_empty() {
+                &stdout
+            } else {
+                &stderr
+            });
+            return Err(GitError::Timeout {
+                operation: operation.as_str(),
+                seconds: timeout.as_secs().max(1),
+                detail: if detail.is_empty() {
+                    TIMEOUT_HINT.to_owned()
+                } else {
+                    detail
+                },
+            });
+        }
+        Err(err) => {
+            terminate_tree(&mut child);
+            return Err(GitError::Network {
+                operation: operation.as_str(),
+                message: sanitize_remote_text(&format!("cannot wait for git: {err}")),
+            });
+        }
+    };
+    Ok(NetworkRun {
+        status,
+        stdout: drain(stdout_pipe),
+        stderr: drain(stderr_pipe),
+    })
+}
+
+/// Poll a child until it exits or `timeout` elapses. `Ok(None)` means the
+/// deadline passed and the child is still running; the caller must kill it.
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(WAIT_POLL_INTERVAL.min(deadline - now));
+    }
+}
+
+/// Read one pipe to EOF, keeping at most [`MAX_NETWORK_CAPTURE_BYTES`].
+///
+/// The rest is read and discarded rather than left in the pipe: a program that
+/// fills its output pipe blocks forever, so "stop reading" is not an option.
+fn capture_stream(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut kept: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let room = MAX_NETWORK_CAPTURE_BYTES.saturating_sub(kept.len());
+                    kept.extend_from_slice(&buffer[..room.min(read)]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        // The receiver is gone after a timeout; sending then is a no-op.
+        let _ = sender.send(kept);
+    });
+    receiver
+}
+
+/// Collect one bounded capture, waiting at most [`PIPE_DRAIN_GRACE`]. A reader
+/// that never reaches EOF (a surviving grandchild holds the pipe) yields an
+/// empty string instead of blocking the request.
+fn drain(pipe: Option<Receiver<Vec<u8>>>) -> String {
+    match pipe {
+        Some(receiver) => receiver
+            .recv_timeout(PIPE_DRAIN_GRACE)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// Stop a timed-out run and reap it.
+///
+/// `child.kill` alone leaves git's transport helper (`ssh`, `git-remote-https`)
+/// alive holding the output pipes, so on Windows the process tree is killed
+/// first. Both steps are best-effort: the timeout error is reported either way.
+fn terminate_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", pid.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Remote names are restrictive by construction: no leading `-` (option
@@ -486,6 +665,98 @@ fn redact_token_prefixes(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process that stays alive far longer than any test timeout, so the
+    /// bounded-wait and kill paths are exercised without any network.
+    #[cfg(windows)]
+    fn silent_child() -> Child {
+        Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a silent child")
+    }
+
+    #[cfg(unix)]
+    fn silent_child() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a silent child")
+    }
+
+    #[test]
+    fn bounded_wait_reports_a_running_child_then_kill_reaps_it() {
+        let mut child = silent_child();
+        let started = Instant::now();
+        let status = wait_with_timeout(&mut child, Duration::from_millis(150)).expect("poll");
+        assert!(status.is_none(), "the child was still running");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait returned near its deadline, not at child exit"
+        );
+        terminate_tree(&mut child);
+        assert!(
+            child.try_wait().expect("reap").is_some(),
+            "a timed-out child is reaped, never left running"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_run_is_a_typed_error() {
+        let child = silent_child();
+        let started = Instant::now();
+        let error = run_captured(child, RemoteOperation::Pull, Duration::from_millis(150))
+            .expect_err("a silent git must time out");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the timeout is enforced, not waited out"
+        );
+        match &error {
+            GitError::Timeout {
+                operation,
+                seconds,
+                detail,
+            } => {
+                assert_eq!(*operation, "pull");
+                assert_eq!(*seconds, 1, "sub-second bounds report one second");
+                assert!(!detail.is_empty(), "a hint or captured output is attached");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        assert_eq!(error.code(), "network_timeout");
+    }
+
+    #[test]
+    fn capture_keeps_a_bounded_prefix_of_a_huge_stream() {
+        let bulk = vec![b'x'; MAX_NETWORK_CAPTURE_BYTES * 4];
+        let text = drain(Some(capture_stream(std::io::Cursor::new(bulk))));
+        assert_eq!(
+            text.len(),
+            MAX_NETWORK_CAPTURE_BYTES,
+            "the capture is capped"
+        );
+        assert!(
+            text.bytes().all(|byte| byte == b'x'),
+            "the kept bytes are the stream prefix"
+        );
+    }
+
+    #[test]
+    fn capture_does_not_block_when_the_writer_is_slow_to_close() {
+        // The reader is detached and the collector has its own grace, so a
+        // pipe that never reaches EOF cannot stall the request. `drain` on a
+        // channel that is never fed returns an empty string by design.
+        let (_sender, receiver) = mpsc::channel::<Vec<u8>>();
+        let started = Instant::now();
+        assert_eq!(drain(Some(receiver)), "");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     #[test]
     fn remote_name_validation_rejects_option_injection() {

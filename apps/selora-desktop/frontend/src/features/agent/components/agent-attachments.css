@@ -244,3 +244,6 @@
     transition: none;
   }
 }
+.agent-composer.is-drag-over {
+  outline: 1px solid var(--c-34d399);
+}

@@ -34,6 +34,7 @@ import {
 } from '../../bridge/bridge';
 import { currentEnvelopeContext, refreshBootstrap } from '../../app/app-store';
 import { agentStore } from '../agent/agent-store';
+import { visiblePresets } from './provider-visibility';
 import '../../styles/connect-modal.css';
 
 export type ProviderPreset = {
@@ -330,6 +331,15 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
   if (!open) return null;
 
   const currentPreset = PROVIDER_PRESETS.find((p) => p.id === selectedPreset) || PROVIDER_PRESETS[0];
+  // Settings > AI Gateway: disabled providers are hidden from the preset
+  // grid. The currently selected provider always stays visible so an open
+  // session (or a stored base URL) is never silently switched.
+  const selectablePresets = visiblePresets(
+    PROVIDER_PRESETS,
+    bootstrap.settings.disabled_providers ?? [],
+    selectedPreset,
+  );
+  const hiddenProviderCount = PROVIDER_PRESETS.length - selectablePresets.length;
   const docsUrl = currentPreset.docsUrl ?? '';
   const docsLinkHost = docsHost(docsUrl);
   const docsAllowed = isAllowedDocsUrl(docsUrl);
@@ -607,7 +617,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                 role="group"
                 aria-labelledby="provider-preset-label"
               >
-                {PROVIDER_PRESETS.map((preset) => {
+                {selectablePresets.map((preset) => {
                   const isSelected = selectedPreset === preset.id;
                   return (
                     <button
@@ -640,6 +650,12 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                   );
                 })}
               </div>
+              {hiddenProviderCount > 0 ? (
+                <p className="connect-label" role="note">
+                  {hiddenProviderCount} provider{hiddenProviderCount === 1 ? '' : 's'} hidden by
+                  Settings &gt; AI Gateway. Re-enable it under Assistant providers.
+                </p>
+              ) : null}
             </div>
 
             {/* Gateway Base URL */}

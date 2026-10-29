@@ -81,6 +81,13 @@ export type SettingsView = {
   editor_word_wrap: boolean;
   /** Check for a newer release once per launch (update prompt). */
   check_for_updates?: boolean;
+  /** Providers turned off in Settings > AI Gateway (ids from the Connect presets). */
+  disabled_providers?: string[];
+  /**
+   * Risky agent shell commands need this explicit workspace grant. Commands
+   * on the read-only allowlist run regardless.
+   */
+  workspace_trusted?: boolean;
 };
 
 /** The backend-supported writable subset of `SettingsView` (SettingsPatchDto). */
@@ -95,6 +102,13 @@ export type SettingsPatch = {
   keybind_toggle_chat?: string;
   keybind_save?: string;
   check_for_updates?: boolean;
+  /**
+   * Replace the disabled-provider list. `[]` re-enables every provider;
+   * omitting the field leaves the stored list untouched.
+   */
+  disabled_providers?: string[];
+  /** Grant or revoke risky agent shell commands for this workspace. */
+  workspace_trusted?: boolean;
 };
 
 // --- DTOs referenced by the full FrontendEvent union ------------------------
@@ -594,6 +608,7 @@ export type WorkflowFinishedPayload = {
   tokens: number;
   cost_usd: number;
   max_cost_usd: number;
+  phase_usage?: WorkflowPhaseUsage[];
   error?: string;
 };
 
@@ -674,7 +689,8 @@ export type FrontendCommand =
   | { type: 'terminal_input'; payload: { terminal_id: Id; data: string } }
   | { type: 'terminal_resize'; payload: { terminal_id: Id; cols: number; rows: number } }
   | { type: 'terminal_close'; payload: { terminal_id: Id } }
-  | { type: 'open_external'; payload: { url: string } };
+  | { type: 'open_external'; payload: { url: string } }
+  | { type: 'open_logs' };
 
 export type RequestEnvelope = {
   protocol_version: number;
@@ -886,6 +902,10 @@ export const restartLsp = (language: string, ctx: EnvelopeContext): Promise<unkn
 
 export const openExternal = (url: string, ctx: EnvelopeContext): Promise<unknown> =>
   dispatchZ2Command({ type: 'open_external', payload: { url } }, ctx);
+
+/** P2: open the app-data log directory (rotating panic records) in the OS file manager. */
+export const openLogs = (ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'open_logs' }, ctx);
 
 export const refreshTree = (ctx: EnvelopeContext): Promise<unknown> =>
   dispatchZ2Command({ type: 'refresh_tree' }, ctx);

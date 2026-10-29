@@ -2,7 +2,10 @@
 
 mod adapter;
 mod commands;
+mod crash_log;
 mod events;
+mod explorer;
+mod hot_exit;
 mod lsp_bridge;
 mod security;
 mod sessions;
@@ -85,14 +88,10 @@ fn main() {
     // Note: Do not bind a restrictive JobObject here without breakaway flags;
     // WebView2 creates its own child process JobObjects and fails with 0x800700AA if restricted.
 
-    std::panic::set_hook(Box::new(|info| {
-        let log_path = std::env::temp_dir().join("selora_last_panic.log");
-        let trace = format!(
-            "PANIC: {info}\nBacktrace: {:?}",
-            std::backtrace::Backtrace::capture()
-        );
-        let _ = std::fs::write(log_path, trace);
-    }));
+    // Rotating panic records live in `%APPDATA%\selora-ide\logs\selora.log`.
+    // The hook never touches editor buffers: saving from an unwinding thread is
+    // unsafe, so it logs that fact instead (see `crash_log`).
+    crash_log::install_panic_hook();
 
     log_boot("main() started");
     let state = state::DesktopState::new();
@@ -194,9 +193,27 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 engine.connect_probe(log, handle).await;
             });
+
+            // P1 hot-exit: a 2 s safety-net snapshot of dirty buffers. Edits
+            // also capture immediately from the command path; this timer
+            // covers a missed event and a long idle dirty state. The write
+            // itself runs on the hot-exit writer thread, never on the UI.
+            let hot_exit_state = app.state::<state::DesktopState>().inner().clone();
+            let _ = std::thread::Builder::new()
+                .name("selora-hot-exit-timer".into())
+                .spawn(move || {
+                    hot_exit_state.hot_exit_prune_stale();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        hot_exit_state.hot_exit_capture();
+                    }
+                });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            explorer::explorer_create_entry,
+            explorer::explorer_rename_entry,
+            explorer::explorer_delete_entry,
             commands::get_bootstrap_state,
             commands::dispatch_command,
             commands::frontend_ready,
@@ -211,5 +228,11 @@ fn main() {
             updates::install_update
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Selora desktop shell");
+        .map_err(|error| {
+            // No window and no IPC left to report through: write the rotating
+            // log and exit non-zero instead of panicking out of `main`.
+            crash_log::record_fatal(&format!("The desktop shell stopped: {error}"));
+            std::process::exit(1);
+        })
+        .ok();
 }

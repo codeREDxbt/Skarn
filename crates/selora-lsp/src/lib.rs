@@ -83,10 +83,13 @@ pub mod position;
 mod registry;
 mod uri;
 
-pub use client::{spawn_process, ClientEvent, LaunchedServer, LspClient, ServerStatus};
+pub use client::{
+    spawn_process, ClientEvent, LaunchedServer, LspClient, ServerStatus, REQUEST_TIMEOUT,
+};
 pub use manager::{
     spawn_manager, Launcher, LspCompletionItem, LspDiagnostic, LspEffect, LspEvent, LspLocation,
-    LspManagerConfig, LspPosition, LspRange, LspSeverity, Notify, DEBOUNCE,
+    LspManagerConfig, LspPosition, LspRange, LspSeverity, Notify, DEBOUNCE, MAX_RESTARTS,
+    MAX_RESTART_DELAY, RESTART_BASE_DELAY, STABLE_AFTER,
 };
 pub use registry::{
     find_in_dirs, find_on_path, LanguageId, LspRegistry, LspServerPaths, ServerSpec,

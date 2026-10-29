@@ -61,6 +61,11 @@ pub(crate) const MAX_OUTPUT_PENDING_BYTES: usize = 64 * 1024;
 pub(crate) const OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// Largest `TerminalInput.data` accepted in one command.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
+/// How long `close`/`close_all` wait for a killed tree to be reaped before
+/// returning. The kill is already issued at that point; the wait only makes
+/// `close` a proof of teardown instead of a signal.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const CLOSE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// ConPTY size bounds (a zero would make the console invalid).
 pub(crate) const MIN_TERMINAL_COLS: u16 = 1;
 pub(crate) const MAX_TERMINAL_COLS: u16 = 1000;
@@ -413,6 +418,10 @@ mod platform {
         tree: ProcessTree,
         /// Set on close or exit; the reader/flusher stop emitting.
         stop: Arc<AtomicBool>,
+        /// Set by the waiter once the child has been reaped and the registry
+        /// entry removed. `close` waits on it (bounded) so a returned close
+        /// means the tree is really gone, not merely signalled.
+        exited: Arc<AtomicBool>,
     }
 
     /// The live-session registry. Cloned into each waiter thread so a natural
@@ -541,6 +550,7 @@ mod platform {
                 cwd: cwd.to_string_lossy().to_string(),
             };
             let stop = Arc::new(AtomicBool::new(false));
+            let exited = Arc::new(AtomicBool::new(false));
             let pending = Arc::new(Mutex::new(OutputBatcher::new(Instant::now())));
             let session = Arc::new(Session {
                 master: Mutex::new(pair.master),
@@ -548,12 +558,25 @@ mod platform {
                 killer: Mutex::new(killer),
                 tree,
                 stop: Arc::clone(&stop),
+                exited: Arc::clone(&exited),
             });
 
             // Register before the created event and before any thread can emit,
-            // so a frontend that reacts by closing finds the session.
-            self.lock_sessions()
-                .insert(terminal_id.clone(), Arc::clone(&session));
+            // so a frontend that reacts by closing finds the session. The cap is
+            // re-checked under the same lock as the insert: two concurrent
+            // creates cannot both pass the early check and exceed the limit.
+            {
+                let mut sessions = self.lock_sessions();
+                if sessions.len() >= self.max_sessions {
+                    drop(sessions);
+                    // Nothing is registered yet, so tear the fresh child down
+                    // here; dropping the session closes the job as well.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(limit_reached(self.max_sessions));
+                }
+                sessions.insert(terminal_id.clone(), Arc::clone(&session));
+            }
 
             emit(FrontendEvent::TerminalCreated(created.clone()));
 
@@ -566,6 +589,7 @@ mod platform {
             let reader_stop = Arc::clone(&stop);
             let flusher_stop = Arc::clone(&stop);
             let waiter_stop = Arc::clone(&stop);
+            let waiter_exited = Arc::clone(&exited);
             let waiter_id = terminal_id.clone();
             let reader_id = terminal_id.clone();
             let flusher_id = terminal_id.clone();
@@ -615,6 +639,9 @@ mod platform {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .remove(&waiter_id);
+                // Last: `close` waits on this, so it must mean "reaped and
+                // deregistered", not merely "kill signal sent".
+                waiter_exited.store(true, Ordering::SeqCst);
             });
 
             Ok(created)
@@ -662,7 +689,13 @@ mod platform {
         }
 
         /// Close one session: remove it first (so a racing create sees the free
-        /// slot), then kill the whole job and the direct child.
+        /// slot), then kill the whole job and the direct child, then wait
+        /// (bounded) for the tree to be reaped.
+        ///
+        /// Idempotent in effect: the kill is safe to repeat, and an id that is
+        /// already gone (a natural exit, a workspace switch, an earlier close)
+        /// is the typed `terminal_not_found` rather than a second kill or a
+        /// panic. A caller that retries close therefore never leaks a process.
         pub(crate) fn close(&self, terminal_id: &str) -> Result<(), ProtocolErrorDto> {
             let session = {
                 let mut sessions = self.lock_sessions();
@@ -670,6 +703,7 @@ mod platform {
             }
             .ok_or_else(|| not_found(terminal_id))?;
             kill_session(&session);
+            wait_for_exit(&session, CLOSE_EXIT_TIMEOUT);
             Ok(())
         }
 
@@ -681,8 +715,18 @@ mod platform {
                 sessions.drain().map(|(_, session)| session).collect()
             };
             let count = drained.len();
-            for session in drained {
-                kill_session(&session);
+            for session in &drained {
+                kill_session(session);
+            }
+            // Wait once for every session, not once per session: the kills were
+            // all issued before the first wait.
+            let deadline = Instant::now() + CLOSE_EXIT_TIMEOUT;
+            while Instant::now() < deadline
+                && drained
+                    .iter()
+                    .any(|session| !session.exited.load(Ordering::SeqCst))
+            {
+                thread::sleep(Duration::from_millis(5));
             }
             count
         }
@@ -753,6 +797,16 @@ mod platform {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .kill();
+    }
+
+    /// Wait (bounded) for the waiter to reap and deregister the session.
+    /// A timeout is not an error: the tree was signalled, and the waiter still
+    /// owns the cleanup.
+    fn wait_for_exit(session: &Session, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline && !session.exited.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn emit_chunks(emit: &Emit, terminal_id: &str, chunks: Vec<String>) {
@@ -1296,6 +1350,36 @@ mod tests {
         assert_eq!(manager.len(), 2);
         manager.close_all();
         assert_eq!(manager.len(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn close_is_typed_and_never_leaves_a_session_behind() {
+        let workspace = workspace();
+        let (emit, events) = collector();
+        let manager = TerminalManager::new();
+        let created = create(&manager, &emit, workspace.path(), &events);
+        manager.close(&created.terminal_id).expect("first close");
+        assert_eq!(manager.len(), 0, "the closed session is deregistered");
+        // The kill was synchronous enough to report the shell's exit.
+        wait_for_exit(&events, Duration::from_secs(10)).expect("the shell reported exit");
+        assert_eq!(
+            manager
+                .input(&created.terminal_id, "x")
+                .expect_err("the session is gone")
+                .code,
+            "terminal_not_found"
+        );
+        // A retried close repeats the same typed answer: no second kill, no
+        // panic, no leaked entry.
+        assert_eq!(
+            manager
+                .close(&created.terminal_id)
+                .expect_err("already closed")
+                .code,
+            "terminal_not_found"
+        );
+        assert_eq!(manager.close_all(), 0);
     }
 
     #[cfg(windows)]

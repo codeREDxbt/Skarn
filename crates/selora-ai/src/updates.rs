@@ -436,9 +436,14 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let info = check_latest_release_at(&server.uri(), "0.1.0").await.expect("ok");
+        let info = check_latest_release_at(&server.uri(), "0.1.0")
+            .await
+            .expect("ok");
         assert_eq!(info.installer.unwrap().name, "selora-installer-v1.exe");
-        assert_eq!(info.checksum.unwrap().name, "selora-installer-v1.exe.sha256");
+        assert_eq!(
+            info.checksum.unwrap().name,
+            "selora-installer-v1.exe.sha256"
+        );
     }
 
     #[test]

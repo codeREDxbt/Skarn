@@ -14,13 +14,15 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
+    time::{Duration, Instant},
 };
 use tauri::Emitter;
 use url::Url;
 use uuid::Uuid;
 
+use crate::hot_exit;
 use crate::lsp_bridge::LspBridge;
 use crate::sessions::{ApiKeySource, EngineConfig, SessionEngine};
 use crate::workspace::{Workspace, WorkspaceError};
@@ -81,6 +83,275 @@ fn workspace_id_for(root: &std::path::Path) -> WorkspaceId {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     WorkspaceId::new(format!("ws_{hash:016x}")).expect("hex id is valid")
+}
+
+/// How long a snapshot for a workspace that is not currently open is kept
+/// before the background pruner removes it. Recovery data must survive a
+/// weekend; a week also bounds the disk a stale root can occupy after the user
+/// stops opening it.
+const HOT_EXIT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long the close path waits for an in-flight background snapshot before
+/// it writes the final snapshot itself. Bounded so a slow disk can never hold
+/// the window open indefinitely.
+const HOT_EXIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// An isolated snapshot store for one hermetic test state, so no test ever
+/// writes the real `%APPDATA%\selora-ide\hot-exit` directory.
+#[cfg(test)]
+fn test_hot_exit_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("selora-hot-exit-state-{}", Uuid::new_v4()))
+}
+
+/// Cached digest of a file's saved baseline.
+///
+/// The length and modification time only decide whether the cached digest can
+/// be reused; restore compares the actual content digest. A changed file with
+/// an unchanged stat can therefore only make a snapshot be discarded, never
+/// silently restore over newer disk text.
+struct HotExitDigest {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    digest: String,
+}
+
+/// One unit of background hot-exit work.
+enum HotExitJob {
+    Snapshot {
+        app_data_dir: PathBuf,
+        root: PathBuf,
+        dirty: Vec<hot_exit::DirtyBuffer>,
+    },
+    Prune {
+        app_data_dir: PathBuf,
+    },
+}
+
+struct HotExitWriterState {
+    /// The latest job only: an older queued snapshot is superseded instead of
+    /// building a backlog while the user types.
+    pending: Option<HotExitJob>,
+    writing: bool,
+}
+
+/// Serializes hot-exit I/O onto one background thread.
+///
+/// `submit` only swaps the latest job into a slot, so the UI thread never
+/// waits for a snapshot write. A failed write is dropped: recovery is best
+/// effort and must never fail an edit or a close.
+struct HotExitWriter {
+    state: Mutex<HotExitWriterState>,
+    signal: Condvar,
+    started: std::sync::OnceLock<()>,
+    /// Fingerprint of the last successful snapshot per root, so an unchanged
+    /// dirty set is not rewritten on every timer tick.
+    written: Mutex<HashMap<PathBuf, u64>>,
+}
+
+impl HotExitWriter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(HotExitWriterState {
+                pending: None,
+                writing: false,
+            }),
+            signal: Condvar::new(),
+            started: std::sync::OnceLock::new(),
+            written: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Queue `job`, replacing any job that has not started yet.
+    fn submit(self: &Arc<Self>, job: HotExitJob) {
+        self.ensure_started();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.pending = Some(job);
+        }
+        self.signal.notify_one();
+    }
+
+    fn ensure_started(self: &Arc<Self>) {
+        self.started.get_or_init(|| {
+            let worker = Arc::clone(self);
+            let _ = std::thread::Builder::new()
+                .name("selora-hot-exit".into())
+                .spawn(move || worker.run());
+        });
+    }
+
+    fn run(self: Arc<Self>) {
+        loop {
+            let job = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                loop {
+                    if let Some(job) = state.pending.take() {
+                        state.writing = true;
+                        break job;
+                    }
+                    state = self
+                        .signal
+                        .wait(state)
+                        .unwrap_or_else(|poison| poison.into_inner());
+                }
+            };
+            self.perform(job);
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.writing = false;
+            self.signal.notify_all();
+        }
+    }
+
+    fn perform(&self, job: HotExitJob) {
+        match job {
+            HotExitJob::Snapshot {
+                app_data_dir,
+                root,
+                dirty,
+            } => {
+                let fingerprint = hot_exit_fingerprint(&root, &dirty);
+                if !dirty.is_empty()
+                    && self
+                        .written
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .get(&root)
+                        == Some(&fingerprint)
+                {
+                    return;
+                }
+                // Errors are intentionally ignored: an unwritable app-data
+                // directory must not affect the editor.
+                if let Ok(report) = hot_exit::save(&app_data_dir, &root, &dirty) {
+                    let mut written = self
+                        .written
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if report.saved > 0 {
+                        written.insert(root, fingerprint);
+                    } else {
+                        written.remove(&root);
+                    }
+                }
+            }
+            HotExitJob::Prune { app_data_dir } => {
+                let _ =
+                    hot_exit::prune_stale(&app_data_dir, HOT_EXIT_MAX_AGE, hot_exit::now_unix_ms());
+            }
+        }
+    }
+
+    /// Drop queued work and wait (bounded) for an in-flight write. The close
+    /// and workspace-switch paths then write the final snapshot
+    /// synchronously, so an older background write cannot land after it.
+    fn quiesce(&self) {
+        let deadline = Instant::now() + HOT_EXIT_QUIESCE_TIMEOUT;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.pending = None;
+        while state.writing {
+            if Instant::now() >= deadline {
+                return;
+            }
+            let (guard, _) = self
+                .signal
+                .wait_timeout(state, Duration::from_millis(25))
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = guard;
+        }
+    }
+
+    /// Wait until the latest queued job (and any write it triggers) finishes.
+    #[cfg(test)]
+    fn flush(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while state.pending.is_some() || state.writing {
+            if Instant::now() >= deadline {
+                return;
+            }
+            let (guard, _) = self
+                .signal
+                .wait_timeout(state, Duration::from_millis(25))
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = guard;
+        }
+    }
+}
+
+/// Stable fingerprint of a dirty set. Buffer versions rise on every text
+/// change and the digest covers an external-change rebase, so an identical
+/// fingerprint means the snapshot on disk is already current.
+fn hot_exit_fingerprint(root: &std::path::Path, dirty: &[hot_exit::DirtyBuffer]) -> u64 {
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    mix(&mut hash, root.to_string_lossy().as_bytes());
+    for buffer in dirty {
+        mix(&mut hash, buffer.path.as_bytes());
+        mix(&mut hash, &buffer.version.to_le_bytes());
+        mix(&mut hash, &(buffer.text.len() as u64).to_le_bytes());
+        match buffer.disk_digest.as_deref() {
+            Some(digest) => {
+                mix(&mut hash, &[1]);
+                mix(&mut hash, digest.as_bytes());
+            }
+            None => mix(&mut hash, &[0]),
+        }
+    }
+    hash
+}
+
+/// What restoring mismatched snapshots produced: buffers the UI must publish
+/// and the warnings (disk changed, file gone, unreadable) it must show.
+#[derive(Default)]
+struct HotExitRestoreReport {
+    restored: Vec<BufferSnapshotDto>,
+    warnings: Vec<String>,
+}
+
+/// Replace the whole document with `replacement`. Used only to install a
+/// hot-exit snapshot into a freshly opened (clean) buffer, so the saved
+/// baseline stays the disk text and the buffer reports dirty.
+fn hot_exit_replace_all(current: &str, replacement: &str) -> selora_protocol::TextChange {
+    let mut line = 0_u32;
+    let mut last_line_start = 0_usize;
+    for (index, byte) in current.bytes().enumerate() {
+        if byte == b'\n' {
+            line = line.saturating_add(1);
+            last_line_start = index + 1;
+        }
+    }
+    let last_line = &current[last_line_start..];
+    let last_line = last_line.strip_suffix('\r').unwrap_or(last_line);
+    let utf16_column = last_line
+        .chars()
+        .map(|character| character.len_utf16() as u32)
+        .sum();
+    selora_protocol::TextChange {
+        start: selora_protocol::TextPosition::default(),
+        end: selora_protocol::TextPosition { line, utf16_column },
+        replacement: replacement.to_owned(),
+    }
 }
 
 /// The history a durable journal can prove: its explicit per-step, report and
@@ -679,7 +950,23 @@ fn settings_view(settings: &selora_settings::Settings) -> SettingsViewDto {
         editor_tab_size: settings.editor.tab_size,
         editor_word_wrap: settings.editor.word_wrap,
         check_for_updates: settings.ui.check_for_updates,
+        disabled_providers: known_disabled_providers(&settings.selora.disabled_providers),
+        workspace_trusted: settings.agent.workspace_trusted,
     }
+}
+
+/// Settings > AI Gateway provider gate, normalized for the wire: unknown ids
+/// (a hand-edited settings.json) are dropped and duplicates collapse, in the
+/// user's order. The persisted file is never rewritten here; the next accepted
+/// patch persists the normalized list.
+fn known_disabled_providers(ids: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if selora_settings::is_known_provider(id) && !kept.iter().any(|seen| seen == id) {
+            kept.push(id.clone());
+        }
+    }
+    kept
 }
 
 /// P1: the `lsp.*` settings as the registry consumes them. Empty path
@@ -1046,6 +1333,7 @@ pub(crate) struct WorkflowHostSettings {
     pub(crate) model: String,
     pub(crate) model_metadata: Option<selora_ai::Model>,
     pub(crate) caps: selora_ai::TurnCaps,
+    pub(crate) workspace_trusted: bool,
     pub(crate) on_approval: crate::workflows_host::WorkflowApprovalHandler,
     /// Durable run identity for the per-run tool-effect ledger.
     pub(crate) durable_run_id: String,
@@ -1073,6 +1361,7 @@ fn production_workflow_host(root: PathBuf, settings: WorkflowHostSettings) -> Wo
         settings.model,
     )
     .with_turn_caps(settings.caps)
+    .with_workspace_trusted(settings.workspace_trusted)
     .with_tool_effect_ledger(
         selora_workflow::tool_effects_path(
             &ledger_root,
@@ -1421,6 +1710,7 @@ impl<R: tauri::Runtime> WorkflowStream<R> {
                     tokens: report.tokens,
                     cost_usd: report.cost_usd,
                     max_cost_usd: self.max_cost_usd,
+                    phase_usage: self.phase_usage(),
                     error: report.error,
                 }));
                 // Terminal event recorded: files the run wrote are now safe to
@@ -1455,11 +1745,31 @@ impl<R: tauri::Runtime> WorkflowStream<R> {
             tokens,
             cost_usd,
             max_cost_usd: self.max_cost_usd,
+            phase_usage: self.phase_usage(),
             error,
         }));
         // A worker that never reached the engine's `Finished` still may have
         // written files before the panic/pre-Run rejection.
         self.refresh_workspace_buffers();
+    }
+
+    /// Read phase-attributed receipt deltas after the engine has journaled its
+    /// terminal report. This keeps live panels truthful without estimating from
+    /// the run-wide total, while bootstrap remains the durable fallback.
+    fn phase_usage(&self) -> Vec<selora_protocol::WorkflowPhaseUsageDto> {
+        let run_id = self
+            .run_id
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let Some(run_id) = run_id else {
+            return Vec::new();
+        };
+        let id = selora_workflow::RunId::from(run_id.as_str());
+        let Ok(journal) = selora_workflow::journal::Journal::load(&self.workspace_root, id) else {
+            return Vec::new();
+        };
+        workflow_run_history(&journal).phase_usage
     }
 }
 
@@ -1716,10 +2026,24 @@ pub struct DesktopState {
     layout_store: Arc<LayoutStore>,
     /// The Z3 session engine (chat + agent turns) behind the agent dock.
     sessions: Arc<SessionEngine>,
+    /// The workspace-trust value the session engine was constructed with.
+    /// `agent.workspace_trusted` is read once at startup, so a live settings
+    /// change must be reflected by refusing to start/park-approve an agent
+    /// turn until Selora restarts (fail closed, never stale-allow).
+    engine_workspace_trusted: bool,
     /// Phase Z4: the open workspace (file tree, buffers, Git). None until
     /// the folder picker succeeds; every workspace command answers the typed
     /// no_workspace error while it is unset.
     workspace: Arc<Mutex<Option<Workspace>>>,
+    /// Lock-free mirror of the open workspace's canonical root. The workspace
+    /// mutex can be held for a whole search scan or git network call, so the
+    /// commands that must cancel/coordinate work *before* taking it read the
+    /// root here instead. Kept in step with `workspace` by attach/detach.
+    workspace_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Monotonic id of the newest accepted search. A finished scan publishes
+    /// only while its id is still current, so two overlapping searches cannot
+    /// show the older result set after the newer one.
+    search_epoch: Arc<AtomicU64>,
     /// Phase 9 session slice: the buffer the user actually selected. The
     /// bootstrap prefers it over the first buffer in path order. Cleared when
     /// the buffer closes or a different workspace opens.
@@ -1744,6 +2068,15 @@ pub struct DesktopState {
     /// Phase 10: the live ConPTY sessions. A workspace switch/close and the
     /// app exit call `close_all`, which kills every session's process tree.
     terminals: crate::terminal::TerminalManager,
+    /// P1 hot-exit: the app-data root the snapshot store lives under
+    /// (`<settings dir>/hot-exit`). Tests point it at a tempdir.
+    hot_exit_dir: Arc<Mutex<PathBuf>>,
+    /// P1 hot-exit: the single background writer. Never blocks a command.
+    hot_exit_writer: Arc<HotExitWriter>,
+    /// P1 hot-exit: the saved-baseline digest per absolute buffer path. The
+    /// snapshot stores this digest so restore can prove the disk file did not
+    /// move on.
+    hot_exit_digests: Arc<Mutex<HashMap<PathBuf, HotExitDigest>>>,
 }
 
 /// How [`DesktopState::launch_workflow`] should open the durable run.
@@ -1775,7 +2108,23 @@ impl DesktopState {
             .filter(|root| !root.as_os_str().is_empty() && root.is_dir())
             .or_else(|| std::env::current_dir().ok());
         if let Some(root) = boot_root {
-            let _ = state.attach_workspace(root);
+            if state.attach_workspace(root).is_ok() {
+                // Recover unsaved edits before the window asks for its first
+                // bootstrap. There is no `AppHandle` yet, so warnings are
+                // recorded (replayed with the boot events) and the restored
+                // buffers ride the bootstrap.
+                let report = state.hot_exit_restore_workspace();
+                for warning in report.warnings {
+                    state.log.push(
+                        FrontendEvent::Toast(ToastDto {
+                            severity: ToastSeverity::Warning,
+                            message: warning,
+                        }),
+                        None,
+                        None,
+                    );
+                }
+            }
         }
         state
     }
@@ -1787,13 +2136,21 @@ impl DesktopState {
     /// `snapshot_sequence`.
     pub fn from_settings_path(settings_path: PathBuf) -> Self {
         let layout_store = Arc::new(LayoutStore::new(settings_path.clone()));
+        // Hot-exit snapshots live beside `settings.json` in the app-data
+        // root (`<app-data>/hot-exit`); the settings path is the one place
+        // that already resolves `SELORA_SETTINGS_DIR` and `%APPDATA%`.
+        let hot_exit_dir = settings_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         // Same semantics as `Settings::load_or_default`: fall back to the
         // defaults and keep the error for the caller to toast.
         let (settings, load_error) = match selora_settings::Settings::load_from(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (selora_settings::Settings::default(), Some(error)),
         };
-        let state = Self::from_parts(settings, layout_store, ApiKeySource::Keyring);
+        let state = Self::from_parts(settings, layout_store, ApiKeySource::Keyring, hot_exit_dir);
         if let Some(error) = load_error {
             state.log.push(
                 FrontendEvent::Toast(ToastDto {
@@ -1820,6 +2177,7 @@ impl DesktopState {
             settings,
             Arc::new(LayoutStore::new(selora_settings::Settings::default_path())),
             ApiKeySource::Fixed(Some("sk-gw-desktop-test-key".into())),
+            test_hot_exit_dir(),
         )
     }
 
@@ -1830,6 +2188,7 @@ impl DesktopState {
             settings,
             Arc::new(LayoutStore::new(selora_settings::Settings::default_path())),
             ApiKeySource::Fixed(None),
+            test_hot_exit_dir(),
         )
     }
 
@@ -1837,6 +2196,7 @@ impl DesktopState {
         settings: selora_settings::Settings,
         layout_store: Arc<LayoutStore>,
         key_source: ApiKeySource,
+        hot_exit_dir: PathBuf,
     ) -> Self {
         let core_instance_id =
             CoreInstanceId::new(Uuid::new_v4().to_string()).expect("uuid is valid");
@@ -1854,7 +2214,10 @@ impl DesktopState {
                 agent: (*settings.agent).clone(),
                 key_source,
             })),
+            engine_workspace_trusted: settings.agent.workspace_trusted,
             workspace: Arc::new(Mutex::new(None)),
+            workspace_root: Arc::new(Mutex::new(None)),
+            search_epoch: Arc::new(AtomicU64::new(0)),
             active_buffer: Arc::new(Mutex::new(None)),
             lsp: Arc::new(Mutex::new(None)),
             lsp_paths,
@@ -1864,6 +2227,9 @@ impl DesktopState {
                 Arc::new(production_workflow_host) as WorkflowHostFactory
             )),
             terminals: crate::terminal::TerminalManager::new(),
+            hot_exit_dir: Arc::new(Mutex::new(hot_exit_dir)),
+            hot_exit_writer: HotExitWriter::new(),
+            hot_exit_digests: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1878,10 +2244,336 @@ impl DesktopState {
             .unwrap_or_else(|poison| poison.into_inner()) = factory;
     }
 
+    /// The app-data root the hot-exit store lives under.
+    fn hot_exit_app_data_dir(&self) -> PathBuf {
+        self.hot_exit_dir
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// Point this state's hot-exit store at an isolated directory (tests).
+    #[cfg(test)]
+    fn set_hot_exit_dir(&self, dir: PathBuf) {
+        *self
+            .hot_exit_dir
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = dir;
+    }
+
+    /// Remember the digest of `text` as the saved baseline for `absolute`.
+    /// The metadata is captured from disk after the write, so a later stat
+    /// can reuse the digest without re-reading the file.
+    fn hot_exit_record_digest(&self, absolute: &std::path::Path, text: &str) {
+        let digest = hot_exit::digest_bytes(text.as_bytes());
+        self.hot_exit_store_digest(absolute.to_path_buf(), Some(digest));
+    }
+
+    fn hot_exit_store_digest(&self, absolute: PathBuf, digest: Option<String>) {
+        let mut digests = self
+            .hot_exit_digests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(digest) = digest else {
+            digests.remove(&absolute);
+            return;
+        };
+        // A missing stat only removes the cache entry; the next capture
+        // re-reads the file.
+        let Ok(metadata) = std::fs::metadata(&absolute) else {
+            digests.remove(&absolute);
+            return;
+        };
+        digests.insert(
+            absolute,
+            HotExitDigest {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                digest,
+            },
+        );
+    }
+
+    /// The saved-baseline digest for `absolute`, reusing the cached value
+    /// only while the file's length and modification time are unchanged.
+    fn hot_exit_digest(&self, absolute: &std::path::Path) -> Option<String> {
+        let metadata = std::fs::metadata(absolute).ok()?;
+        let modified = metadata.modified().ok();
+        {
+            let digests = self
+                .hot_exit_digests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(cached) = digests.get(absolute) {
+                if cached.len == metadata.len() && cached.modified == modified {
+                    return Some(cached.digest.clone());
+                }
+            }
+        }
+        let bytes = std::fs::read(absolute).ok()?;
+        let digest = hot_exit::digest_bytes(&bytes);
+        self.hot_exit_digests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(
+                absolute.to_path_buf(),
+                HotExitDigest {
+                    len: metadata.len(),
+                    modified,
+                    digest: digest.clone(),
+                },
+            );
+        Some(digest)
+    }
+
+    /// The dirty buffers and the root they belong to, with the disk digest of
+    /// each saved baseline. The workspace lock is released before the digest
+    /// lookups, so a large save cannot stall another workspace command.
+    fn hot_exit_dirty_buffers(&self) -> Option<(PathBuf, Vec<hot_exit::DirtyBuffer>)> {
+        let (root, buffers) = {
+            let guard = self
+                .workspace
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let workspace = guard.as_ref()?;
+            (workspace.root().to_path_buf(), workspace.buffers())
+        };
+        let dirty = buffers
+            .into_iter()
+            .filter(|buffer| buffer.dirty)
+            .map(|buffer| {
+                let absolute = root.join(buffer.path.as_str());
+                hot_exit::DirtyBuffer {
+                    path: buffer.path.as_str().to_owned(),
+                    version: buffer.version,
+                    text: buffer.text,
+                    selection: buffer.selection,
+                    disk_digest: self.hot_exit_digest(&absolute),
+                }
+            })
+            .collect();
+        Some((root, dirty))
+    }
+
+    /// Queue a snapshot of the current dirty buffers. Called after every edit
+    /// and save and by the periodic timer; the background writer coalesces
+    /// the queue to the latest snapshot and never blocks the caller.
+    pub(crate) fn hot_exit_capture(&self) {
+        let Some((root, dirty)) = self.hot_exit_dirty_buffers() else {
+            return;
+        };
+        self.hot_exit_writer.submit(HotExitJob::Snapshot {
+            app_data_dir: self.hot_exit_app_data_dir(),
+            root,
+            dirty,
+        });
+    }
+
+    /// Queue an age-based prune of snapshots for roots that are not open.
+    /// Fresh snapshots for other roots stay, so their recovery still works.
+    pub(crate) fn hot_exit_prune_stale(&self) {
+        self.hot_exit_writer.submit(HotExitJob::Prune {
+            app_data_dir: self.hot_exit_app_data_dir(),
+        });
+    }
+
+    /// Write the current dirty set synchronously. Empty means "all clean":
+    /// the snapshot is removed instead of being left behind. Every failure is
+    /// ignored; a close or a workspace switch must never fail because of the
+    /// recovery file.
+    fn hot_exit_save_sync(&self) {
+        let Some((root, dirty)) = self.hot_exit_dirty_buffers() else {
+            return;
+        };
+        let app_data_dir = self.hot_exit_app_data_dir();
+        // Stop an older background write from landing after this snapshot.
+        self.hot_exit_writer.quiesce();
+        let _ = hot_exit::save(&app_data_dir, &root, &dirty);
+    }
+
+    /// Restore snapshots for the freshly opened workspace.
+    ///
+    /// A buffer is restored only when the disk file still exists and its
+    /// content still matches the digest recorded when the snapshot was taken.
+    /// The text is installed into the buffer (which reports `dirty` because
+    /// the saved baseline stays the disk text); the disk file is never
+    /// written. A mismatched snapshot is discarded and reported as a warning.
+    fn hot_exit_restore_workspace(&self) -> HotExitRestoreReport {
+        let mut report = HotExitRestoreReport::default();
+        let Some(root) = self.workspace_root_path() else {
+            return report;
+        };
+        let app_data_dir = self.hot_exit_app_data_dir();
+        let restore = match hot_exit::restore(&app_data_dir, &root) {
+            Ok(Some(restore)) => restore,
+            // No snapshot, corrupt file, foreign root or I/O failure: recovery
+            // is skipped and startup continues normally.
+            Ok(None) | Err(_) => return report,
+        };
+
+        for path in restore.missing_files {
+            report.warnings.push(format!(
+                "Unsaved edits for '{path}' were not restored because the file no longer exists."
+            ));
+        }
+        for buffer in restore.buffers {
+            match self.hot_exit_restore_buffer(&root, &buffer) {
+                Ok(Some(snapshot)) => report.restored.push(snapshot),
+                Ok(None) => {}
+                Err(warning) => report.warnings.push(warning),
+            }
+        }
+
+        if report.restored.is_empty() {
+            // Every entry was stale or missing: remove the snapshot so the
+            // same warning is not raised on every start.
+            let _ = hot_exit::cleanup_workspace(&app_data_dir, &root);
+        } else {
+            // Replace the snapshot with the buffers that actually restored,
+            // which also drops discarded entries and refreshes the digests.
+            self.hot_exit_save_sync();
+        }
+        self.hot_exit_prune_stale();
+        report
+    }
+
+    fn hot_exit_restore_buffer(
+        &self,
+        root: &std::path::Path,
+        buffer: &hot_exit::HotExitBuffer,
+    ) -> Result<Option<BufferSnapshotDto>, String> {
+        let changed = format!(
+            "Unsaved edits for '{}' were discarded because the file changed on disk.",
+            buffer.path
+        );
+        let changed_since = hot_exit::disk_changed(root, buffer).unwrap_or(true);
+        if changed_since {
+            return Err(changed);
+        }
+
+        let opened = match self.with_workspace(|workspace| workspace.open_file(&buffer.path)) {
+            Ok(opened) => opened,
+            Err(_) => {
+                return Err(format!(
+                    "Unsaved edits for '{}' were discarded because the file could not be reopened.",
+                    buffer.path
+                ))
+            }
+        };
+        // Never replace a buffer that already holds local edits (for example
+        // a restore racing a reopen).
+        if opened.dirty {
+            return Ok(None);
+        }
+        self.hot_exit_record_digest(&root.join(opened.path.as_str()), &opened.text);
+
+        // Compare the text that `open_file` actually read with the digest in
+        // the snapshot. This closes the window between `disk_changed` and the
+        // read: a file rewritten in that gap is discarded, not overlaid.
+        let disk_matches = buffer
+            .disk_digest
+            .as_deref()
+            .is_some_and(|expected| hot_exit::digest_bytes(opened.text.as_bytes()) == expected);
+        if !disk_matches {
+            let _ = self.with_workspace(|workspace| workspace.close_buffer(&opened.buffer_id));
+            return Err(changed);
+        }
+        if opened.text == buffer.text {
+            // Nothing dirty to replay; the snapshot entry was stale.
+            return Ok(None);
+        }
+
+        let change = hot_exit_replace_all(&opened.text, &buffer.text);
+        if self
+            .with_workspace(|workspace| {
+                workspace.apply_change(&opened.buffer_id, opened.version, &[change])
+            })
+            .is_err()
+        {
+            let _ = self.with_workspace(|workspace| workspace.close_buffer(&opened.buffer_id));
+            return Err(format!(
+                "Unsaved edits for '{}' could not be replayed and were discarded.",
+                buffer.path
+            ));
+        }
+        if let Some(selection) = buffer.selection.clone() {
+            let _ = self
+                .with_workspace(|workspace| workspace.set_selection(&opened.buffer_id, selection));
+        }
+        match self.with_workspace(|workspace| workspace.buffer(&opened.buffer_id)) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Restore and publish: one `BufferSnapshot` per recovered buffer plus a
+    /// warning toast for every snapshot that was discarded.
+    fn publish_hot_exit_restore<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        request_id: Option<selora_protocol::RequestId>,
+    ) {
+        let report = self.hot_exit_restore_workspace();
+        for buffer in report.restored {
+            self.record_event(
+                app,
+                FrontendEvent::BufferSnapshot(buffer),
+                request_id.clone(),
+            );
+        }
+        for warning in report.warnings {
+            self.record_event(
+                app,
+                FrontendEvent::Toast(ToastDto {
+                    severity: ToastSeverity::Warning,
+                    message: warning,
+                }),
+                request_id.clone(),
+            );
+        }
+    }
+
+    /// Record the disk digest after a buffer was opened or saved, so the next
+    /// snapshot needs no extra disk read.
+    fn hot_exit_record_buffer_digest(&self, buffer: &BufferSnapshotDto) {
+        if let Some(root) = self.workspace_root_path() {
+            let absolute = root.join(buffer.path.as_str());
+            self.hot_exit_record_digest(&absolute, &buffer.text);
+        }
+    }
+
+    /// `KeepBufferEdits` makes the current disk text the saved baseline; the
+    /// digest must follow it, or a later restore would misjudge the disk.
+    fn hot_exit_keep_buffer_digest(&self, buffer: &BufferSnapshotDto) {
+        let Some(root) = self.workspace_root_path() else {
+            return;
+        };
+        let absolute = root.join(buffer.path.as_str());
+        if buffer.dirty {
+            match std::fs::read(&absolute) {
+                Ok(bytes) => {
+                    self.hot_exit_store_digest(absolute, Some(hot_exit::digest_bytes(&bytes)))
+                }
+                Err(_) => self.hot_exit_store_digest(absolute, None),
+            }
+        } else {
+            self.hot_exit_record_digest(&absolute, &buffer.text);
+        }
+    }
+
+    #[cfg(test)]
+    fn hot_exit_flush(&self) {
+        self.hot_exit_writer.flush(Duration::from_secs(10));
+    }
+
     /// Attach a workspace root: the service for the explorer/editor/Git and
     /// the agent engine's tool root move together, so "open a folder" means
     /// one thing for the whole app.
     fn attach_workspace(&self, root: PathBuf) -> Result<(), WorkspaceError> {
+        // A root change must not lose or leak the previous root's recovery
+        // data: write its remaining dirty buffers (or clear the snapshot when
+        // the old workspace is clean) before its buffers disappear.
+        self.hot_exit_save_sync();
         let workspace = Workspace::open(root)?;
         // A terminal is rooted at the workspace it was opened in; switching
         // roots kills every session (and its process tree) before the new
@@ -1892,20 +2584,32 @@ impl DesktopState {
         self.reset_lsp();
         self.sessions()
             .set_workspace_root(Some(workspace.root().to_path_buf()));
+        let root = workspace.root().to_path_buf();
         *self
             .workspace
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(workspace);
         *self
+            .workspace_root
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(root);
+        *self
             .active_buffer
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = None;
+        self.hot_exit_digests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         Ok(())
     }
 
     /// Close the open folder: no buffers, no language servers, no
     /// diagnostics. The bootstrap then reports the no-workspace state.
     fn detach_workspace(&self) {
+        // Snapshot the remaining dirty buffers before they disappear; a clean
+        // workspace removes its snapshot instead of leaving a stale one.
+        self.hot_exit_save_sync();
         self.terminals.close_all();
         self.reset_lsp();
         self.sessions().set_workspace_root(None);
@@ -1913,6 +2617,14 @@ impl DesktopState {
             .workspace
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = None;
+        *self
+            .workspace_root
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        self.hot_exit_digests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
     }
 
     /// Invalidate and drop the language-server bridge. The epoch bump makes
@@ -1953,6 +2665,15 @@ impl DesktopState {
         }
     }
 
+    /// The typed error every workspace command answers before a folder is open.
+    fn no_workspace_error() -> ProtocolErrorDto {
+        ProtocolErrorDto {
+            code: "no_workspace".into(),
+            message: "Open a folder first.".into(),
+            retryable: false,
+        }
+    }
+
     /// Run `action` against the open workspace, or answer the typed
     /// `no_workspace` error the empty states already handle.
     fn with_workspace<T>(
@@ -1965,12 +2686,122 @@ impl DesktopState {
             .unwrap_or_else(|poison| poison.into_inner());
         match guard.as_ref() {
             Some(workspace) => action(workspace).map_err(Self::workspace_error),
-            None => Err(ProtocolErrorDto {
-                code: "no_workspace".into(),
-                message: "Open a folder first.".into(),
-                retryable: false,
-            }),
+            None => Err(Self::no_workspace_error()),
         }
+    }
+
+    /// Prepare one interactive search: read the root without the workspace
+    /// mutex, then cancel the search already running on that root.
+    ///
+    /// Cancelling here — before any lock is taken — is what lets a second
+    /// query stop a stale monorepo scan. The running scan notices the token
+    /// and returns, so the request never queues behind the whole scan.
+    fn prepare_search(&self) -> Result<(PathBuf, WorkspaceId, u64), ProtocolErrorDto> {
+        let root = self
+            .workspace_root_hint()
+            .ok_or_else(Self::no_workspace_error)?;
+        // Take the generation before cancelling so a result that finishes
+        // after this point can tell it has already been superseded.
+        let epoch = self.search_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        selora_fs::search::cancel_interactive_search(&root);
+        let workspace_id = workspace_id_for(&root);
+        Ok((root, workspace_id, epoch))
+    }
+
+    /// Run one search off the workspace mutex and publish its hits only while
+    /// this request is still the newest and the same workspace is open. A
+    /// superseded search is silent: the newer request owns the panel, so the
+    /// old reply is not an error.
+    fn run_search<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        request_id: RequestId,
+        query: &selora_protocol::SearchQueryDto,
+    ) -> Result<CommandResultDto, ProtocolErrorDto> {
+        let (root, workspace_id, epoch) = self.prepare_search()?;
+        match crate::workspace::search_root(&root, query).map_err(Self::workspace_error) {
+            Ok(results) => {
+                let still_current = self.search_epoch.load(Ordering::SeqCst) == epoch;
+                if still_current
+                    && self
+                        .current_workspace_id()
+                        .as_ref()
+                        .map(WorkspaceId::as_str)
+                        == Some(workspace_id.as_str())
+                {
+                    self.record_event(app, FrontendEvent::SearchResults(results), Some(request_id));
+                }
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            Err(error) if error.code == "search_cancelled" => {
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Run a git network operation with only an owned repository handle: the
+    /// workspace guard is dropped before the call, so a 180 s fetch/pull/push
+    /// no longer queues save/tree/search behind it. The result is published
+    /// only when the workspace did not change while the operation ran.
+    fn run_git_network<T>(
+        &self,
+        action: impl FnOnce(&crate::workspace::GitNetwork) -> Result<T, WorkspaceError>,
+    ) -> Result<Option<T>, ProtocolErrorDto> {
+        let handle = self.with_workspace(|workspace| Ok(workspace.git_network()))?;
+        let workspace_id = workspace_id_for(handle.root());
+        let value = action(&handle).map_err(Self::workspace_error)?;
+        if self
+            .current_workspace_id()
+            .as_ref()
+            .map(WorkspaceId::as_str)
+            != Some(workspace_id.as_str())
+        {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    pub fn explorer_with_workspace<T>(
+        &self,
+        id: &str,
+        action: impl FnOnce(&Workspace) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self
+            .workspace
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let workspace = guard.as_ref().ok_or("Open a folder first.")?;
+        if workspace_id_for(workspace.root()).as_str() != id {
+            return Err("The active workspace changed. Try again.".into());
+        }
+        action(workspace)
+    }
+
+    pub fn explorer_publish(
+        &self,
+        app: &tauri::AppHandle,
+        workspace_id: &str,
+        closed: Vec<selora_protocol::BufferSnapshotDto>,
+    ) {
+        if self.current_workspace_id().as_ref().map(|id| id.as_str()) != Some(workspace_id) {
+            return;
+        }
+        for buffer in closed {
+            self.forget_closed_buffer(&buffer.buffer_id);
+            if let Some(root) = self.workspace_root_path() {
+                let absolute = root.join(buffer.path.as_str());
+                self.with_lsp(app, |bridge| {
+                    bridge.close(absolute.clone());
+                    bridge.unbind_buffer(&absolute);
+                });
+            }
+        }
+        self.record_event(
+            app,
+            FrontendEvent::BootstrapState(Box::new(self.bootstrap())),
+            None,
+        );
     }
 
     /// Record a buffer as the user's active one, but only if it is actually
@@ -2012,6 +2843,16 @@ impl DesktopState {
         guard
             .as_ref()
             .map(|workspace| workspace.root().to_path_buf())
+    }
+
+    /// The same root read from the lock-free mirror. Use this when the caller
+    /// must act *before* taking the workspace mutex (search cancel, git
+    /// network); attach/detach keep it in step with `workspace`.
+    fn workspace_root_hint(&self) -> Option<PathBuf> {
+        self.workspace_root
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Address an LSP position request at the buffer's absolute path. The
@@ -2166,6 +3007,8 @@ impl DesktopState {
             && patch.keybind_toggle_chat.is_none()
             && patch.keybind_save.is_none()
             && patch.check_for_updates.is_none()
+            && patch.disabled_providers.is_none()
+            && patch.workspace_trusted.is_none()
         {
             return Err(ProtocolErrorDto {
                 code: "invalid_settings_patch".into(),
@@ -2178,15 +3021,16 @@ impl DesktopState {
             Some(raw) => {
                 let theme = raw.trim();
                 match theme {
-                    "selora-dark" | "dark" | "space-black" | "light" => Some(theme.to_owned()),
-                    _ => {
-                        return Err(ProtocolErrorDto {
-                            code: "invalid_settings_theme".into(),
-                            message: "Theme must be one of: selora-dark, space-black, light."
-                                .into(),
-                            retryable: false,
-                        })
+                    "selora-dark" | "galaxy" | "dark" | "space-black" | "light" | "system" => {
+                        Some(theme.to_owned())
                     }
+                    _ => return Err(ProtocolErrorDto {
+                        code: "invalid_settings_theme".into(),
+                        message:
+                            "Theme must be one of: selora-dark, galaxy, dark, space-black, light, system."
+                                .into(),
+                        retryable: false,
+                    }),
                 }
             }
             None => None,
@@ -2230,6 +3074,32 @@ impl DesktopState {
             validate_keybind_patch(patch.keybind_toggle_chat.as_deref(), "toggle chat")?;
         let save = validate_keybind_patch(patch.keybind_save.as_deref(), "save")?;
 
+        // Settings > AI Gateway: reject an unknown provider id before disk or
+        // memory is touched, then store the known ids deduplicated in the
+        // user's order. An empty list is valid and re-enables every provider.
+        let disabled_providers = match patch.disabled_providers.as_ref() {
+            Some(ids) => {
+                let mut kept: Vec<String> = Vec::with_capacity(ids.len());
+                for id in ids {
+                    if !selora_settings::is_known_provider(id) {
+                        return Err(ProtocolErrorDto {
+                            code: "invalid_settings_providers".into(),
+                            message: format!(
+                                "Unknown provider id \"{id}\". Known providers: {}.",
+                                selora_settings::KNOWN_PROVIDER_IDS.join(", ")
+                            ),
+                            retryable: false,
+                        });
+                    }
+                    if !kept.iter().any(|seen| seen == id) {
+                        kept.push(id.clone());
+                    }
+                }
+                Some(kept)
+            }
+            None => None,
+        };
+
         let mut settings = self
             .layout_store
             .load_settings()
@@ -2268,6 +3138,12 @@ impl DesktopState {
         if let Some(check) = patch.check_for_updates {
             settings.ui.check_for_updates = check;
         }
+        if let Some(trusted) = patch.workspace_trusted {
+            settings.agent.workspace_trusted = trusted;
+        }
+        if let Some(disabled) = disabled_providers {
+            settings.selora.disabled_providers = disabled;
+        }
         self.layout_store
             .save_settings(&settings)
             .map_err(|error| ProtocolErrorDto {
@@ -2288,6 +3164,32 @@ impl DesktopState {
             request_id,
         );
         Ok(snapshot)
+    }
+
+    /// Refuse to start or approve an agent turn when the live trust setting no
+    /// longer matches the value the session engine captured at startup.
+    ///
+    /// Trust is intentionally construction-time (the engine owns the tool
+    /// settings for the whole process), so a restart is the only way to apply
+    /// a change. Failing closed here means a revocation can never leave a
+    /// stale `workspace_trusted: true` engine running risky commands, and a
+    /// grant can never look effective while the engine still rejects commands.
+    fn ensure_agent_trust_current(&self) -> Result<(), ProtocolErrorDto> {
+        let live = self
+            .settings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .workspace_trusted;
+        if live == self.engine_workspace_trusted {
+            return Ok(());
+        }
+        Err(ProtocolErrorDto {
+            code: "workspace_trust_restart_required".into(),
+            message:
+                "Workspace trust changed. Restart Selora to apply it before running the agent."
+                    .into(),
+            retryable: false,
+        })
     }
 
     pub fn bootstrap(&self) -> BootstrapState {
@@ -2501,6 +3403,7 @@ impl DesktopState {
                 request_id: command_request,
                 request: payload,
             } => {
+                self.ensure_agent_trust_current()?;
                 self.sessions.send_agent(
                     self.event_log(),
                     app.clone(),
@@ -2516,6 +3419,12 @@ impl DesktopState {
                 decision,
                 resolution,
             } => {
+                if matches!(
+                    decision,
+                    DecisionDto::Approve | DecisionDto::ApproveAllThisTurn
+                ) {
+                    self.ensure_agent_trust_current()?;
+                }
                 self.sessions.agent_decision_with_resolution(
                     &command_request,
                     &approval_id,
@@ -2547,6 +3456,7 @@ impl DesktopState {
                 session_id,
                 message_id,
             } => {
+                self.ensure_agent_trust_current()?;
                 self.sessions.retry_message(
                     self.event_log(),
                     app.clone(),
@@ -2672,6 +3582,19 @@ impl DesktopState {
                 })?;
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
+            FrontendCommand::OpenLogs => {
+                // P2: the rotating crash log lives beside `settings.json` in
+                // the app-data directory. Ensure the folder exists (a first
+                // run has no log yet), then reuse the same file-manager
+                // launcher as `RevealInExplorer`.
+                let dir = crate::crash_log::ensure_log_dir().map_err(|error| ProtocolErrorDto {
+                    code: "logs_unavailable".into(),
+                    message: format!("Could not open the log directory: {error}"),
+                    retryable: true,
+                })?;
+                reveal_in_file_explorer(&dir)?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
             FrontendCommand::OpenFolder => {
                 // The keyboard/palette entry: prefer the boot override, and
                 // point the UI at the native picker otherwise.
@@ -2685,6 +3608,7 @@ impl DesktopState {
                         retryable: false,
                     })?;
                 self.attach_workspace(root).map_err(Self::workspace_error)?;
+                self.publish_hot_exit_restore(app, Some(request_id.clone()));
                 let snapshot = self.bootstrap();
                 self.record_event(
                     app,
@@ -2696,6 +3620,7 @@ impl DesktopState {
             FrontendCommand::OpenFolderAt { root } => {
                 self.attach_workspace(PathBuf::from(root))
                     .map_err(Self::workspace_error)?;
+                self.publish_hot_exit_restore(app, Some(request_id.clone()));
                 // The workspace id changed: emit the full snapshot so the
                 // frontend's envelope context follows without a reload.
                 let snapshot = self.bootstrap();
@@ -2732,6 +3657,9 @@ impl DesktopState {
             }
             FrontendCommand::OpenFile { path } => {
                 let buffer = self.with_workspace(|workspace| workspace.open_file(path.as_str()))?;
+                if !buffer.dirty {
+                    self.hot_exit_record_buffer_digest(&buffer);
+                }
                 self.set_active_buffer(&buffer.buffer_id);
                 self.record_event(
                     app,
@@ -2759,6 +3687,8 @@ impl DesktopState {
                         bridge.unbind_buffer(&absolute);
                     });
                 }
+                // The closed buffer may have been the last dirty one.
+                self.hot_exit_capture();
                 // Closing is the one buffer mutation with no per-buffer event:
                 // there is no BufferClosed in the union, and the frontend
                 // ignores a command's return value. Publish the resulting
@@ -2773,6 +3703,11 @@ impl DesktopState {
             }
             FrontendCommand::SaveBuffer { buffer_id } => {
                 let buffer = self.with_workspace(|workspace| workspace.save_buffer(&buffer_id))?;
+                self.hot_exit_record_buffer_digest(&buffer);
+                // The saved text is now the disk baseline and no longer
+                // dirty; if it was the last dirty buffer the snapshot is
+                // removed.
+                self.hot_exit_capture();
                 self.record_event(
                     app,
                     FrontendEvent::BufferSnapshot(buffer.clone()),
@@ -2798,6 +3733,8 @@ impl DesktopState {
             FrontendCommand::ReloadBufferFromDisk { buffer_id } => {
                 let buffer =
                     self.with_workspace(|workspace| workspace.reload_buffer_from_disk(&buffer_id))?;
+                self.hot_exit_record_buffer_digest(&buffer);
+                self.hot_exit_capture();
                 if let Some(root) = self.workspace_root_path() {
                     let absolute = root.join(buffer.path.as_str());
                     self.with_lsp(app, |bridge| bridge.reload(absolute, buffer.text.clone()));
@@ -2822,6 +3759,8 @@ impl DesktopState {
             FrontendCommand::KeepBufferEdits { buffer_id } => {
                 let buffer =
                     self.with_workspace(|workspace| workspace.keep_buffer_edits(&buffer_id))?;
+                self.hot_exit_keep_buffer_digest(&buffer);
+                self.hot_exit_capture();
                 self.record_event(
                     app,
                     FrontendEvent::BufferConflictCleared(
@@ -2843,6 +3782,9 @@ impl DesktopState {
                     workspace.apply_change(&buffer_id, version, &changes)
                 })?;
                 self.set_active_buffer(&buffer_id);
+                // Edits are snapshotted immediately (on the background
+                // writer); the periodic timer is only a safety net.
+                self.hot_exit_capture();
                 self.record_event(app, FrontendEvent::BufferChanged(changed), Some(request_id));
                 if let Ok(snapshot) = self.with_workspace(|workspace| workspace.buffer(&buffer_id))
                 {
@@ -2901,11 +3843,7 @@ impl DesktopState {
                 self.restart_lsp(app, &language)?;
                 Ok(CommandResultDto::Snapshot(Box::new(self.bootstrap())))
             }
-            FrontendCommand::Search { query } => {
-                let results = self.with_workspace(|workspace| workspace.search(&query))?;
-                self.record_event(app, FrontendEvent::SearchResults(results), Some(request_id));
-                Ok(CommandResultDto::Ack(self.command_ack()))
-            }
+            FrontendCommand::Search { query } => self.run_search(app, request_id, &query),
             FrontendCommand::GitStage { path } => {
                 let status = self.with_workspace(|workspace| workspace.git_stage(path.as_str()))?;
                 self.record_event(
@@ -3078,30 +4016,33 @@ impl DesktopState {
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::GitFetch => {
-                let status = self.with_workspace(|workspace| workspace.git_fetch())?;
-                self.record_event(
-                    app,
-                    FrontendEvent::GitStatusChanged(status),
-                    Some(request_id),
-                );
+                if let Some(status) = self.run_git_network(|git| git.fetch())? {
+                    self.record_event(
+                        app,
+                        FrontendEvent::GitStatusChanged(status),
+                        Some(request_id),
+                    );
+                }
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::GitPull => {
-                let status = self.with_workspace(|workspace| workspace.git_pull())?;
-                self.record_event(
-                    app,
-                    FrontendEvent::GitStatusChanged(status),
-                    Some(request_id),
-                );
+                if let Some(status) = self.run_git_network(|git| git.pull())? {
+                    self.record_event(
+                        app,
+                        FrontendEvent::GitStatusChanged(status),
+                        Some(request_id),
+                    );
+                }
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::GitPush => {
-                let status = self.with_workspace(|workspace| workspace.git_push())?;
-                self.record_event(
-                    app,
-                    FrontendEvent::GitStatusChanged(status),
-                    Some(request_id),
-                );
+                if let Some(status) = self.run_git_network(|git| git.push())? {
+                    self.record_event(
+                        app,
+                        FrontendEvent::GitStatusChanged(status),
+                        Some(request_id),
+                    );
+                }
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::SettingsUpdate { patch } => {
@@ -3370,6 +4311,11 @@ impl DesktopState {
                 .as_ref()
                 .map_or(0, |model| model.context_window),
         );
+        let workspace_trusted = self
+            .settings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .workspace_trusted;
         let bundle = factory(
             root.clone(),
             WorkflowHostSettings {
@@ -3378,6 +4324,7 @@ impl DesktopState {
                 model: self.sessions.active_model_id().unwrap_or_default(),
                 model_metadata,
                 caps,
+                workspace_trusted,
                 on_approval: Arc::new(move |id, card| approval_stream.on_approval(id, card)),
                 durable_run_id: durable_run_id.to_string(),
             },
@@ -3680,18 +4627,28 @@ impl DesktopState {
     {
         let dirty = self.dirty_buffers();
         if dirty.is_empty() {
+            // Clean close: drop any snapshot left by an earlier dirty state.
+            self.hot_exit_save_sync();
             return CloseOutcome::Close { saved: 0 };
         }
 
         match prompt(&dirty) {
             CloseChoice::Cancel => CloseOutcome::Stay,
-            CloseChoice::Discard => CloseOutcome::Close { saved: 0 },
+            CloseChoice::Discard => {
+                // The user chose to lose these edits, but a crash after this
+                // point still recovers them until the process is gone.
+                self.hot_exit_save_sync();
+                CloseOutcome::Close { saved: 0 }
+            }
             CloseChoice::Save => {
                 let mut saved = 0;
                 for buffer in &dirty {
                     if let Err(error) =
                         self.with_workspace(|workspace| workspace.save_buffer(&buffer.buffer_id))
                     {
+                        // Snapshot whatever is still dirty before the window
+                        // stays open, so a later crash cannot lose it.
+                        self.hot_exit_save_sync();
                         return CloseOutcome::SaveFailed {
                             saved,
                             message: format!(
@@ -3703,6 +4660,8 @@ impl DesktopState {
                     }
                     saved += 1;
                 }
+                // Every buffer is clean now: the snapshot must go.
+                self.hot_exit_save_sync();
                 CloseOutcome::Close { saved }
             }
         }
@@ -4225,6 +5184,42 @@ mod tests {
     }
 
     #[test]
+    fn settings_update_accepts_system_theme_and_round_trips_to_disk() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("settings-update-system-theme");
+        let _ = std::fs::remove_file(&path);
+        let state = DesktopState::from_settings_path(path.clone());
+
+        let returned = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            theme: Some("system".into()),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("the system theme is an accepted spelling");
+
+        // The view keeps the preference; the frontend resolves it against the
+        // OS once it lands in the document root.
+        assert_eq!(returned.settings.theme, "system");
+        assert_eq!(state.bootstrap().settings.theme, "system");
+
+        let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
+        assert_eq!(persisted.ui.theme, "system");
+
+        let reopened = DesktopState::from_settings_path(path.clone());
+        assert_eq!(reopened.bootstrap().settings.theme, "system");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn settings_update_persists_editor_preferences_and_all_four_keybinds() {
         let app = mock_app_handle();
         let path = temp_settings_path("settings-editor-keybinds");
@@ -4276,6 +5271,235 @@ mod tests {
         // A fresh state over the same file boots with the saved values.
         let reopened = DesktopState::from_settings_path(path.clone());
         assert_eq!(reopened.bootstrap().settings, returned.settings);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Settings > AI Gateway "Assistant providers": disabling persists, the
+    /// view de-duplicates, the bootstrap event carries it, and an empty list
+    /// re-enables every provider.
+    #[test]
+    fn settings_update_persists_disabled_providers_and_bootstrap_event() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("settings-disabled-providers");
+        let _ = std::fs::remove_file(&path);
+        let state = DesktopState::from_settings_path(path.clone());
+
+        let returned = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            disabled_providers: Some(vec![
+                                "deepseek".into(),
+                                "ollama".into(),
+                                "deepseek".into(),
+                            ]),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("disabling providers succeeds");
+        assert_eq!(
+            returned.settings.disabled_providers,
+            vec!["deepseek".to_string(), "ollama".to_string()],
+            "known ids keep the user's order and duplicates collapse"
+        );
+
+        let published = state
+            .events_after(0)
+            .into_iter()
+            .find_map(|event| match event.payload {
+                FrontendEvent::BootstrapState(snapshot) => Some(snapshot.settings),
+                _ => None,
+            })
+            .expect("the refreshed bootstrap is published");
+        assert_eq!(
+            published.disabled_providers,
+            vec!["deepseek".to_string(), "ollama".to_string()]
+        );
+
+        let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
+        assert_eq!(
+            persisted.selora.disabled_providers,
+            vec!["deepseek".to_string(), "ollama".to_string()]
+        );
+
+        // The unrelated stored sections survive the save.
+        assert_eq!(persisted.selora.base_url, "https://api.selora.lol");
+        assert_eq!(persisted.ui.theme, "selora-dark");
+
+        let reenabled = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            disabled_providers: Some(Vec::new()),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("re-enabling providers succeeds");
+        assert!(reenabled.settings.disabled_providers.is_empty());
+        let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
+        assert!(persisted.selora.disabled_providers.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_update_rejects_unknown_provider_without_mutation() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("settings-bad-provider");
+        let _ = std::fs::remove_file(&path);
+        let state = DesktopState::from_settings_path(path.clone());
+        let before = state.bootstrap().settings;
+
+        let error = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            disabled_providers: Some(vec!["deepseek".into(), "nope".into()]),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect_err("an unknown provider id is rejected");
+
+        assert_eq!(error.code, "invalid_settings_providers");
+        assert!(!error.retryable);
+        assert_eq!(state.bootstrap().settings, before, "memory is unchanged");
+        assert!(state.events_after(0).is_empty(), "no event is published");
+        assert!(!path.exists(), "invalid input never writes settings.json");
+    }
+
+    /// A hand-edited settings.json with an unknown id still boots: the view
+    /// shows only known ids and never exposes a bogus provider.
+    #[test]
+    fn settings_view_filters_unknown_disabled_providers_from_disk() {
+        let path = temp_settings_path("settings-known-provider-filter");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"selora":{"disabled_providers":["deepseek","bogus","deepseek"]}}"#,
+        )
+        .expect("write settings");
+        let state = DesktopState::from_settings_path(path.clone());
+        assert_eq!(
+            state.bootstrap().settings.disabled_providers,
+            vec!["deepseek".to_string()]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_update_persists_workspace_trust_and_bootstrap_reports_it() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("settings-workspace-trust");
+        let _ = std::fs::remove_file(&path);
+        let state = DesktopState::from_settings_path(path.clone());
+        assert!(
+            !state.bootstrap().settings.workspace_trusted,
+            "a fresh workspace is untrusted"
+        );
+
+        let granted = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            workspace_trusted: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("trust grant persists");
+        assert!(granted.settings.workspace_trusted);
+        assert!(state.bootstrap().settings.workspace_trusted);
+
+        let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
+        assert!(persisted.agent.workspace_trusted);
+
+        // A restart reads the same grant from settings.json into bootstrap.
+        let reopened = DesktopState::from_settings_path(path.clone());
+        assert!(reopened.bootstrap().settings.workspace_trusted);
+
+        let revoked = reopened
+            .dispatch(
+                &app,
+                envelope(
+                    &reopened,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            workspace_trusted: Some(false),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("trust revocation persists");
+        assert!(!revoked.settings.workspace_trusted);
+        assert!(
+            !selora_settings::Settings::load_from(&path)
+                .unwrap()
+                .agent
+                .workspace_trusted
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_changed_workspace_trust_blocks_agent_turns_until_restart() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("settings-trust-restart-guard");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"_v":1,"agent":{"workspace_trusted":true}}"#)
+            .expect("write trusted settings");
+        let state = DesktopState::from_settings_path(path.clone());
+        assert!(
+            state.ensure_agent_trust_current().is_ok(),
+            "the engine and settings agree at startup"
+        );
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            workspace_trusted: Some(false),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("revocation persists");
+
+        let error = state
+            .ensure_agent_trust_current()
+            .expect_err("a stale trusted engine must not run the agent");
+        assert_eq!(error.code, "workspace_trust_restart_required");
+        assert!(!error.retryable);
+
+        // A fresh state reads the revoked value and agrees again.
+        let reopened = DesktopState::from_settings_path(path.clone());
+        assert!(reopened.ensure_agent_trust_current().is_ok());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -5740,6 +6964,77 @@ mod tests {
             .expect_err("stale version");
         assert_eq!(error.code, "stale_buffer_version");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn a_new_search_cancels_the_running_one_before_taking_the_workspace_lock() {
+        let app = mock_app_handle();
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        let _dir = open_workspace(&state, &app);
+        let root = state.workspace_root_path().expect("workspace root");
+        let running = selora_fs::search::start_interactive_search(&root);
+        assert!(!running.is_cancelled());
+
+        // Hold the workspace mutex: preparation must still reach the cancel
+        // (it reads the lock-free root mirror first). If it took the workspace
+        // lock it would block here and the signal would never be sent.
+        let held = state
+            .workspace
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let state_ref = &state;
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let prepared = state_ref.prepare_search().is_ok();
+                let _ = done_tx.send(prepared);
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("search preparation blocked on the workspace mutex");
+            worker.join().expect("preparation worker");
+        });
+        assert!(
+            running.is_cancelled(),
+            "the previous search must be cancelled before the lock is taken"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn a_slow_git_network_operation_does_not_block_a_workspace_read() {
+        let app = mock_app_handle();
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        let _dir = open_workspace(&state, &app);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let state_ref = &state;
+        std::thread::scope(|scope| {
+            // Fake the git network call: park it until the read below proved
+            // it does not hold the workspace mutex. No real remote is used.
+            let worker = scope.spawn(move || {
+                state_ref.run_git_network(|_git| {
+                    entered_tx.send(()).expect("signal entered");
+                    release_rx.recv().expect("release git op");
+                    Ok(())
+                })
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("git operation did not start");
+            let tree = state
+                .with_workspace(|workspace| workspace.tree())
+                .expect("tree read while the git operation is parked");
+            assert!(
+                tree.root
+                    .as_ref()
+                    .is_some_and(|root| !root.children.is_empty()),
+                "workspace tree is readable"
+            );
+            release_tx.send(()).expect("release git op");
+            let result = worker.join().expect("git worker");
+            assert_eq!(result.expect("git result"), Some(()));
+        });
     }
 
     #[test]
@@ -7717,6 +9012,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(summary.status, WorkflowStatus::Completed);
+        let emitted_usage: Vec<(&str, u64, f64)> = summary
+            .phase_usage
+            .iter()
+            .map(|usage| (usage.phase.as_str(), usage.tokens, usage.cost_usd))
+            .collect();
+        assert_eq!(
+            emitted_usage,
+            vec![("scan", 0, 0.5), ("apply", 0, 0.5), ("verify", 0, 0.0)],
+            "the terminal event carries the journaled per-phase receipt, not an estimate"
+        );
 
         let saved = state
             .bootstrap()
@@ -9354,5 +10659,232 @@ mod tests {
         );
         assert_ne!(created.shell, "cmd.exe");
         state.shutdown_terminals();
+    }
+
+    // -- P1 hot-exit wiring ------------------------------------------------
+
+    /// Seed a workspace with one file and return (tempdir, absolute path).
+    fn hot_exit_workspace() -> (tempfile::TempDir, PathBuf) {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("notes.txt");
+        std::fs::write(&file, "baseline\n").expect("seed file");
+        (workspace, file)
+    }
+
+    /// Open `notes.txt` and insert `edited\n` at the start, leaving the disk
+    /// file untouched.
+    fn hot_exit_open_and_edit(
+        state: &DesktopState,
+        app: &tauri::AppHandle<tauri::test::MockRuntime>,
+    ) {
+        let opened = state
+            .dispatch(
+                app,
+                envelope(
+                    state,
+                    FrontendCommand::OpenFile {
+                        path: WorkspacePath::new("notes.txt").expect("path"),
+                    },
+                ),
+            )
+            .expect("open file");
+        let buffer = opened
+            .buffers
+            .iter()
+            .find(|buffer| buffer.path.as_str() == "notes.txt")
+            .expect("buffer present")
+            .clone();
+        state
+            .dispatch(
+                app,
+                envelope(
+                    state,
+                    FrontendCommand::ApplyEditorChange {
+                        buffer_id: buffer.buffer_id,
+                        version: buffer.version,
+                        changes: vec![selora_protocol::TextChange {
+                            start: selora_protocol::TextPosition::default(),
+                            end: selora_protocol::TextPosition::default(),
+                            replacement: "edited\n".into(),
+                        }],
+                    },
+                ),
+            )
+            .expect("apply edit");
+    }
+
+    #[test]
+    fn hot_exit_restores_dirty_text_without_touching_disk() {
+        let app = mock_app_handle();
+        let (workspace, file) = hot_exit_workspace();
+        let store = tempfile::tempdir().expect("store");
+
+        let first = DesktopState::with_settings(selora_settings::Settings::default());
+        first.set_hot_exit_dir(store.path().to_path_buf());
+        first
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach first");
+        hot_exit_open_and_edit(&first, &app);
+        first.hot_exit_flush();
+        assert!(
+            hot_exit::restore(store.path(), workspace.path())
+                .expect("restore")
+                .is_some(),
+            "the edit produced a snapshot"
+        );
+
+        let second = DesktopState::with_settings(selora_settings::Settings::default());
+        second.set_hot_exit_dir(store.path().to_path_buf());
+        second
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach second");
+
+        let report = second.hot_exit_restore_workspace();
+        assert!(
+            report.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            report.warnings
+        );
+        assert_eq!(report.restored.len(), 1);
+        let restored = &report.restored[0];
+        assert_eq!(restored.path.as_str(), "notes.txt");
+        assert_eq!(restored.text, "edited\nbaseline\n");
+        assert!(restored.dirty, "a recovered buffer must report dirty");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read disk"),
+            "baseline\n",
+            "restore never writes the file"
+        );
+    }
+
+    #[test]
+    fn hot_exit_discards_snapshot_when_disk_changed() {
+        let app = mock_app_handle();
+        let (workspace, file) = hot_exit_workspace();
+        let store = tempfile::tempdir().expect("store");
+
+        let first = DesktopState::with_settings(selora_settings::Settings::default());
+        first.set_hot_exit_dir(store.path().to_path_buf());
+        first
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach first");
+        hot_exit_open_and_edit(&first, &app);
+        first.hot_exit_flush();
+
+        std::fs::write(&file, "newer on disk\n").expect("external write");
+
+        let second = DesktopState::with_settings(selora_settings::Settings::default());
+        second.set_hot_exit_dir(store.path().to_path_buf());
+        second
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach second");
+
+        let report = second.hot_exit_restore_workspace();
+        assert!(report.restored.is_empty(), "stale edits are not restored");
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("changed on disk"),
+            "warning names the reason: {}",
+            report.warnings[0]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read disk"),
+            "newer on disk\n",
+            "the newer disk text survives"
+        );
+        assert!(
+            hot_exit::restore(store.path(), workspace.path())
+                .expect("restore")
+                .is_none(),
+            "a mismatched snapshot is discarded"
+        );
+    }
+
+    #[test]
+    fn hot_exit_clean_save_clears_the_snapshot() {
+        let app = mock_app_handle();
+        let (workspace, file) = hot_exit_workspace();
+        let store = tempfile::tempdir().expect("store");
+
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        state.set_hot_exit_dir(store.path().to_path_buf());
+        state
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach");
+        hot_exit_open_and_edit(&state, &app);
+        state.hot_exit_flush();
+        assert!(hot_exit::restore(store.path(), workspace.path())
+            .expect("restore")
+            .is_some());
+
+        let buffer = state
+            .bootstrap()
+            .buffers
+            .into_iter()
+            .find(|buffer| buffer.path.as_str() == "notes.txt")
+            .expect("buffer");
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SaveBuffer {
+                        buffer_id: buffer.buffer_id,
+                    },
+                ),
+            )
+            .expect("save");
+        state.hot_exit_flush();
+
+        assert!(
+            hot_exit::restore(store.path(), workspace.path())
+                .expect("restore")
+                .is_none(),
+            "an all-clean workspace has nothing to recover"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read disk"),
+            "edited\nbaseline\n"
+        );
+    }
+
+    #[test]
+    fn hot_exit_write_failure_is_ignored_and_state_stays_usable() {
+        let app = mock_app_handle();
+        let (workspace, _file) = hot_exit_workspace();
+        let hostile = tempfile::tempdir().expect("hostile parent");
+        let not_a_directory = hostile.path().join("blocked");
+        std::fs::write(&not_a_directory, "not a directory").expect("seed blocker");
+
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        state.set_hot_exit_dir(not_a_directory.clone());
+        state
+            .attach_workspace(workspace.path().to_path_buf())
+            .expect("attach");
+        hot_exit_open_and_edit(&state, &app);
+        state.hot_exit_flush();
+
+        assert!(
+            !not_a_directory.join("hot-exit").exists(),
+            "no snapshot directory was created under a file"
+        );
+        assert_eq!(
+            state.bootstrap().buffers.len(),
+            1,
+            "the editor still works after a failed snapshot write"
+        );
+        assert_eq!(
+            state.bootstrap().buffers[0].text,
+            "edited\nbaseline\n",
+            "the failed snapshot does not change the buffer"
+        );
+    }
+
+    #[test]
+    fn hot_exit_timer_capture_is_a_no_op_without_a_workspace() {
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        state.hot_exit_capture();
+        state.hot_exit_flush();
+        assert!(state.bootstrap().workspace.root.is_none());
     }
 }

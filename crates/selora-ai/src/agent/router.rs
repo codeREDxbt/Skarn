@@ -77,6 +77,9 @@ pub struct WorkflowPlan {
 /// JSON object deserializes directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolSettings {
+    /// Non-allowlisted shell commands require explicit workspace trust.
+    #[serde(default)]
+    pub workspace_trusted: bool,
     /// §17.5: PowerShell — `pwsh` if installed, else `powershell`. Empty
     /// means auto-resolve; any other value is used verbatim.
     #[serde(default)]
@@ -123,6 +126,7 @@ fn default_auto_approve_commands() -> Vec<String> {
 impl Default for AgentToolSettings {
     fn default() -> Self {
         Self {
+            workspace_trusted: false,
             shell: String::new(),
             auto_approve_commands: default_auto_approve_commands(),
             brave_api_key: None,
@@ -719,6 +723,11 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
                 Ok(ToolOutcome::Ready(
                     bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await,
                 ))
+            } else if !ctx.settings.workspace_trusted {
+                Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    "workspace is untrusted; trust this workspace before running risky commands",
+                )))
             } else {
                 Ok(ToolOutcome::NeedsApproval(ApprovalCard::Command {
                     command,
@@ -1034,6 +1043,14 @@ pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
                 Ok(c) => c,
                 Err(m) => return ToolResult::error(&call.id, m),
             };
+            if !ctx.settings.workspace_trusted
+                && !bash::is_allowlisted(&command, &ctx.settings.auto_approve_commands)
+            {
+                return ToolResult::error(
+                    &call.id,
+                    "workspace is untrusted; trust this workspace before running risky commands",
+                );
+            }
             let timeout_secs = opt_u64(&args, &call.name, "timeout_secs").ok().flatten();
             let cwd = opt_str(&args, &call.name, "cwd").ok().flatten();
             bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await
@@ -1968,6 +1985,7 @@ mod tests {
         let root = temp_root("route-bash");
         let settings = AgentToolSettings {
             auto_approve_commands: vec!["Write-Output".to_owned()],
+            workspace_trusted: true,
             ..AgentToolSettings::default()
         };
         let ctx = ToolContext::new(&root, settings);
@@ -1989,6 +2007,50 @@ mod tests {
                 assert_eq!(command, "Remove-Item -Recurse .");
             }
             other => panic!("non-allowlisted bash must build a command card, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn untrusted_workspace_allows_allowlisted_but_blocks_risky_shell() {
+        let root = temp_root("route-untrusted-bash");
+        let ctx = ToolContext::new(
+            &root,
+            AgentToolSettings {
+                auto_approve_commands: vec!["Write-Output".to_owned()],
+                ..AgentToolSettings::default()
+            },
+        );
+
+        // §17.5: the read-only allowlist still auto-runs without trust.
+        let allowed = execute_tool(&ctx, call("bash", r#"{"command":"Write-Output safe"}"#)).await;
+        match allowed {
+            ToolOutcome::Ready(result) => {
+                assert!(result.ok, "{}", result.content);
+                assert!(result.content.contains("safe"));
+            }
+            other => panic!("allowlisted bash must auto-run without trust, got {other:?}"),
+        }
+
+        // Risky/unknown commands never execute, even after an explicit
+        // approval: the router refuses before a card is made or a decision
+        // is consumed.
+        for command in [
+            "cargo test",
+            "Remove-Item -Recurse .",
+            "echo hi; Remove-Item Cargo.toml",
+        ] {
+            let tool_call = call("bash", &serde_json::json!({"command": command}).to_string());
+            match execute_tool(&ctx, tool_call.clone()).await {
+                ToolOutcome::Ready(result) => {
+                    assert!(!result.ok);
+                    assert!(result.content.contains("workspace is untrusted"));
+                }
+                other => panic!("untrusted risky command must be blocked: {other:?}"),
+            }
+            let result = execute_approved(&ctx, tool_call).await;
+            assert!(!result.ok, "approval must not bypass workspace trust");
+            assert!(result.content.contains("workspace is untrusted"));
         }
     }
 
@@ -2194,7 +2256,13 @@ mod tests {
     #[cfg(windows)]
     async fn approved_bash_runs() {
         let root = temp_root("route-approved-bash");
-        let ctx = ToolContext::new(&root, AgentToolSettings::default());
+        let ctx = ToolContext::new(
+            &root,
+            AgentToolSettings {
+                workspace_trusted: true,
+                ..AgentToolSettings::default()
+            },
+        );
         let c = call("bash", r#"{"command":"Write-Output ran"}"#);
         match execute_tool(&ctx, c.clone()).await {
             ToolOutcome::NeedsApproval(_) => {}

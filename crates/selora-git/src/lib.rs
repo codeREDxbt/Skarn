@@ -36,7 +36,7 @@ mod status;
 
 pub use branch::BranchInfo;
 pub use commit::{ChangeKind, CommitDetail, CommitFileChange, CommitInfo};
-pub use diff::{DiffLine, FileDiff, Hunk};
+pub use diff::{DiffLine, FileDiff, Hunk, MAX_DIFF_BYTES, MAX_DIFF_LINES};
 pub use discard::DiscardTarget;
 pub use error::GitError;
 pub use merge::{ConflictEntry, ConflictSide, MergeOutcome, MergeStatus};
@@ -256,7 +256,10 @@ impl GitRepo {
             .recurse_untracked_dirs(true)
             // Without this libgit2 lists an untracked delta but prints no
             // content for it (plain `git diff` semantics).
-            .show_untracked_content(true);
+            .show_untracked_content(true)
+            // Never build a patch body larger than the collector's budget:
+            // libgit2 reports an over-limit file as one binary line instead.
+            .max_size(MAX_DIFF_BYTES as i64);
         let diff = self
             .repo
             .diff_index_to_workdir(Some(&index), Some(&mut options))?;
@@ -293,7 +296,9 @@ impl GitRepo {
             Err(err) => return Err(err.into()),
         };
         let mut options = git2::DiffOptions::new();
-        options.pathspec(rel.to_string_lossy().into_owned());
+        options
+            .pathspec(rel.to_string_lossy().into_owned())
+            .max_size(MAX_DIFF_BYTES as i64);
         let diff =
             self.repo
                 .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut options))?;
@@ -313,12 +318,27 @@ impl GitRepo {
 /// Collect one file's patch out of a libgit2 diff into a [`FileDiff`].
 /// Shared by both diff directions so the panel gets the same hunk and
 /// line shape whichever side of a row it shows.
+///
+/// Bounded by [`MAX_DIFF_LINES`] and [`MAX_DIFF_BYTES`]: a generated,
+/// vendored or minified file would otherwise build an arbitrarily large
+/// structure and an arbitrarily large IPC payload. A cut sets
+/// [`FileDiff::truncated`], which `to_unified` renders as a notice.
 fn collect_file_diff(diff: &git2::Diff<'_>, path: PathBuf) -> Result<FileDiff, GitError> {
     let mut out = FileDiff {
         path,
         hunks: Vec::new(),
+        truncated: false,
     };
+    let mut lines = 0usize;
+    let mut bytes = 0usize;
     diff.print(git2::DiffFormat::Patch, |_delta, hunk, line| {
+        // A capped diff keeps draining the callback (libgit2 treats an early
+        // `false` as an error) but stops collecting, so memory is bounded by
+        // the caps rather than by the file.
+        if lines >= MAX_DIFF_LINES || bytes >= MAX_DIFF_BYTES {
+            out.truncated = true;
+            return true;
+        }
         match line.origin() {
             'H' => {
                 if let Some(hunk) = hunk {
@@ -333,8 +353,22 @@ fn collect_file_diff(diff: &git2::Diff<'_>, path: PathBuf) -> Result<FileDiff, G
             }
             '+' | '-' | ' ' | '\\' => {
                 let content = String::from_utf8_lossy(line.content());
-                let content = content.trim_end_matches(['\n', '\r']).to_owned();
+                let content = content.trim_end_matches(['\n', '\r']);
+                // One minified line can exceed the whole budget: keep the
+                // prefix that fits and announce the cut.
+                let room = MAX_DIFF_BYTES.saturating_sub(bytes);
+                let (content, cut) = if content.len() > room {
+                    let mut end = room;
+                    while end > 0 && !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    (content[..end].to_owned(), true)
+                } else {
+                    (content.to_owned(), false)
+                };
                 if let Some(current) = out.hunks.last_mut() {
+                    lines += 1;
+                    bytes += content.len();
                     current.lines.push(DiffLine {
                         origin: line.origin(),
                         old_no: line.old_lineno(),
@@ -342,7 +376,13 @@ fn collect_file_diff(diff: &git2::Diff<'_>, path: PathBuf) -> Result<FileDiff, G
                         content,
                     });
                 }
+                if cut {
+                    out.truncated = true;
+                }
             }
+            // libgit2 reports binary blobs (and files over the size limit set
+            // by `DiffOptions::max_size`) as one 'B' line with no content.
+            'B' => out.truncated = true,
             _ => {} // 'F' file headers etc.
         }
         true
@@ -1379,6 +1419,54 @@ mod tests {
             "pull must update the working tree"
         );
         assert!(clone.status().expect("status").entries.is_empty());
+    }
+
+    #[test]
+    fn huge_file_diff_is_capped_and_announced() {
+        let (dir, repo) = init_repo();
+        write(&dir, "big.txt", "seed\n");
+        commit_all(&repo, "init");
+        // One more line than the line cap: the collector must stop at the cap
+        // instead of building a structure sized by the file.
+        let mut text = String::new();
+        for _ in 0..MAX_DIFF_LINES + 50 {
+            text.push_str("x\n");
+        }
+        write(&dir, "big.txt", &text);
+        let diff = repo
+            .diff_workdir(std::path::Path::new("big.txt"))
+            .expect("diff");
+        assert!(diff.truncated, "the cap was reached");
+        let lines: usize = diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+        assert!(lines <= MAX_DIFF_LINES, "{lines} lines kept");
+        assert!(diff.to_unified().ends_with("to show in full]\n"));
+    }
+
+    #[test]
+    fn network_timeouts_are_bounded_and_do_not_break_a_local_remote() {
+        if !git_available() {
+            return;
+        }
+        let bare_dir = tempfile::tempdir().expect("bare dir");
+        git2::Repository::init_bare(bare_dir.path()).expect("init bare");
+        let (dir, repo) = init_repo();
+        write(&dir, "a.txt", "one\n");
+        commit_all(&repo, "init");
+        git2::Repository::open(dir.path())
+            .expect("raw")
+            .remote("origin", bare_dir.path().to_string_lossy().as_ref())
+            .expect("remote");
+
+        // The explicit bound is threaded through the polled wait: a local
+        // remote still succeeds well inside it.
+        let fetched = repo
+            .fetch_with_timeout(None, std::time::Duration::from_secs(60))
+            .expect("fetch local");
+        assert_eq!(fetched.operation, RemoteOperation::Fetch);
+        let pushed = repo
+            .push_with_timeout(None, None, std::time::Duration::from_secs(60))
+            .expect("push local");
+        assert_eq!(pushed.operation, RemoteOperation::Push);
     }
 
     fn read_text(path: &std::path::Path) -> String {

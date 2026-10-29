@@ -83,6 +83,25 @@ fn default_save() -> String {
     "Ctrl+S".into()
 }
 
+/// The provider ids the desktop's Connect modal offers, in display order.
+/// `selora.disabled_providers` is validated against this list: an unknown id
+/// is a client bug, not a future provider the shell can guess.
+pub const KNOWN_PROVIDER_IDS: [&str; 8] = [
+    "selora",
+    "anthropic",
+    "openai",
+    "deepseek",
+    "ollama",
+    "openrouter",
+    "glm",
+    "custom",
+];
+
+/// True when `id` names a provider the desktop knows (`KNOWN_PROVIDER_IDS`).
+pub fn is_known_provider(id: &str) -> bool {
+    KNOWN_PROVIDER_IDS.contains(&id)
+}
+
 /// Inclusive ranges the desktop validates a settings patch against. Kept here
 /// so the schema's documented range and the shell's check share one source.
 pub const EDITOR_FONT_SIZE_MIN: u32 = 8;
@@ -164,7 +183,7 @@ pub struct EditorSettings {
 
 /// `ui.*` (ARCHITECTURE.md §8.1). `theme` is `"selora-dark"` by default;
 /// `"light"` selects the Moonlight palette. `"dark"` and `"space-black"`
-/// are accepted aliases for the ink ramp.
+/// are accepted aliases for the ink ramp. `"system"` follows OS appearance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiSettings {
     #[serde(default = "default_theme")]
@@ -241,6 +260,13 @@ pub struct SeloraSettings {
 
     #[serde(default)]
     pub active_model: Option<String>,
+
+    /// Providers the user turned off in Settings > AI Gateway ("Assistant
+    /// providers"). Ids come from [`KNOWN_PROVIDER_IDS`]. This only gates
+    /// provider selection and visibility in the shell; it never changes the
+    /// stored key, the active model, or makes a network call.
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
 }
 
 /// `keybinds.*` (ARCHITECTURE.md §8.1) — string values like
@@ -265,6 +291,11 @@ pub struct KeybindsSettings {
 /// reads the shell/allowlist; both land in Phase 5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSettings {
+    /// Risky shell commands require explicit workspace trust; read-only
+    /// allowlisted commands still auto-run.
+    #[serde(default)]
+    pub workspace_trusted: bool,
+
     /// Max tool iterations per turn (§17.3: default 25).
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: u32,
@@ -525,6 +556,7 @@ impl Default for SeloraSettings {
         Self {
             base_url: default_base_url(),
             active_model: None,
+            disabled_providers: Vec::new(),
         }
     }
 }
@@ -543,6 +575,7 @@ impl Default for KeybindsSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
+            workspace_trusted: false,
             max_iterations: default_agent_max_iterations(),
             max_turn_secs: default_agent_max_turn_secs(),
             max_cost_usd: default_agent_max_cost_usd(),
@@ -738,6 +771,7 @@ pub(crate) mod tests {
         assert!(s.lsp.enabled, "language servers default on");
         assert_eq!(s.selora.base_url, "https://api.selora.lol");
         assert_eq!(s.selora.active_model, None);
+        assert!(s.selora.disabled_providers.is_empty());
         assert_eq!(s.keybinds.command_palette, "Ctrl+Shift+P");
         assert_eq!(s.keybinds.fuzzy_find, "Ctrl+P");
         assert_eq!(s.keybinds.toggle_chat, "Ctrl+L");
@@ -754,7 +788,7 @@ pub(crate) mod tests {
         let dir = temp_settings_dir("ui-theme-round-trip");
         let path = dir.join(SETTINGS_FILE_NAME);
 
-        for theme in ["selora-dark", "dark", "space-black", "light"] {
+        for theme in ["selora-dark", "dark", "space-black", "light", "system"] {
             let mut settings = Settings::default();
             settings.ui.theme = theme.to_owned();
             settings.save_to(&path).expect("save theme");
@@ -908,6 +942,59 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `selora.disabled_providers` is additive: a pre-feature file (no key)
+    /// loads with an empty list, and a file that sets it round-trips.
+    #[test]
+    fn disabled_providers_default_empty_and_round_trip() {
+        assert!(Settings::default().selora.disabled_providers.is_empty());
+
+        let dir = temp_settings_dir("disabled-providers");
+        let path = dir.join(SETTINGS_FILE_NAME);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"selora":{"base_url":"https://api.selora.lol"}}"#,
+        )
+        .expect("write pre-feature file");
+        let s = Settings::load_from(&path).expect("pre-feature file must load");
+        assert!(s.selora.disabled_providers.is_empty());
+
+        let mut s = s;
+        s.selora.disabled_providers = vec!["deepseek".into(), "ollama".into()];
+        s.save_to(&path).expect("save");
+        let reloaded = Settings::load_from(&path).expect("reload");
+        assert_eq!(
+            reloaded.selora.disabled_providers,
+            vec!["deepseek".to_string(), "ollama".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The id list is the Connect modal's preset ids; a typo in either place
+    /// must fail this guard rather than silently disabling nothing.
+    #[test]
+    fn known_provider_ids_match_the_connect_presets() {
+        assert_eq!(
+            KNOWN_PROVIDER_IDS,
+            [
+                "selora",
+                "anthropic",
+                "openai",
+                "deepseek",
+                "ollama",
+                "openrouter",
+                "glm",
+                "custom"
+            ]
+        );
+        assert!(is_known_provider("selora"));
+        assert!(is_known_provider("custom"));
+        assert!(!is_known_provider(""));
+        assert!(!is_known_provider("SELORA"), "ids are case-sensitive");
+        assert!(!is_known_provider("not-a-provider"));
+    }
+
     /// Phase 5d: a pre-5d settings.json (no `agent.brave_search_api_key`,
     /// no `ui.reduce_motion`) deserializes with `None` / `false`.
     #[test]
@@ -925,6 +1012,32 @@ pub(crate) mod tests {
         assert_eq!(s.agent.max_iterations, 3, "the present field survives");
         assert_eq!(s.agent.brave_search_api_key, None);
         assert!(!s.ui.reduce_motion);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Workspace trust is persisted like any other `agent.*` field: a file
+    /// without it defaults to untrusted, and an explicit grant survives a
+    /// save/load cycle (protocol -> settings.json -> next bootstrap).
+    #[test]
+    fn agent_workspace_trust_defaults_untrusted_and_round_trips() {
+        let dir = temp_settings_dir("agent-workspace-trust");
+        let path = dir.join(SETTINGS_FILE_NAME);
+
+        let fresh = Settings::load_from(&path).expect("missing file is defaults");
+        assert!(!fresh.agent.workspace_trusted, "first run is untrusted");
+
+        let mut granted = fresh;
+        granted.agent.workspace_trusted = true;
+        granted.save_to(&path).expect("save trust");
+
+        let reloaded = Settings::load_from(&path).expect("reload trust");
+        assert!(reloaded.agent.workspace_trusted);
+
+        let mut revoked = reloaded;
+        revoked.agent.workspace_trusted = false;
+        revoked.save_to(&path).expect("save revocation");
+        assert!(!Settings::load_from(&path).unwrap().agent.workspace_trusted);
 
         let _ = std::fs::remove_dir_all(dir);
     }

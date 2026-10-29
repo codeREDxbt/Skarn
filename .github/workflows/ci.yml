@@ -1,4 +1,6 @@
-# Selora IDE - continuous integration (RELEASE.md section 4.1).
+# Selora IDE - continuous integration.
+#
+# Signing requirements: see SIGNING.md at the repository root.
 #
 # apps/selora-desktop/frontend/dist is gitignored and tauri-build embeds it
 # at compile time, so the frontend is installed, checked, and built before
@@ -36,9 +38,9 @@ jobs:
         uses: actions/checkout@v4.2.2
 
       # Fails fast on a version or repository-slug mismatch (Cargo.toml,
-      # tauri.conf.json, frontend package.json, selora-ide.iss, mkdocs.yml).
-      # On a tag push it also requires the CHANGELOG section, mirroring
-      # release.yml. No build is needed.
+      # tauri.conf.json, frontend package.json, selora-ide.iss; mkdocs.yml
+      # only when docs/ exists). On a tag push it also requires the CHANGELOG
+      # section, mirroring release.yml. No build is needed.
       - name: Verify release metadata
         shell: pwsh
         run: |
@@ -113,3 +115,112 @@ jobs:
 
       - name: cargo-deny (licenses + advisories)
         run: cargo deny check
+
+  # Stability checks that need a release build and, for the cold-start probe,
+  # a real desktop + WebView2 runtime. The large-file guard is deterministic
+  # and always runs. The cold-start probe is opt-in because GitHub-hosted
+  # windows-latest does not guarantee an interactive desktop: set the
+  # repository variable ENABLE_STARTUP_SMOKE=true to run it. When the variable
+  # is absent the probe is reported as skipped, never as a pass.
+  stability-smoke:
+    name: Stability smoke
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/selora-desktop/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/selora-desktop/frontend
+        run: npm ci
+
+      # tauri-build embeds frontend/dist at compile time.
+      - name: Build frontend
+        working-directory: apps/selora-desktop/frontend
+        run: npm run build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.7.5
+        with:
+          shared-key: ci-stability-windows
+          cache-on-failure: true
+
+      # Existing unit coverage for the open path: a file over MAX_FILE_BYTES
+      # must be rejected with file_too_large, and binary files with
+      # binary_file. This needs no window or WebView2.
+      - name: Large-file open guard
+        run: cargo test -p selora-desktop --bin selora-desktop --locked binary_and_oversized_files_are_rejected
+
+      - name: Build release binary
+        run: cargo build --release -p selora-desktop --locked
+
+      # Measures spawn -> the Rust-side "Window shown & focused!" boot marker
+      # in %TEMP%\selora_boot.log. A missing marker inside the timeout fails
+      # the step; the process tree is killed either way.
+      - name: Cold-start smoke (release exe)
+        if: vars.ENABLE_STARTUP_SMOKE == 'true'
+        shell: pwsh
+        env:
+          STARTUP_TIMEOUT_SECONDS: '60'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target\release\selora-desktop.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Release binary not found at $exe."
+          }
+          $exe = (Resolve-Path -LiteralPath $exe).Path
+          $boot = Join-Path $env:TEMP 'selora_boot.log'
+          Remove-Item -LiteralPath $boot -Force -ErrorAction SilentlyContinue
+          $timeout = [int]$env:STARTUP_TIMEOUT_SECONDS
+          $marker = 'Window shown & focused!'
+
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $proc = Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe) -PassThru
+          $coldStartMs = -1
+          try {
+            $deadline = (Get-Date).AddSeconds($timeout)
+            while ((Get-Date) -lt $deadline) {
+              if ($proc.HasExited) {
+                throw "Release binary exited with $($proc.ExitCode) before creating its window."
+              }
+              if (Test-Path -LiteralPath $boot) {
+                if (Select-String -LiteralPath $boot -SimpleMatch $marker -Quiet -ErrorAction SilentlyContinue) {
+                  $coldStartMs = [math]::Round($timer.Elapsed.TotalMilliseconds, 1)
+                  break
+                }
+              }
+              Start-Sleep -Milliseconds 50
+            }
+            $timer.Stop()
+            if ($coldStartMs -lt 0) {
+              throw "Startup marker '$marker' not seen within $timeout s; the release build did not finish startup."
+            }
+            "Cold start (spawn -> window shown): $coldStartMs ms"
+            "Cold-start smoke: $coldStartMs ms (timeout ${timeout}s)" >> $env:GITHUB_STEP_SUMMARY
+          }
+          finally {
+            if (-not $proc.HasExited) {
+              & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+            }
+            Get-Process -Name 'selora-desktop' -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Cold-start smoke not enabled
+        if: vars.ENABLE_STARTUP_SMOKE != 'true'
+        shell: pwsh
+        run: |
+          '::notice::Cold-start smoke skipped: GitHub-hosted runners do not guarantee an interactive desktop. Set repository variable ENABLE_STARTUP_SMOKE=true to enable it.'
+          'Cold-start smoke skipped (ENABLE_STARTUP_SMOKE is not `true`).' >> $env:GITHUB_STEP_SUMMARY

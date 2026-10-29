@@ -5,7 +5,7 @@
 // converted into protocol TextChange records and sent with a monotonically
 // increasing local version; protocol echoes are applied without being sent
 // back, and selection changes are debounced before leaving the webview.
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   Annotation,
   Compartment,
@@ -56,6 +56,9 @@ import {
   type TextPosition,
 } from '../../bridge/bridge';
 import { getAppSnapshot, subscribeApp } from '../../app/app-store';
+import { rememberEditorCursor, savedEditorSelection } from './editor-persistence';
+import { bindEditorCommands } from './editor-commands';
+import { attachEditorView, detachEditorView, isEditorClosing, markPendingEditorEdit, reconcilePendingEditorEditText, registerPendingEditResync, settlePendingEditorEdit } from './pending-edits';
 import { keybindMatches, parseKeybind } from '../keymap/keybind';
 import { createSeloraTheme, currentTheme } from './cm-theme';
 import {
@@ -64,7 +67,7 @@ import {
   recordEditorSelection,
   type RevealTarget,
 } from './editor-store';
-import { languageFor, loadLanguage } from './language-loaders';
+import { documentGuard, languageFor, largeDocumentNotice, loadLanguage, type DocumentGuard } from './language-loaders';
 import { completionOptions, toCmDiagnostics, watchDefinitionNavigation } from './lsp';
 import { offsetToPosition, positionToOffset } from './text-offsets';
 import { toastStore } from '../toasts/toast-store';
@@ -170,14 +173,16 @@ function languageKeyFor(buffer: BufferSnapshot): string {
 }
 
 function restoreSelection(buffer: BufferSnapshot): EditorSelection | undefined {
-  if (!buffer.selection) return undefined;
+  const selection = savedEditorSelection(buffer.path) ?? buffer.selection;
+  if (!selection) return undefined;
   return EditorSelection.single(
-    positionToOffset(buffer.text, buffer.selection.anchor),
-    positionToOffset(buffer.text, buffer.selection.active),
+    positionToOffset(buffer.text, selection.anchor),
+    positionToOffset(buffer.text, selection.active),
   );
 }
 
-function diagnosticsExtension(activePath: string, diagnostics: readonly Diagnostic[]): Extension {
+function diagnosticsExtension(activePath: string, diagnostics: readonly Diagnostic[], enabled = true): Extension {
+  if (!enabled) return [];
   return [
     linter((view) => toCmDiagnostics(activePath, diagnostics, view.state.doc.toString())),
     lintGutter(),
@@ -279,6 +284,44 @@ export function computeTextChanges(docBefore: Text, changes: ChangeSet): TextCha
   return result;
 }
 
+/**
+ * Recovery path for a transport failure that left local text in doubt: send
+ * the whole local document against the backend's current version. Local text
+ * is authoritative (it is what the user sees and typed), so this never drops
+ * an edit; it only makes the backend catch up.
+ */
+async function resyncLocalBuffer(
+  localBuffers: Map<string, LocalBufferState>,
+  bufferId: string,
+): Promise<number | null> {
+  const context = currentEditorContext();
+  const bootstrap = getAppSnapshot().bootstrap;
+  const backend = bootstrap?.buffers.find((candidate) => candidate.buffer_id === bufferId);
+  const local = localBuffers.get(bufferId);
+  if (!context || !backend || !local) {
+    throw new Error('The workspace is not ready to resynchronize this buffer.');
+  }
+  const text = local.text.toString();
+  if (text === backend.text) {
+    local.version = backend.version;
+    return null;
+  }
+  await applyEditorChange(
+    bufferId,
+    backend.version,
+    [
+      {
+        start: { line: 0, utf16_column: 0 },
+        end: offsetToPosition(backend.text, backend.text.length),
+        replacement: text,
+      },
+    ],
+    context,
+  );
+  local.version = backend.version + 1;
+  return local.version;
+}
+
 export function CodeMirrorPane({
   buffer,
   onScroll,
@@ -296,9 +339,16 @@ export function CodeMirrorPane({
   // authoritative until the backend echo arrives, so switching away from a
   // buffer with edits in flight cannot drop them.
   const localBuffersRef = useRef<Map<string, LocalBufferState>>(new Map());
+  const resyncDisposersRef = useRef<Array<() => void>>([]);
   const activeIdRef = useRef(buffer.buffer_id);
   const languageKeyRef = useRef('');
   const languageRequestRef = useRef(0);
+  const documentGuardRef = useRef<DocumentGuard>({
+    large: false,
+    reason: null,
+    chars: 0,
+    longestLineChars: 0,
+  });
   const selectionTimerRef = useRef<number | null>(null);
   const suppressEditsRef = useRef(false);
   const createStateRef = useRef<((nextBuffer: BufferSnapshot) => EditorState) | null>(null);
@@ -308,10 +358,19 @@ export function CodeMirrorPane({
   const editorPreferencesCompartment = useRef(new Compartment());
   const saveKeymapCompartment = useRef(new Compartment());
   const themeCompartment = useRef(new Compartment());
+  const readOnlyCompartment = useRef(new Compartment());
   const diagnosticsRef = useRef<readonly Diagnostic[]>(EMPTY_DIAGNOSTICS);
 
   bufferRef.current = buffer;
   onScrollRef.current = onScroll;
+
+  // Large/minified files: plain text, no parse, no lint, no editing. The scan
+  // runs once per distinct buffer text (not per render) so a 2 MB document
+  // does not get re-classified on every store update.
+  const documentProfile = useMemo(() => documentGuard(buffer.text), [buffer.text]);
+  documentGuardRef.current = documentProfile;
+  const largeDocument = documentProfile.large;
+  const largeDocumentMessage = largeDocumentNotice(documentProfile);
 
   const configureLanguage = (view: EditorView, nextBuffer: BufferSnapshot): void => {
     const requestId = ++languageRequestRef.current;
@@ -319,7 +378,9 @@ export function CodeMirrorPane({
     const path = nextBuffer.path;
     const language = languageFor(path);
 
-    if (language === 'plain') {
+    if (language === 'plain' || documentGuard(nextBuffer.text).large) {
+      // Large/minified files never load a language package: the Lezer parse is
+      // the expensive part, and the read-only fallback shows plain text.
       view.dispatch({
         effects: languageCompartment.current.reconfigure([]),
       });
@@ -358,6 +419,11 @@ export function CodeMirrorPane({
         },
       ],
     ]);
+    resyncDisposersRef.current.push(
+      registerPendingEditResync(initialBuffer.buffer_id, (bufferId) =>
+        resyncLocalBuffer(localBuffersRef.current, bufferId),
+      ),
+    );
 
     const scheduleSelection = (): void => {
       if (selectionTimerRef.current !== null) {
@@ -378,6 +444,7 @@ export function CodeMirrorPane({
         };
         // Tell the store right away so the agent context does not wait for the
         // protocol echo of this debounced set_selection.
+        rememberEditorCursor(current.path, selection);
         recordEditorSelection(current.buffer_id, selection);
         void setSelection(current.buffer_id, selection, context).catch(() => undefined);
       }, SELECTION_DEBOUNCE_MS);
@@ -390,7 +457,7 @@ export function CodeMirrorPane({
         );
         const current = bufferRef.current;
         const context = currentEditorContext();
-        if (!external && context) {
+        if (!external) {
           const changes = computeTextChanges(update.startState.doc, update.changes);
           if (changes.length > 0) {
             // The wire contract expects the *current* backend version, which
@@ -403,7 +470,11 @@ export function CodeMirrorPane({
               text: update.state.doc,
               version: nextVersion,
             });
-            void applyEditorChange(current.buffer_id, baseVersion, changes, context).catch(() => {
+            const workspaceId = context?.workspace_id ?? getAppSnapshot().bootstrap?.workspace.id ?? '';
+            markPendingEditorEdit(current.buffer_id, workspaceId, current.path, nextVersion);
+            const request = context ? applyEditorChange(current.buffer_id, baseVersion, changes, context) : Promise.reject(new Error('No workspace connection'));
+            void request.then(() => settlePendingEditorEdit(workspaceId, current.buffer_id, true)).catch(() => {
+              settlePendingEditorEdit(workspaceId, current.buffer_id, false);
               // The backend rejected the batch (stale version or invalid
               // range). Roll the local version back to the last version the
               // backend is known to hold instead of drifting forward.
@@ -416,7 +487,7 @@ export function CodeMirrorPane({
               entry.version = Math.max(baseVersion, snapshotVersion);
               toastStore.pushLocal(
                 'warning',
-                'An editor change could not be synchronized with the workspace; the buffer version was resynced.',
+                'An editor change could not be synchronized with the workspace; the buffer version was resynced. Saving retries the synchronization.',
               );
             });
           }
@@ -433,6 +504,9 @@ export function CodeMirrorPane({
       const current = bufferRef.current;
       const context = currentEditorContext();
       if (!context) return null;
+      // A hover stringifies the whole document for the protocol; on a large
+      // file that is the exact cost the read-only fallback exists to avoid.
+      if (documentGuardRef.current.large) return null;
 
       const docText = view.state.doc.toString();
       const requestId = ++hoverSequence;
@@ -466,6 +540,7 @@ export function CodeMirrorPane({
     let cancelCompletion: (() => void) | null = null;
     const completionSource: CompletionSource = async (context: CompletionContext) => {
       const current = bufferRef.current;
+      if (documentGuardRef.current.large) return null;
       const word = context.matchBefore(/[\w$]*/);
       if (!context.explicit && (!word || word.from === word.to)) return null;
 
@@ -573,25 +648,33 @@ export function CodeMirrorPane({
       ),
       saveKeymapCompartment.current.of(saveKeymapExtension(settingsRef.current)),
       themeCompartment.current.of(createSeloraTheme()),
+      EditorState.transactionFilter.of((transaction) =>
+        transaction.docChanged && isEditorClosing(activeIdRef.current) && !transaction.annotation(ExternalDocumentSync)
+          ? [] : transaction),
       EditorView.updateListener.of(handleUpdate),
     ];
 
-    const createState = (nextBuffer: BufferSnapshot): EditorState =>
-      EditorState.create({
+    const createState = (nextBuffer: BufferSnapshot): EditorState => {
+      const guarded = documentGuard(nextBuffer.text).large;
+      return EditorState.create({
         doc: nextBuffer.text,
         selection: restoreSelection(nextBuffer),
         extensions: [
           ...baseExtensions,
           languageCompartment.current.of([]),
+          readOnlyCompartment.current.of(EditorState.readOnly.of(guarded)),
           diagnosticsCompartment.current.of(
-            diagnosticsExtension(nextBuffer.path, diagnosticsRef.current),
+            diagnosticsExtension(nextBuffer.path, diagnosticsRef.current, !guarded),
           ),
         ],
       });
+    };
     createStateRef.current = createState;
     const state = createState(initialBuffer);
 
     const view = new EditorView({ state, parent: host });
+    const unbindEditorCommands = bindEditorCommands(view);
+    attachEditorView(initialBuffer.buffer_id);
     viewRef.current = view;
     configureLanguage(view, initialBuffer);
 
@@ -618,7 +701,11 @@ export function CodeMirrorPane({
       }
       resizeObserver?.disconnect();
       view.scrollDOM.removeEventListener('scroll', emitScroll);
+      unbindEditorCommands();
+      for (const dispose of resyncDisposersRef.current) dispose();
+      resyncDisposersRef.current = [];
       view.destroy();
+      detachEditorView(activeIdRef.current);
       viewRef.current = null;
     };
   }, []);
@@ -673,7 +760,11 @@ export function CodeMirrorPane({
       if (!view) return;
       view.dispatch({
         effects: diagnosticsCompartment.current.reconfigure(
-          diagnosticsExtension(bufferRef.current.path, nextDiagnostics),
+          diagnosticsExtension(
+            bufferRef.current.path,
+            nextDiagnostics,
+            !documentGuardRef.current.large,
+          ),
         ),
       });
     });
@@ -702,10 +793,24 @@ export function CodeMirrorPane({
     if (!view) return;
     view.dispatch({
       effects: diagnosticsCompartment.current.reconfigure(
-        diagnosticsExtension(buffer.path, diagnosticsRef.current),
+        diagnosticsExtension(
+          buffer.path,
+          diagnosticsRef.current,
+          !documentGuardRef.current.large,
+        ),
       ),
     });
   }, [buffer.buffer_id, buffer.path]);
+
+  // Large/minified documents are read-only: no keystrokes reach the buffer,
+  // so CodeMirror never re-parses a multi-MB file on input.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.current.reconfigure(EditorState.readOnly.of(largeDocument)),
+    });
+  }, [buffer.buffer_id, largeDocument]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -713,7 +818,12 @@ export function CodeMirrorPane({
 
     const switched = activeIdRef.current !== buffer.buffer_id;
     const cached = localBuffersRef.current.get(buffer.buffer_id);
-    activeIdRef.current = buffer.buffer_id;
+    // A failed batch is reconciled only when the backend text matches what the
+    // user last saw locally. Compare before any cache overwrite below.
+    const workspaceId = getAppSnapshot().bootstrap?.workspace.id;
+    if (workspaceId && cached) {
+      reconcilePendingEditorEditText(workspaceId, buffer.buffer_id, buffer.text, cached.text.toString());
+    }
 
     if (switched) {
       const createState = createStateRef.current;
@@ -728,10 +838,18 @@ export function CodeMirrorPane({
       suppressEditsRef.current = true;
       view.setState(createState(nextBuffer));
       suppressEditsRef.current = false;
+      detachEditorView(activeIdRef.current);
+      activeIdRef.current = buffer.buffer_id;
+      attachEditorView(buffer.buffer_id);
       localBuffersRef.current.set(buffer.buffer_id, {
         text: view.state.doc,
         version: nextBuffer.version,
       });
+      resyncDisposersRef.current.push(
+        registerPendingEditResync(buffer.buffer_id, (bufferId) =>
+          resyncLocalBuffer(localBuffersRef.current, bufferId),
+        ),
+      );
       languageKeyRef.current = languageKeyFor(nextBuffer);
       configureLanguage(view, nextBuffer);
       return;
@@ -796,5 +914,39 @@ export function CodeMirrorPane({
     editorStore.clearReveal(revealTarget.requestId);
   }, [buffer.path, buffer.text, buffer.version, revealTarget]);
 
-  return <div className="editor-code-host" ref={hostRef} data-buffer-id={buffer.buffer_id} />;
+  const codeHost = (
+    <div className="editor-code-host" ref={hostRef} data-buffer-id={buffer.buffer_id} />
+  );
+  if (!largeDocumentMessage) return codeHost;
+
+  // Read-only fallback for huge/minified files: a banner above a plain-text,
+  // non-editable CodeMirror view. Wrapping only in this mode keeps the normal
+  // layout byte-for-byte unchanged.
+  return (
+    <div
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      <div
+        className="editor-large-file-notice"
+        data-testid="large-file-notice"
+        role="status"
+        style={{
+          padding: '4px 10px',
+          fontSize: '12px',
+          color: 'var(--text-secondary, #9aa4b2)',
+          background: 'var(--ink-panel, #1b1f24)',
+          borderBottom: '1px solid var(--border-subtle, #2c333c)',
+        }}
+      >
+        {largeDocumentMessage}
+      </div>
+      {codeHost}
+    </div>
+  );
 }

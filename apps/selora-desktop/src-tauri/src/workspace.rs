@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -146,7 +146,7 @@ pub struct Workspace {
     /// or a close never jumps to an unrelated tab. Lock order is always
     /// `buffers` then `active`; no path takes them in the other order.
     active: Mutex<Option<BufferId>>,
-    git: Mutex<Option<selora_git::GitRepo>>,
+    git: Arc<Mutex<Option<selora_git::GitRepo>>>,
 }
 
 impl Workspace {
@@ -187,13 +187,30 @@ impl Workspace {
             buffers: Mutex::new(BTreeMap::new()),
             conflicts: Mutex::new(BTreeMap::new()),
             active: Mutex::new(None),
-            git: Mutex::new(git),
+            git: Arc::new(Mutex::new(git)),
         })
     }
 
     /// The canonical workspace root.
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Perform an Explorer mutation while preventing concurrent buffer edits.
+    pub fn explorer_mutate(
+        &self,
+        paths: &[PathBuf],
+        action: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Vec<BufferSnapshotDto>, String> {
+        let buffers = self.buffers_lock();
+        if buffers
+            .values()
+            .any(|buffer| paths.iter().any(|path| buffer.abs_path.starts_with(path)))
+        {
+            return Err("Close open files in this entry before renaming or deleting it. Save any unsaved changes first.".into());
+        }
+        action()?;
+        Ok(Vec::new())
     }
 
     /// The workspace folder name, or the full path when it has no file name.
@@ -219,13 +236,14 @@ impl Workspace {
     /// touching the disk, so unsaved edits are preserved.
     pub fn open_file(&self, rel: &str) -> WsResult<BufferSnapshotDto> {
         let rel = Self::normalize_relative(rel)?;
-        if let Some(snapshot) = {
-            let buffers = self.buffers_lock();
-            buffers.get(&rel).map(BufferState::snapshot)
-        } {
+        let mut buffers = self.buffers_lock();
+        if let Some(snapshot) = buffers.get(&rel).map(BufferState::snapshot) {
             // Re-selecting an already-open file made it active in the old
             // single-buffer day; keep that behavior for bootstrap.
-            self.set_active_buffer(&snapshot.buffer_id)?;
+            *self
+                .active
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(snapshot.buffer_id.clone());
             return Ok(snapshot);
         }
 
@@ -245,15 +263,7 @@ impl Workspace {
             selection: None,
         };
         let snapshot = state.snapshot();
-        let mut buffers = self.buffers_lock();
-        if let Some(existing) = buffers.get(&rel) {
-            let snapshot = existing.snapshot();
-            drop(buffers);
-            self.set_active_buffer(&snapshot.buffer_id)?;
-            return Ok(snapshot);
-        }
         buffers.insert(rel, state);
-        drop(buffers);
         *self
             .active
             .lock()
@@ -689,44 +699,14 @@ impl Workspace {
     }
 
     /// Search workspace files, literal or regular-expression per the query.
+    /// The interactive entry points supersede the previous search on this
+    /// root, so a new query never waits behind a stale monorepo scan.
+    ///
+    /// The desktop now scans through [`search_root`] off the workspace lock;
+    /// this in-place entry point stays for the workspace tests.
+    #[cfg(test)]
     pub fn search(&self, query: &SearchQueryDto) -> WsResult<selora_protocol::SearchResultsDto> {
-        let fs_query = selora_fs::search::SearchQuery {
-            pattern: query.query.clone(),
-            case_sensitive: query.case_sensitive,
-            whole_word: query.whole_word,
-        };
-        let hits = if query.use_regex {
-            selora_fs::search::search_in_files_regex(&self.root, &fs_query)
-        } else {
-            selora_fs::search::search_in_files(&self.root, &fs_query)
-        }
-        .map_err(search_error)?;
-        let mut mapped = Vec::new();
-        for hit in hits.into_iter().take(MAX_SEARCH_HITS) {
-            let Some(rel) = self.workspace_relative(&hit.path) else {
-                continue;
-            };
-            let Ok(path) = WorkspacePath::new(&rel) else {
-                continue;
-            };
-            let line = u32::try_from(hit.line_number).unwrap_or(u32::MAX);
-            let column = hit
-                .spans
-                .first()
-                .map(|span| u32::try_from(span.start.saturating_add(1)).unwrap_or(u32::MAX))
-                .unwrap_or(1);
-            mapped.push(SearchHitDto {
-                path,
-                line,
-                column,
-                preview: hit.line_text,
-            });
-        }
-        Ok(SearchResultsDto {
-            request_id: None,
-            query: query.clone(),
-            hits: mapped,
-        })
+        search_root(&self.root, query)
     }
 
     /// Snapshot git status; a non-repository workspace is empty, not an error.
@@ -1040,32 +1020,16 @@ impl Workspace {
         Ok(self.git_status_to_dto(status))
     }
 
-    /// Fetch from the branch's remote (or `origin`); output is redacted.
-    pub fn git_fetch(&self) -> WsResult<GitStatusDto> {
-        let git = self.git_lock();
-        let repo = git.as_ref().ok_or_else(not_a_git_repo)?;
-        repo.fetch(None).map_err(git_error)?;
-        let status = repo.status().map_err(git_error)?;
-        Ok(self.git_status_to_dto(status))
-    }
-
-    /// Pull the checked-out branch from its remote. A conflicted pull leaves
-    /// the index and merge state in place for explicit resolution.
-    pub fn git_pull(&self) -> WsResult<GitStatusDto> {
-        let git = self.git_lock();
-        let repo = git.as_ref().ok_or_else(not_a_git_repo)?;
-        repo.pull(None, None).map_err(git_error)?;
-        let status = repo.status().map_err(git_error)?;
-        Ok(self.git_status_to_dto(status))
-    }
-
-    /// Push the checked-out branch to its remote, never forced.
-    pub fn git_push(&self) -> WsResult<GitStatusDto> {
-        let git = self.git_lock();
-        let repo = git.as_ref().ok_or_else(not_a_git_repo)?;
-        repo.push(None, None).map_err(git_error)?;
-        let status = repo.status().map_err(git_error)?;
-        Ok(self.git_status_to_dto(status))
+    // Fetch, pull and push deliberately live on [`GitNetwork`]: the desktop
+    // captures this handle, drops the workspace guard, and only then runs the
+    // bounded network call, so save/tree/search never queue behind it.
+    /// Capture an owned handle to this workspace's repository for a network
+    /// operation run outside the workspace mutex.
+    pub fn git_network(&self) -> GitNetwork {
+        GitNetwork {
+            root: self.root.clone(),
+            git: Arc::clone(&self.git),
+        }
     }
 
     fn buffers_lock(&self) -> MutexGuard<'_, BTreeMap<String, BufferState>> {
@@ -1203,27 +1167,8 @@ impl Workspace {
         })
     }
 
-    fn plain_root(&self) -> PathBuf {
-        #[cfg(windows)]
-        {
-            let text = self.root.as_os_str().to_string_lossy();
-            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-                return PathBuf::from(format!(r"\\{rest}"));
-            }
-            if let Some(rest) = text.strip_prefix(r"\\?\") {
-                return PathBuf::from(rest);
-            }
-        }
-        self.root.clone()
-    }
-
     fn workspace_relative(&self, path: &Path) -> Option<String> {
-        let plain_root = self.plain_root();
-        let relative = path
-            .strip_prefix(&self.root)
-            .or_else(|_| path.strip_prefix(&plain_root))
-            .ok()?;
-        Some(path_to_forward_slashes(relative))
+        workspace_relative_to(&self.root, path)
     }
 
     fn tree_node_to_dto(
@@ -1265,46 +1210,75 @@ impl Workspace {
     }
 
     fn git_status_to_dto(&self, status: selora_git::GitStatus) -> GitStatusDto {
-        let mut changed_paths = Vec::new();
-        let mut staged_paths = Vec::new();
-        let mut files = Vec::new();
-        for entry in status.entries {
-            let Some(rel) = self.workspace_relative(&entry.abs_path) else {
-                continue;
-            };
-            let Ok(path) = WorkspacePath::new(rel) else {
-                continue;
-            };
-            // P2: the two slots are independent — a file can be staged *and*
-            // carry further working-tree edits. Record both facts per file so
-            // the panel can render (and act on) each side separately.
-            let staged = entry.staged != selora_git::Slot::Unmodified;
-            let worktree = entry.has_worktree_changes();
-            if staged {
-                staged_paths.push(path.clone());
-            }
-            changed_paths.push(path.clone());
-            files.push(GitFileDto {
-                path,
-                staged,
-                worktree,
-            });
+        git_status_to_dto_at(&self.root, status)
+    }
+}
+
+/// The root with the Windows verbatim prefix removed, so a path returned by
+/// git can be matched against the workspace root.
+fn plain_root_of(root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = root.as_os_str().to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
         }
-        let conflicts = status
-            .conflicts
-            .iter()
-            .filter_map(|path| {
-                self.workspace_relative(path)
-                    .and_then(|rel| WorkspacePath::new(rel).ok())
-            })
-            .collect();
-        GitStatusDto {
-            branch: status.branch,
-            changed_paths,
-            staged_paths,
-            files,
-            conflicts,
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
         }
+    }
+    root.to_path_buf()
+}
+
+/// `path` relative to `root`, in the forward-slash form the protocol uses.
+fn workspace_relative_to(root: &Path, path: &Path) -> Option<String> {
+    let plain_root = plain_root_of(root);
+    let relative = path
+        .strip_prefix(root)
+        .or_else(|_| path.strip_prefix(&plain_root))
+        .ok()?;
+    Some(path_to_forward_slashes(relative))
+}
+
+fn git_status_to_dto_at(root: &Path, status: selora_git::GitStatus) -> GitStatusDto {
+    let mut changed_paths = Vec::new();
+    let mut staged_paths = Vec::new();
+    let mut files = Vec::new();
+    for entry in status.entries {
+        let Some(rel) = workspace_relative_to(root, &entry.abs_path) else {
+            continue;
+        };
+        let Ok(path) = WorkspacePath::new(rel) else {
+            continue;
+        };
+        // P2: the two slots are independent — a file can be staged *and*
+        // carry further working-tree edits. Record both facts per file so
+        // the panel can render (and act on) each side separately.
+        let staged = entry.staged != selora_git::Slot::Unmodified;
+        let worktree = entry.has_worktree_changes();
+        if staged {
+            staged_paths.push(path.clone());
+        }
+        changed_paths.push(path.clone());
+        files.push(GitFileDto {
+            path,
+            staged,
+            worktree,
+        });
+    }
+    let conflicts = status
+        .conflicts
+        .iter()
+        .filter_map(|path| {
+            workspace_relative_to(root, path).and_then(|rel| WorkspacePath::new(rel).ok())
+        })
+        .collect();
+    GitStatusDto {
+        branch: status.branch,
+        changed_paths,
+        staged_paths,
+        files,
+        conflicts,
     }
 }
 
@@ -1475,11 +1449,110 @@ fn invalid_path_error(err: selora_protocol::ProtocolValidationError) -> Workspac
     WorkspaceError::new("invalid_path", err.to_string())
 }
 
+/// Search `root` without holding the workspace mutex.
+///
+/// The desktop state calls this after it has issued the cancel for the
+/// previous interactive search, so a long scan never blocks the command
+/// thread's workspace lock or a newer search.
+pub fn search_root(root: &Path, query: &SearchQueryDto) -> WsResult<SearchResultsDto> {
+    let fs_query = selora_fs::search::SearchQuery {
+        pattern: query.query.clone(),
+        case_sensitive: query.case_sensitive,
+        whole_word: query.whole_word,
+    };
+    let hits = if query.use_regex {
+        selora_fs::search::search_in_files_regex_interactive(root, &fs_query)
+    } else {
+        selora_fs::search::search_in_files_interactive(root, &fs_query)
+    }
+    .map_err(search_error)?;
+    let mut mapped = Vec::new();
+    for hit in hits.into_iter().take(MAX_SEARCH_HITS) {
+        let Some(rel) = workspace_relative_to(root, &hit.path) else {
+            continue;
+        };
+        let Ok(path) = WorkspacePath::new(&rel) else {
+            continue;
+        };
+        let line = u32::try_from(hit.line_number).unwrap_or(u32::MAX);
+        let column = hit
+            .spans
+            .first()
+            .map(|span| u32::try_from(span.start.saturating_add(1)).unwrap_or(u32::MAX))
+            .unwrap_or(1);
+        mapped.push(SearchHitDto {
+            path,
+            line,
+            column,
+            preview: hit.line_text,
+        });
+    }
+    Ok(SearchResultsDto {
+        request_id: None,
+        query: query.clone(),
+        hits: mapped,
+    })
+}
+
+/// A cheap, owned handle to the workspace's git repository.
+///
+/// It clones the shared `Arc<Mutex<Option<GitRepo>>>`, so the desktop can drop
+/// the workspace guard and still run a bounded fetch/pull/push against the
+/// *same* repository handle. The inner mutex keeps every git operation on one
+/// repository serialized exactly as before, without the workspace mutex.
+pub struct GitNetwork {
+    root: PathBuf,
+    git: Arc<Mutex<Option<selora_git::GitRepo>>>,
+}
+
+impl GitNetwork {
+    /// The canonical workspace root this handle was captured from.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Fetch from the branch's remote (or `origin`); output is redacted.
+    pub fn fetch(&self) -> WsResult<GitStatusDto> {
+        self.run(|repo| repo.fetch(None))
+    }
+
+    /// Pull the checked-out branch from its remote. A conflicted pull leaves
+    /// the index and merge state in place for explicit resolution.
+    pub fn pull(&self) -> WsResult<GitStatusDto> {
+        self.run(|repo| repo.pull(None, None))
+    }
+
+    /// Push the checked-out branch to its remote, never forced.
+    pub fn push(&self) -> WsResult<GitStatusDto> {
+        self.run(|repo| repo.push(None, None))
+    }
+
+    /// Run one network operation on the captured repository, then map its
+    /// fresh authoritative status. The workspace guard is not involved.
+    fn run(
+        &self,
+        action: impl FnOnce(
+            &selora_git::GitRepo,
+        ) -> Result<selora_git::RemoteOutcome, selora_git::GitError>,
+    ) -> WsResult<GitStatusDto> {
+        let git = self
+            .git
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let repo = git.as_ref().ok_or_else(not_a_git_repo)?;
+        action(repo).map_err(git_error)?;
+        let status = repo.status().map_err(git_error)?;
+        Ok(git_status_to_dto_at(&self.root, status))
+    }
+}
+
 /// Map a search-engine failure: a bad regex is the user's typo
-/// (`invalid_query`), everything else is I/O.
+/// (`invalid_query`), a superseded search is not an error to retry
+/// (`search_cancelled`), everything else is I/O.
 fn search_error(err: selora_fs::search::SearchError) -> WorkspaceError {
     let code = match &err {
         selora_fs::search::SearchError::InvalidPattern(_) => "invalid_query",
+        selora_fs::search::SearchError::Cancelled => "search_cancelled",
         _ => "io_error",
     };
     WorkspaceError::new(code, err.to_string())
@@ -1517,7 +1590,11 @@ fn not_a_git_repo() -> WorkspaceError {
 }
 
 fn git_error(err: selora_git::GitError) -> WorkspaceError {
-    WorkspaceError::new("git_error", err.to_string())
+    let code = match &err {
+        selora_git::GitError::Timeout { .. } => "network_timeout",
+        _ => "git_error",
+    };
+    WorkspaceError::new(code, err.to_string())
 }
 
 #[cfg(test)]
@@ -2346,9 +2423,30 @@ mod tests {
             .expect("delete merged branch");
 
         // Network commands fail with a typed, readable error and no remote.
-        let push = workspace.git_push().expect_err("no remote");
+        let push = workspace.git_network().push().expect_err("no remote");
         assert_eq!(push.code, "git_error", "{push:?}");
         assert!(push.message.contains("no git remote"), "{push:?}");
+    }
+
+    #[test]
+    fn git_timeout_maps_to_the_typed_network_timeout_code() {
+        let error = git_error(selora_git::GitError::Timeout {
+            operation: "fetch",
+            seconds: 180,
+            detail: "remote did not answer".into(),
+        });
+        assert_eq!(error.code, "network_timeout");
+        assert!(error.message.contains("timed out"), "{error:?}");
+    }
+
+    #[test]
+    fn git_network_handle_is_typed_outside_a_repository() {
+        let fixture = Fixture::new();
+        let workspace = fixture.workspace();
+        assert_eq!(
+            workspace.git_network().fetch().unwrap_err().code,
+            "not_a_git_repo"
+        );
     }
 
     #[test]

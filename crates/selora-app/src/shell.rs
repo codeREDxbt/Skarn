@@ -3022,8 +3022,10 @@ mod tests {
             effect_rx,
         );
         // Isolated from the real %APPDATA%; settings never arrive, so the
-        // ping loop and the LSP manager stay off.
+        // ping loop and the LSP manager stay off. The shell tests exercise
+        // tool cards and approvals, so grant workspace trust explicitly.
         app.workspace_dir = None;
+        app.state.settings.agent.workspace_trusted = true;
         app
     }
 

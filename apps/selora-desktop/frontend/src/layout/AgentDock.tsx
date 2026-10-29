@@ -12,6 +12,7 @@ import React, { useEffect, useState, useSyncExternalStore } from 'react';
 import { ChevronDown, Code2, Columns, ShieldCheck, Square } from '../components/icons';
 import { agentStore, getComposerGate } from '../features/agent/agent-store';
 import { AgentSessionTabs } from '../features/agent/components/AgentSessionTabs';
+import { AgentSessionContextMenu } from '../features/agent/components/AgentSessionContextMenu';
 import { AgentSessionRail } from '../features/agent/components/AgentSessionRail';
 import { AgentTodoSpine } from '../features/agent/components/AgentTodoSpine';
 import { AgentExecutionFeed } from '../features/agent/components/AgentExecutionFeed';
@@ -50,9 +51,11 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
   const [showFloatingPlan, setShowFloatingPlan] = useState(false);
   const [infeedPlanExpanded, setInfeedPlanExpanded] = useState(false);
   const [showSessionRail, setShowSessionRail] = useState(false);
+  const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
 
   const activeSession =
     state.sessions.find((session) => session.id === state.activeSessionId) ?? null;
+  const menuSession = state.sessions.find((session) => session.id === sessionMenu?.sessionId);
 
   const hasMessages = state.messages.length > 0;
   // Only a backend-reported workspace with a real root earns a name line.
@@ -111,6 +114,11 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
           <span
             className="agent-session-badge"
             role="status"
+            onContextMenu={(event) => {
+              if (!activeSession) return;
+              event.preventDefault();
+              setSessionMenu({ sessionId: activeSession.id, x: event.clientX, y: event.clientY });
+            }}
             title={
               activeSession
                 ? `Active session: ${activeSession.title}`
@@ -229,8 +237,11 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
         activeSessionId={state.activeSessionId}
         busy={state.sessionBusy}
         error={state.sessionError}
+        pinnedSessionIds={state.pinnedSessionIds}
         onNew={() => void agentStore.requestNewSession()}
         onSelect={(sessionId) => void agentStore.requestSwitchSession(sessionId)}
+        onTogglePin={(sessionId) => agentStore.toggleSessionPinned(sessionId)}
+        onDelete={(sessionId) => void agentStore.requestDeleteSession(sessionId)}
       />
       {/* Phase 9e: running and finished children under the selected parent.
           Opening one swaps the body below for its read-only transcript. */}
@@ -246,10 +257,8 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
       />
 
       {/* Durable sessions share the same backend switch route as the tabs. */}
-      {state.resumableSessions.length > 0 && (
         <button type="button" className="agent-decision-secondary" aria-expanded={showSessionRail}
-          onClick={() => setShowSessionRail(!showSessionRail)}>Resume sessions</button>
-      )}
+          onClick={() => setShowSessionRail(!showSessionRail)}>Session history</button>
       {showSessionRail && <AgentSessionRail sessions={state.sessions} activeSessionId={state.activeSessionId}
         resumableSessions={state.resumableSessions} onClose={() => setShowSessionRail(false)}
         onDelete={(sessionId) => void agentStore.requestDeleteSession(sessionId)} />}
@@ -396,6 +405,19 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
           </div>
         )}
       </div>
+      {sessionMenu && menuSession && (
+        <AgentSessionContextMenu
+          key={menuSession.id}
+          session={menuSession}
+          x={sessionMenu.x}
+          y={sessionMenu.y}
+          isPinned={state.pinnedSessionIds.includes(menuSession.id)}
+          canDelete={!menuSession.isRunning && !state.sessionBusy}
+          onTogglePin={() => agentStore.toggleSessionPinned(menuSession.id)}
+          onDelete={() => void agentStore.requestDeleteSession(menuSession.id)}
+          onClose={() => setSessionMenu(null)}
+        />
+      )}
     </div>
   );
 }

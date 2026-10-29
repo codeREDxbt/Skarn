@@ -60,6 +60,7 @@ import {
   type WorkflowApproval,
 } from '../../bridge/bridge';
 import { toastStore } from '../toasts/toast-store';
+import { playCue } from '../sound/sound-store';
 
 export type ModelSettings = {
   temperature: number;
@@ -69,6 +70,7 @@ export type ModelSettings = {
 
 export type AgentState = {
   sessions: AgentSession[];
+  pinnedSessionIds: string[];
   /** Phase 9d: durable sessions from Rust (the resume picker). */
   resumableSessions: ResumableAgentSession[];
   activeSessionId: string;
@@ -114,8 +116,82 @@ export type AgentState = {
 };
 
 const STORED_SETTINGS_KEY = 'selora:model_settings';
+const PINNED_SESSIONS_KEY = 'selora:agent-pinned-sessions';
+
+function loadPinnedSessionIds(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(PINNED_SESSIONS_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePinnedSessionIds(ids: string[]): void {
+  try {
+    localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids));
+  } catch {
+    // Storage failure does not prevent pinning for the current session.
+  }
+}
 
 const INITIAL_SESSIONS: AgentSession[] = [];
+/**
+ * A message a user Stop ended. Additive on the store's `ChatMessage`: the
+ * partial text stays, the row renders as finished (not as an error), and the
+ * cancelled flag is what distinguishes a stop from a normal completion.
+ */
+export type CancelledChatMessage = ChatMessage & { cancelled?: boolean };
+
+/**
+ * Mark the live assistant row as cancelled by the user. The partial text is
+ * kept verbatim — a Stop must never discard what already streamed — and an
+ * error status is deliberately not used: a user stop is not a failure.
+ * Pure so the cancel contract is testable without a live bridge.
+ */
+export function markActiveMessageCancelled(messages: ChatMessage[]): ChatMessage[] {
+  const index = messages.length - 1;
+  if (index < 0 || messages[index]?.role !== 'assistant') return messages;
+  const updated: CancelledChatMessage = {
+    ...messages[index]!,
+    status: 'complete',
+    cancelled: true,
+  };
+  const next = [...messages];
+  next[index] = updated;
+  return next;
+}
+
+/**
+ * Mark the live assistant row as failed, appending the surfaced error to the
+ * partial text (never replacing it). Pure for the same testability reason.
+ */
+export function markActiveMessageFailed(
+  messages: ChatMessage[],
+  message: string,
+): ChatMessage[] {
+  const index = messages.length - 1;
+  if (index < 0 || messages[index]?.role !== 'assistant') return messages;
+  const last = messages[index]!;
+  const updated: ChatMessage = {
+    ...last,
+    content: last.content ? `${last.content}\n\n[Error: ${message}]` : `[Error: ${message}]`,
+    status: 'error',
+  };
+  const next = [...messages];
+  next[index] = updated;
+  return next;
+}
+
+/**
+ * True when a turn ended because the user pressed Stop. The backend reports
+ * it as `completed: false` plus the "stopped by user" end message; that is a
+ * lifecycle end, never an error.
+ */
+export function isUserStoppedTurn(completed: boolean, endMessage?: string | null): boolean {
+  return !completed && /stopped by user/i.test(endMessage ?? '');
+}
+
 /**
  * Session-scoped permission default (Phase 9): auto-approve is never a
  * persisted trust grant. A restart, a reset, or a new session starts here.
@@ -200,6 +276,7 @@ const INITIAL_TODOS: AgentTodo[] = [];
 
 let state: AgentState = {
   sessions: INITIAL_SESSIONS,
+  pinnedSessionIds: loadPinnedSessionIds(),
   activeSessionId: '',
   resumableSessions: [],
   messages: [],
@@ -2006,6 +2083,8 @@ const activeSessionId =
 
   deleteSession(sessionId: string) {
     sessionViews.delete(sessionId);
+    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId);
+    savePinnedSessionIds(pinnedSessionIds);
     const wasActive = state.activeSessionId === sessionId;
     const remaining = state.sessions.filter((s) => s.id !== sessionId);
     // Deleting a background tab must not yank the user's selection. When the
@@ -2027,6 +2106,7 @@ const activeSessionId =
     state = {
       ...state,
       sessions: remaining,
+      pinnedSessionIds,
       resumableSessions: state.resumableSessions.filter((session) => session.id !== sessionId),
       transcripts,
       todosBySession,
@@ -2037,6 +2117,16 @@ const activeSessionId =
       messages: transcripts[nextActive] ?? [],
       todos: todosBySession[nextActive] ?? [],
     };
+    notify();
+  },
+
+  toggleSessionPinned(sessionId: string) {
+    if (!state.sessions.some((session) => session.id === sessionId)) return;
+    const pinnedSessionIds = state.pinnedSessionIds.includes(sessionId)
+      ? state.pinnedSessionIds.filter((id) => id !== sessionId)
+      : [...state.pinnedSessionIds, sessionId];
+    savePinnedSessionIds(pinnedSessionIds);
+    state = { ...state, pinnedSessionIds };
     notify();
   },
 
@@ -2193,6 +2283,7 @@ const activeSessionId =
       thinkingState: 'working',
       streamingActivityLevel: isSteer ? 0.9 : 0.7,
     };
+    playCue('send');
     notify();
 
     const promptToSend = isSteer
@@ -2230,7 +2321,7 @@ const activeSessionId =
         const updated = {
           ...state.messages[lastIdx],
           content,
-          status: 'complete' as const,
+          status: 'error' as const,
         };
         const newMsgs = [...state.messages];
         newMsgs[lastIdx] = updated;
@@ -2264,6 +2355,9 @@ const activeSessionId =
           // still deliver the steering directive.
         }
       }
+      // The steered turn is superseded: its row ends cancelled with the
+      // partial text intact (never left "streaming" forever).
+      state = { ...state, messages: markActiveMessageCancelled(state.messages) };
       activeRequestId = null;
     }
     this.sendUserMessage(trimmed, true);
@@ -2625,6 +2719,11 @@ const activeSessionId =
     if (sessionContext && activeRequestId) {
       void stopChat(activeRequestId, sessionContext).catch(() => {});
     }
+    // The backend keeps the partial transcript; the live row is marked
+    // cancelled (not errored) so a user stop is never shown as a failure.
+    // Mark before `completeActiveTurn` adds the request to `terminalRequests`,
+    // so a late terminal event cannot overwrite the state.
+    state = { ...state, messages: markActiveMessageCancelled(state.messages) };
     this.completeActiveTurn();
   },
 
@@ -2643,20 +2742,12 @@ const activeSessionId =
 
   handleChatFailed(payload: { request_id?: string; session_id?: string; error: { message: string } }) {
     if (!isActiveEvent(payload)) return;
-    const lastMsgIndex = state.messages.length - 1;
-    if (lastMsgIndex >= 0 && state.messages[lastMsgIndex]?.role === 'assistant') {
-      const lastMsg = state.messages[lastMsgIndex]!;
-      const updated = {
-        ...lastMsg,
-        content: lastMsg.content
-          ? `${lastMsg.content}\n\n[Error: ${payload.error.message}]`
-          : `[Error: ${payload.error.message}]`,
-        status: 'error' as const,
-      };
-      const newMessages = [...state.messages];
-      newMessages[lastMsgIndex] = updated;
-      state = { ...state, messages: newMessages };
-    }
+    // Partial text is preserved and the surfaced error is appended, never
+    // substituted; the row is flagged as an error for the feed.
+    state = {
+      ...state,
+      messages: markActiveMessageFailed(state.messages, payload.error.message),
+    };
     this.completeActiveTurn();
   },
 
@@ -2915,6 +3006,8 @@ const activeSessionId =
   handleAgentTurnDone(payload: AgentTurnDonePayload) {
     if (!isActiveEvent(payload)) return;
     terminalRequests.add(payload.request_id);
+    const stoppedByUser = isUserStoppedTurn(payload.completed, payload.end_message);
+    playCue(payload.completed ? 'complete' : stoppedByUser ? 'notify' : 'error');
     const lastMsgIndex = state.messages.length - 1;
     if (lastMsgIndex >= 0 && state.messages[lastMsgIndex]?.role === 'assistant') {
       const lastMsg = state.messages[lastMsgIndex]!;
@@ -2928,10 +3021,13 @@ const activeSessionId =
           content = 'The assistant completed without output. Please check your model settings and connection.';
         }
       }
-      const updated: ChatMessage = {
+      const updated: CancelledChatMessage = {
         ...lastMsg,
         content,
-        status: payload.completed ? 'complete' : 'error',
+        // A user stop is a lifecycle end, not a failure: keep the partial
+        // text, flag the row cancelled, and only real errors use `error`.
+        status: payload.completed || stoppedByUser ? 'complete' : 'error',
+        cancelled: stoppedByUser || undefined,
       };
       const newMessages = [...state.messages];
       newMessages[lastMsgIndex] = updated;

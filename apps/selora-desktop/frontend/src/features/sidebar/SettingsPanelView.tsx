@@ -1,5 +1,6 @@
 // Selora IDE — Interactive Settings Panel (DESIGN §3.3)
-import { useEffect, useState, useMemo, type FC } from 'react';
+import { useEffect, useState, useMemo, useSyncExternalStore, type FC } from 'react';
+import { localEditorPreferences } from '../editor/local-preferences';
 import {
   updateSettings,
   restartLsp,
@@ -14,9 +15,19 @@ import {
   Terminal,
   Search,
 } from '../../components/icons';
-import { buildCommandList, commandCategory } from '../keymap/commands';
+import { buildCommandList, commandCategory, validateKeymapConflicts } from '../keymap/commands';
 import { canonicalKeybind, parseKeybind } from '../keymap/keybind';
 import { THEME_OPTIONS, normalizeThemeValue } from '../theme/theme';
+import { toastStore } from '../toasts/toast-store';
+import { getSnapshot as getSoundSnapshot, setEnabled as setSoundEnabled, subscribe as subscribeSound } from '../sound/sound-store';
+import { PROVIDER_PRESETS } from '../auth/ConnectModal';
+import {
+  activeProviderId,
+  isProviderDisabled,
+  providerIdForModel,
+  visiblePresets,
+  withProviderEnabled,
+} from '../auth/provider-visibility';
 
 export interface SettingsPanelViewProps {
   bootstrap: BootstrapState;
@@ -70,6 +81,7 @@ const unsupportedTitle = (label: string): string =>
   `${label} has no writable backend settings field in this build. This control is disabled; changes are not saved.`;
 
 export const SettingsPanelView: FC<SettingsPanelViewProps> = ({ bootstrap, onOpenConnect }) => {
+  const localPreferences = useSyncExternalStore(localEditorPreferences.subscribe, localEditorPreferences.getSnapshot);
   const settings = bootstrap.settings;
   const isConnected = bootstrap.connection === 'connected';
 
@@ -124,6 +136,25 @@ export const SettingsPanelView: FC<SettingsPanelViewProps> = ({ bootstrap, onOpe
       .finally(() => setSaving(false));
   };
 
+  // Settings > AI Gateway "Assistant providers". The list is the persisted
+  // gate: a disabled provider is hidden from provider/model selection, but an
+  // already-active provider is never switched or disconnected here.
+  const disabledProviders = settings.disabled_providers ?? [];
+  const catalogModels = bootstrap.models ?? [];
+  const activeProvider = activeProviderId(bootstrap.active_model_id, catalogModels);
+  const activeProviderPreset =
+    PROVIDER_PRESETS.find((preset) => preset.id === activeProvider) ?? null;
+  const activeProviderDisabled =
+    activeProvider !== null && isProviderDisabled(disabledProviders, activeProvider);
+  const activeModelLabel =
+    catalogModels.find((model) => model.id === bootstrap.active_model_id)?.display_name ??
+    bootstrap.active_model_id ??
+    'none';
+  const selectableProviders = visiblePresets(PROVIDER_PRESETS, disabledProviders, activeProvider);
+  const toggleProvider = (providerId: string, enabled: boolean): void => {
+    persist({ disabled_providers: withProviderEnabled(disabledProviders, providerId, enabled) });
+  };
+
 const restartServer = (language: string): void => {
     setSettingsError(null);
     void restartLsp(language, context).catch((cause: unknown) =>
@@ -153,6 +184,15 @@ const restartServer = (language: string): void => {
     }
     const canonical = canonicalKeybind(parsed);
     if (canonical === settings[key]) return;
+    const conflicts = validateKeymapConflicts({ ...settings, [key]: canonical });
+    if (conflicts.length > 0) {
+      const conflict = conflicts[0];
+      const labels = conflict.commands.map((command) => command.title).join(' and ');
+      const message = `Shortcut conflict: ${conflict.shortcut} is assigned to ${labels}.`;
+      setFieldError(message);
+      toastStore.pushLocal('warning', message);
+      return;
+    }
     persist({ [key]: canonical } as SettingsPatch);
   };
 
@@ -180,6 +220,7 @@ const restartServer = (language: string): void => {
   }, [keybindingList, keybindQuery]);
 
   const themeValue = normalizeThemeValue(settings.theme);
+  const soundsEnabled = useSyncExternalStore(subscribeSound, getSoundSnapshot);
 
   // The active model is the only model fact the bridge exposes. When the
   // bootstrap has one, show it read-only; never substitute a placeholder id.
@@ -270,6 +311,95 @@ const restartServer = (language: string): void => {
             </button>
           </div>
 
+          {/* Assistant providers — persisted enable/disable gate. Visibility
+              only: the stored key, live model and network state are untouched. */}
+          <div className="settings-card" aria-labelledby="settings-assistant-providers-title">
+            <div className="settings-card-header">
+              <span className="settings-card-title" id="settings-assistant-providers-title">
+                Assistant providers
+              </span>
+              <span className="settings-card-hint">
+                {PROVIDER_PRESETS.length - disabledProviders.length} of {PROVIDER_PRESETS.length} enabled
+              </span>
+            </div>
+            <p className="settings-card-hint">
+              Turn a provider off to hide it from provider and model selection. Disabling
+              keeps the stored key, does not switch the current model, and makes no network
+              request.
+            </p>
+            {activeProviderDisabled && activeProviderPreset ? (
+              <p className="settings-card-hint" role="alert" style={{ color: 'var(--c-fbbf24)' }}>
+                {activeProviderPreset.name} is disabled but remains active for this session.
+                Current model {activeModelLabel} is unchanged. Choose another model to stop
+                using it.
+              </p>
+            ) : null}
+            <ul
+              style={{
+                listStyle: 'none',
+                margin: 0,
+                padding: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              {PROVIDER_PRESETS.map((preset) => {
+                const enabled = !isProviderDisabled(disabledProviders, preset.id);
+                const detected = catalogModels.some(
+                  (model) => providerIdForModel(model.id, model.display_name) === preset.id,
+                );
+                const isActive = activeProvider === preset.id;
+                return (
+                  <li
+                    key={preset.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 2,
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                    >
+                      <span
+                        className="settings-label"
+                        style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        {preset.name}
+                        {isActive ? (
+                          <span className="settings-status-pill is-connected">Active</span>
+                        ) : null}
+                      </span>
+                      <span className="settings-card-hint">
+                        {!enabled
+                          ? 'Disabled'
+                          : detected
+                            ? 'Reported in the current model catalog'
+                            : `${preset.tag} · not in the current catalog`}
+                      </span>
+                    </div>
+                    <label
+                      className="settings-switch"
+                      title={`${enabled ? 'Disable' : 'Enable'} ${preset.name}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        disabled={saving}
+                        aria-label={`Enable ${preset.name}`}
+                        onChange={(event) => toggleProvider(preset.id, event.target.checked)}
+                      />
+                      <span className="switch-slider" />
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
           {/* Model Selection Group */}
           <div className="settings-group">
             <div className="settings-row">
@@ -279,11 +409,16 @@ const restartServer = (language: string): void => {
               <select
                 id="settings-provider-select"
                 className="settings-select"
-                value=""
+                value={activeProvider ?? ''}
                 disabled
                 title={unsupportedTitle('Provider selection')}
               >
-                <option value="">—</option>
+                <option value="">-</option>
+                {selectableProviders.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -353,12 +488,63 @@ const restartServer = (language: string): void => {
               />
             </div>
           </div>
+
+          {/* Agent workspace trust: risky shell commands need both this
+              grant and an approval. Allowlisted read-only commands still
+              run without it. */}
+          <div className="settings-card" data-testid="workspace-trust-card">
+            <div className="settings-card-header">
+              <span className="settings-card-title">Workspace Trust</span>
+              <span
+                className={`settings-status-pill ${
+                  settings.workspace_trusted ? 'is-connected' : 'is-disconnected'
+                }`}
+              >
+                {settings.workspace_trusted ? 'Trusted' : 'Restricted'}
+              </span>
+            </div>
+            <p className="settings-card-hint">
+              Untrusted workspaces never run risky shell commands, even after
+              you approve a command card. Read-only commands on the agent
+              allowlist still run. Trust changes apply when Selora restarts.
+            </p>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="settings-workspace-trusted">
+                Trust this workspace for risky agent commands
+              </label>
+              <label className="settings-switch">
+                <input
+                  id="settings-workspace-trusted"
+                  type="checkbox"
+                  checked={settings.workspace_trusted ?? false}
+                  onChange={(e) => persist({ workspace_trusted: e.target.checked })}
+                  aria-describedby="settings-workspace-trusted-hint"
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
+            <span id="settings-workspace-trusted-hint" className="settings-card-hint">
+              Restart Selora after changing this setting; it is read at startup, and
+              agent turns pause until the restart.
+            </span>
+          </div>
         </div>
       )}
 
       {/* Tab 2: Editor */}
       {activeTab === 'editor' && (
         <div className="settings-section-content">
+          <p className="settings-card-hint">These options are stored locally. Session restoration saves file paths and cursor positions, not unsaved contents.</p>
+          <div className="settings-group">
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="settings-restore-session">Restore open files for this workspace</label>
+              <input id="settings-restore-session" type="checkbox" checked={localPreferences.restoreSession} onChange={(e) => localEditorPreferences.update({ restoreSession: e.target.checked })} />
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="settings-auto-save">Auto Save</label>
+              <input id="settings-auto-save" type="checkbox" checked={localPreferences.autoSave} onChange={(e) => localEditorPreferences.update({ autoSave: e.target.checked })} />
+            </div>
+          </div>
           <div className="settings-card">
             <div className="settings-card-header">
               <span className="settings-card-title">Language Servers</span>
@@ -499,6 +685,7 @@ const restartServer = (language: string): void => {
               <select
                 id="settings-theme-select"
                 className="settings-select"
+                aria-describedby="settings-theme-hint"
                 value={themeValue}
                 onChange={(e) => persist({ theme: e.target.value })}
               >
@@ -508,6 +695,9 @@ const restartServer = (language: string): void => {
                   </option>
                 ))}
               </select>
+              <span id="settings-theme-hint" className="settings-card-hint">
+                System follows your operating system appearance.
+              </span>
             </div>
 
             <div className="settings-row">
@@ -521,6 +711,24 @@ const restartServer = (language: string): void => {
                   onChange={(e) => persist({ reduced_motion: e.target.checked })}
                   aria-labelledby="settings-reduced-motion-label"
                   aria-busy={saving}
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
+
+            <div className="settings-row">
+              <span className="settings-label" id="settings-sounds-label">
+                Interface Sounds
+              </span>
+              <label
+                className="settings-switch"
+                title="Short synthesized cues for send, completion, errors and notifications. Off by default; stored on this device."
+              >
+                <input
+                  type="checkbox"
+                  checked={soundsEnabled}
+                  onChange={(e) => setSoundEnabled(e.target.checked)}
+                  aria-labelledby="settings-sounds-label"
                 />
                 <span className="switch-slider" />
               </label>
@@ -662,7 +870,7 @@ const restartServer = (language: string): void => {
 
       <div className="settings-footer-info">
         <p className="settings-later">
-          Theme, reduced motion, editor preferences, and the four keybinds save automatically
+          Theme, reduced motion, backend editor preferences, and the four keybinds save automatically
           through Rust.
         </p>
         <p className="settings-later">

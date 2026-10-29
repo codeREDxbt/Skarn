@@ -242,12 +242,23 @@ impl GitRepo {
         Ok(())
     }
 
+    /// The most bytes read from `MERGE_HEAD`. The file holds one 40-byte oid per
+    /// line, so this is already far past any real merge; the bound only keeps a
+    /// corrupted file from becoming an unbounded read.
+    const MAX_MERGE_HEAD_BYTES: u64 = 64 * 1024;
+
     /// The second parents of a merge commit in progress (normally one).
     pub(crate) fn merge_head_ids(&self) -> Vec<git2::Oid> {
+        use std::io::Read;
         let path = self.repo.path().join("MERGE_HEAD");
-        let Ok(text) = fs::read_to_string(path) else {
+        let mut text = String::new();
+        let read = fs::File::open(path).and_then(|file| {
+            file.take(Self::MAX_MERGE_HEAD_BYTES)
+                .read_to_string(&mut text)
+        });
+        if read.is_err() {
             return Vec::new();
-        };
+        }
         text.lines()
             .filter_map(|line| git2::Oid::from_str(line.trim()).ok())
             .collect()

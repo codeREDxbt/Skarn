@@ -22,6 +22,9 @@ import {
 } from '../../bridge/bridge';
 import { ChevronDown, ChevronRight, FileText, RefreshCw } from '../../components/icons';
 import { editorStore } from '../editor/editor-store';
+import { hasPendingEditorEdits } from '../editor/pending-edits';
+import { explorerCreateEntry, explorerDeleteEntry, explorerRenameEntry } from '../../bridge/explorer';
+import { ExplorerDialog, type ExplorerOperation } from './ExplorerDialog';
 import {
   consumeFileTreeReveal,
   subscribeFileTreeReveal,
@@ -121,6 +124,7 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
   const [status, setStatus] = useState<{ kind: 'error' | 'info'; text: string } | null>(null);
+  const [operation, setOperation] = useState<ExplorerOperation | null>(null);
 
   const activePath = useMemo(() => {
     if (!liveBootstrap?.active_buffer_id) return null;
@@ -365,6 +369,11 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
             setFocusPath(key);
             activateNode(node);
           }}
+          onDoubleClick={() => {
+            if (node.kind === 'directory') return;
+            setSelectedPath(node.path);
+            void editorStore.openPath(node.path, { preview: false });
+          }}
           onKeyDown={(event) => handleNodeKeyDown(event, node)}
         >
           <span className="tree-chevron-slot" aria-hidden="true">
@@ -395,6 +404,18 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
               M
             </span>
           ) : null}
+          <span className="tree-actions-group" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+            {isDirectory ? (['new-file', 'new-folder'] as const).map((action) => (
+              <button key={action} type="button" className="tree-action-btn" aria-label={`${action === 'new-file' ? 'New file in' : 'New folder in'} ${node.name}`} onClick={() => {
+                if (liveBootstrap?.workspace.id) setOperation({ action, path: depth === 0 ? '' : node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
+              }}>{action === 'new-file' ? '+File' : '+Folder'}</button>
+            )) : null}
+            {depth > 0 ? (['rename', 'delete'] as const).map((action) => (
+              <button key={action} type="button" className="tree-action-btn" aria-label={`${action === 'rename' ? 'Rename' : 'Delete'} ${node.name}`} onClick={() => {
+                if (liveBootstrap?.workspace.id) setOperation({ action, path: node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
+              }}>{action === 'rename' ? 'Rename' : 'Delete'}</button>
+            )) : null}
+          </span>
         </div>
 
         {isDirectory && isExpanded ? (
@@ -489,7 +510,24 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
       <div className="file-tree-list" role="tree" aria-label="Workspace files">
         {renderNode(root, 0)}
       </div>
+      {operation ? <ExplorerDialog operation={operation} onClose={() => setOperation(null)} onSubmit={async (name) => {
+        if (operation.action === 'new-file' || operation.action === 'new-folder') {
+          await explorerCreateEntry(operation.workspaceId, operation.path, name, operation.action === 'new-file' ? 'file' : 'directory');
+        } else {
+          // Open editor views may contain edits that have not reached the backend yet.
+          const path = pathKey(operation.path);
+          const bootstrap = getAppSnapshot().bootstrap;
+          if (!bootstrap || bootstrap.workspace.id !== operation.workspaceId || hasPendingEditorEdits(bootstrap, operation.path, operation.isDirectory)) {
+            throw new Error('Cannot change this entry while editor changes are unsynchronized.');
+          }
+          if (editorStore.getSnapshot().tabs.some((tab) => {
+            const candidate = pathKey(tab.path);
+            return candidate === path || candidate.startsWith(`${path}/`);
+          })) throw new Error('Close open files in this entry before renaming or deleting it. Save any unsaved changes first.');
+          if (operation.action === 'rename') await explorerRenameEntry(operation.workspaceId, operation.path, name);
+          else await explorerDeleteEntry(operation.workspaceId, operation.path);
+        }
+      }} /> : null}
     </div>
   );
 }
-

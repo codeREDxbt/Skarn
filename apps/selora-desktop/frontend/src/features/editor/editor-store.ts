@@ -20,6 +20,7 @@ import {
   type Selection,
 } from '../../bridge/bridge';
 import { toastStore } from '../toasts/toast-store';
+import { beginEditorClose, finishEditorClose, hasPendingBufferEdits, isEditorPathClosing, reconcileEditorCloses, reconcilePendingEditorEdits, rejectEditorClose, retryPendingEditorEdits } from './pending-edits';
 
 export type EditorTab = {
   id: string;
@@ -30,6 +31,8 @@ export type EditorTab = {
   /** P2 gap 3: the file also changed on disk (local edits were kept). */
   externallyChanged: boolean;
   version: number;
+  /** Single-click preview tab: replaced by the next single-click open. */
+  isPreview: boolean;
 };
 
 export type RevealTarget = {
@@ -46,6 +49,10 @@ export type EditorStoreState = {
   revealTarget: RevealTarget | null;
   /** Buffers the user marked "Keep Open"; bulk closes spare them. */
   pinnedIds: string[];
+  /** Pinned tab paths; paths survive bootstrap buffer-id churn. */
+  pinnedPaths: string[];
+  /** Path of the single preview tab, or null when every tab is permanent. */
+  previewPath: string | null;
   workspaceRoot: string | null;
   workspaceName: string | null;
   fileTree: FileTreeNode | null;
@@ -70,7 +77,11 @@ let knownBufferIds = new Set(
 let liveSelections = new Map<string, Selection>();
 // "Keep Open" is a local tab affordance: the protocol has no pin concept, so
 // the pins survive snapshots and are pruned whenever a buffer disappears.
-let pinnedIds = new Set<string>();
+// Pins are tracked by path because bootstrap reassigns buffer ids.
+let pinnedPaths = new Set<string>();
+// The preview tab is the transient tab a single click in the explorer opens.
+// At most one tab is a preview; opening another replaces it.
+let previewPath: string | null = null;
 let state: EditorStoreState = deriveState(appSnapshot, localActiveId, revealTarget);
 let appUnsubscribe: (() => void) | null = null;
 
@@ -81,6 +92,26 @@ function filenameOf(path: string): string {
 
 function pathsEqual(left: string, right: string): boolean {
   return left.replace(/\\/g, '/').toLowerCase() === right.replace(/\\/g, '/').toLowerCase();
+}
+
+function isPinnedPath(path: string): boolean {
+  for (const pinned of pinnedPaths) if (pathsEqual(pinned, path)) return true;
+  return false;
+}
+
+function forgetPinnedPath(path: string): void {
+  for (const pinned of pinnedPaths) if (pathsEqual(pinned, path)) pinnedPaths.delete(pinned);
+}
+
+/**
+ * A preview tab stops being a preview once it is edited or closed: the user
+ * invested in it, so the next single click must not replace it.
+ */
+function reconcilePreview(): void {
+  if (!previewPath) return;
+  if (pendingOpenPath && pathsEqual(pendingOpenPath, previewPath)) return;
+  const tab = state.tabs.find((candidate) => pathsEqual(candidate.path, previewPath!));
+  if (!tab || tab.isDirty) previewPath = null;
 }
 
 function isEmptySelection(selection: Selection): boolean {
@@ -106,6 +137,7 @@ function deriveState(
     isDirty: buffer.dirty,
     externallyChanged: Object.prototype.hasOwnProperty.call(conflicts, buffer.buffer_id),
     version: buffer.version,
+    isPreview: Boolean(previewPath && pathsEqual(previewPath, buffer.path)),
   }));
 
   let activeBufferId: string | null = null;
@@ -135,7 +167,9 @@ function deriveState(
     activeBuffer,
     activeSelection,
     revealTarget: reveal,
-    pinnedIds: tabs.filter((tab) => pinnedIds.has(tab.id)).map((tab) => tab.id),
+    pinnedIds: tabs.filter((tab) => isPinnedPath(tab.path)).map((tab) => tab.id),
+    pinnedPaths: tabs.filter((tab) => isPinnedPath(tab.path)).map((tab) => tab.path),
+    previewPath: tabs.some((tab) => tab.isPreview) ? previewPath : null,
     workspaceRoot: bootstrap?.workspace.root ?? null,
     workspaceName: bootstrap?.workspace.display_name ?? null,
     fileTree: bootstrap?.file_tree.root ?? null,
@@ -151,6 +185,9 @@ function rebuild(): void {
   focusPendingBuffer();
   state = deriveState(appSnapshot, localActiveId, revealTarget);
   localActiveId = state.activeBufferId;
+  const previewBefore = previewPath;
+  reconcilePreview();
+  if (previewPath !== previewBefore) state = deriveState(appSnapshot, localActiveId, revealTarget);
   notify();
 }
 
@@ -186,9 +223,14 @@ function syncFromApp(): void {
   const next = getAppSnapshot();
   if (next === appSnapshot) return;
   appSnapshot = next;
+  reconcilePendingEditorEdits(next.bootstrap);
+  reconcileEditorCloses(next.bootstrap);
   focusPendingBuffer();
   state = deriveState(appSnapshot, localActiveId, revealTarget);
   localActiveId = state.activeBufferId;
+  const previewBefore = previewPath;
+  reconcilePreview();
+  if (previewPath !== previewBefore) state = deriveState(appSnapshot, localActiveId, revealTarget);
 }
 
 function ensureAppSubscription(): void {
@@ -197,6 +239,8 @@ function ensureAppSubscription(): void {
     const next = getAppSnapshot();
     if (next === appSnapshot) return;
     appSnapshot = next;
+    reconcilePendingEditorEdits(next.bootstrap);
+    reconcileEditorCloses(next.bootstrap);
     rebuild();
   });
 }
@@ -210,6 +254,50 @@ function openFileAt(path: string, context: EnvelopeContext): void {
 
 function reportMissingContext(): void {
   toastStore.pushLocal('warning', 'Connect to a workspace before editing files.');
+}
+
+type CloseRejection = 'ambiguous' | 'still-open' | 'closed';
+
+/**
+ * Classify a rejected close command. Only the bridge's protocol error shape
+ * (code + message) is a definite backend decision; anything else, including a
+ * raw transport failure, stays ambiguous and keeps the editor locked.
+ */
+function classifyCloseRejection(cause: unknown): CloseRejection {
+  if (typeof cause !== 'object' || cause === null) return 'ambiguous';
+  const candidate = cause as { code?: unknown; message?: unknown };
+  if (typeof candidate.code !== 'string' || typeof candidate.message !== 'string') return 'ambiguous';
+  return candidate.code === 'unknown_buffer' ? 'closed' : 'still-open';
+}
+
+function closeWhenSynchronized(id: string, context: EnvelopeContext): boolean {
+  const bootstrap = getAppSnapshot().bootstrap;
+  if (!bootstrap || !beginEditorClose(bootstrap, id)) return false;
+  void closeBufferCommand(id, context).then(() => {
+    finishEditorClose(id, true);
+    reconcileEditorCloses(getAppSnapshot().bootstrap);
+  }).catch((cause: unknown) => {
+    const rejection = classifyCloseRejection(cause);
+    rejectEditorClose(id, rejection);
+    if (rejection === 'ambiguous') {
+      finishEditorClose(id, false);
+      toastStore.pushLocal('warning', 'The close result is unknown. This editor remains locked to protect its contents.');
+      return;
+    }
+    reconcileEditorCloses(getAppSnapshot().bootstrap);
+    if (rejection === 'still-open') {
+      toastStore.pushLocal('warning', 'The workspace rejected the close. The file is still open; retry when the workspace is ready.');
+    }
+  });
+  return true;
+}
+
+/** Replace the transient preview tab with the file the user just opened. */
+function dismissPreviewFor(context: EnvelopeContext, nextPath: string): void {
+  const previous = state.tabs.find(
+    (tab) => tab.isPreview && !pathsEqual(tab.path, nextPath) && !tab.isDirty && !isPinnedPath(tab.path),
+  );
+  if (previous) closeWhenSynchronized(previous.id, context);
 }
 
 /**
@@ -278,8 +366,10 @@ export const editorStore = {
     revealTarget = null;
     pendingOpenPath = null;
     liveSelections.clear();
-    pinnedIds = new Set();
+    pinnedPaths = new Set();
+    previewPath = null;
     appSnapshot = getAppSnapshot();
+    reconcilePendingEditorEdits(appSnapshot.bootstrap);
     protocolActiveId = appSnapshot.bootstrap?.active_buffer_id ?? null;
     knownBufferIds = new Set(
       (appSnapshot.bootstrap?.buffers ?? []).map((buffer) => buffer.buffer_id),
@@ -304,10 +394,16 @@ export const editorStore = {
     }
   },
 
-  async openPath(path: string): Promise<void> {
+  async openPath(path: string, options: { preview?: boolean } = {}): Promise<void> {
     syncFromApp();
+    if (appSnapshot.bootstrap && isEditorPathClosing(appSnapshot.bootstrap.workspace.id, path)) return;
     const existing = state.tabs.find((tab) => pathsEqual(tab.path, path));
     if (existing) {
+      // Opening the file permanently promotes a preview tab in place.
+      if (options.preview === false && existing.isPreview) {
+        previewPath = null;
+        rebuild();
+      }
       editorStore.setActive(existing.id);
       return;
     }
@@ -316,16 +412,25 @@ export const editorStore = {
       reportMissingContext();
       return;
     }
+    if (options.preview === false) {
+      previewPath = null;
+    } else {
+      dismissPreviewFor(context, path);
+      previewPath = path;
+    }
     pendingOpenPath = path;
     await openFileCommand(path, context).catch(() => {
       if (pendingOpenPath === path) pendingOpenPath = null;
     });
   },
 
-  async openPathAtLine(path: string, line: number): Promise<void> {
+  async openPathAtLine(path: string, line: number, options: { preview?: boolean } = {}): Promise<void> {
     syncFromApp();
+    if (appSnapshot.bootstrap && isEditorPathClosing(appSnapshot.bootstrap.workspace.id, path)) return;
     const existing = state.tabs.find((tab) => pathsEqual(tab.path, path));
     if (existing) {
+      // A permanent open promotes the tab; a preview open leaves it as-is.
+      if (options.preview === false && existing.isPreview) previewPath = null;
       localActiveId = existing.id;
       recordActiveBuffer(existing.id);
     } else {
@@ -333,6 +438,12 @@ export const editorStore = {
       if (!context) {
         reportMissingContext();
         return;
+      }
+      if (options.preview === false) {
+        previewPath = null;
+      } else {
+        dismissPreviewFor(context, path);
+        previewPath = path;
       }
       openFileAt(path, context);
     }
@@ -348,14 +459,35 @@ export const editorStore = {
     rebuild();
   },
 
-  closeBuffer(id: string): void {
+  closeBuffer(id: string, discardDirty = false): void {
     syncFromApp();
+    const tab = state.tabs.find((candidate) => candidate.id === id);
+    if (!tab || (tab.isDirty && !discardDirty)) {
+      if (tab) toastStore.pushLocal('warning', 'Save or explicitly discard the unsaved changes before closing this file.');
+      return;
+    }
     const context = currentEditorContext();
     if (!context) {
       reportMissingContext();
       return;
     }
-    void closeBufferCommand(id, context).catch(() => undefined);
+    const bootstrap = appSnapshot.bootstrap;
+    if (bootstrap && hasPendingBufferEdits(bootstrap, id)) {
+      // A failed edit must not block close forever. Recover it against the
+      // current backend version first; the recovered buffer may now be dirty,
+      // so never discard it in the same click.
+      void retryPendingEditorEdits(bootstrap, id).then((recovered) => {
+        if (!recovered) {
+          toastStore.pushLocal('warning', 'Editor changes are still unsynchronized. Keep this file open until the workspace reconnects.');
+          return;
+        }
+        toastStore.pushLocal('info', 'Editor changes were recovered. Save the file, or close again to discard them.');
+      });
+      return;
+    }
+    if (!closeWhenSynchronized(id, context)) {
+      toastStore.pushLocal('warning', 'Cannot close this file while editor changes are unsynchronized.');
+    }
   },
 
   /**
@@ -372,19 +504,31 @@ export const editorStore = {
     }
     const requested = new Set(ids);
     const matches = state.tabs.filter((tab) => requested.has(tab.id));
-    const targets = matches.filter((tab) => !tab.isDirty && !pinnedIds.has(tab.id));
-    for (const tab of targets) {
-      void closeBufferCommand(tab.id, context).catch(() => undefined);
-    }
-    return { closed: targets.length, kept: matches.length - targets.length };
+    const targets = matches.filter((tab) => !tab.isDirty && !isPinnedPath(tab.path));
+    const closed = targets.filter((tab) => closeWhenSynchronized(tab.id, context)).length;
+    return { closed, kept: matches.length - closed };
+  },
+
+  /** Restore the tab affordances saved with a session (pins + preview tab). */
+  restoreTabAffordances(pinned: string[], preview: string | null): void {
+    syncFromApp();
+    pinnedPaths = new Set(pinned);
+    previewPath = preview;
+    rebuild();
   },
 
   /** Toggle the local "Keep Open" pin for one tab. */
   togglePinned(id: string): void {
     syncFromApp();
-    if (!state.tabs.some((tab) => tab.id === id)) return;
-    if (pinnedIds.has(id)) pinnedIds.delete(id);
-    else pinnedIds.add(id);
+    const tab = state.tabs.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    if (isPinnedPath(tab.path)) {
+      forgetPinnedPath(tab.path);
+    } else {
+      pinnedPaths.add(tab.path);
+      // Pinning a preview makes it a permanent tab.
+      if (previewPath && pathsEqual(previewPath, tab.path)) previewPath = null;
+    }
     rebuild();
   },
 
@@ -396,6 +540,16 @@ export const editorStore = {
   async saveBuffer(id: string): Promise<boolean> {
     syncFromApp();
     if (!state.tabs.some((tab) => tab.id === id)) return false;
+    const bootstrap = appSnapshot.bootstrap;
+    if (bootstrap && hasPendingBufferEdits(bootstrap, id)) {
+      // Saving is the user-visible retry: republish the local document at the
+      // backend's current version instead of leaving the buffer locked.
+      const recovered = await retryPendingEditorEdits(bootstrap, id);
+      if (!recovered) {
+        toastStore.pushLocal('warning', 'This file still has unsynchronized changes; saving is blocked to protect them.');
+        return false;
+      }
+    }
     const context = currentEditorContext();
     if (!context) {
       reportMissingContext();

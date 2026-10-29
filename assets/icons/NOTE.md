@@ -1,7 +1,7 @@
 # icons — raster derivatives
 
-`selora-ide-mono.svg` is the hand-authored source mark (see DESIGN_TOKENS.md
-§9). The raster derivatives are generated from it, never edited directly.
+`selora-ide-mono.svg` is the hand-authored source mark. The raster
+derivatives are generated from it, never edited directly.
 
 Generated files (committed; regenerate with the script after any SVG change):
 

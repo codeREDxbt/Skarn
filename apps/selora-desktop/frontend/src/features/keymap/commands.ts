@@ -7,6 +7,7 @@
 // falls back to the default and logs a console warning — never throws.
 import { canonicalKeybind, parseKeybind, type Keybind } from './keybind';
 import type { Layout, SettingsView, SurfaceId } from '../../bridge/bridge';
+import type { EditorCommand } from '../editor/editor-commands';
 
 export type CommandId =
   | 'selora.togglePrimarySidebar'
@@ -27,6 +28,8 @@ export type CommandId =
   | 'selora.fileSave'
   | 'selora.fileCloseEditor'
   | 'selora.fileCloseWindow'
+  | 'selora.editUndo' | 'selora.editRedo' | 'selora.editCut' | 'selora.editCopy' | 'selora.editPaste'
+  | 'selora.editFind' | 'selora.editReplace' | 'selora.editSelectAll' | 'selora.editGoToLine'
   | 'selora.editFindInFiles'
   | 'selora.editCommandPalette'
   | 'selora.helpDocumentation';
@@ -47,8 +50,14 @@ export type CommandAction =
   | { kind: 'save-active' }
   | { kind: 'close-active' }
   | { kind: 'close-window' }
+  | { kind: 'editor-command'; command: EditorCommand }
   /** Help → Documentation (an allowlisted external URL). */
   | { kind: 'open-documentation' };
+
+export type KeymapConflict = {
+  shortcut: string;
+  commands: Array<{ id: CommandId; title: string }>;
+};
 
 export type CommandSpec = {
   id: CommandId;
@@ -95,6 +104,15 @@ const COMMANDS: CommandEntry[] = [
 { id: 'selora.fileSave', title: 'Save', action: { kind: 'save-active' }, fixedBinding: null, rebindable: 'save' },
   { id: 'selora.fileCloseEditor', title: 'Close Editor', action: { kind: 'close-active' }, fixedBinding: 'Ctrl+F4', rebindable: null },
   { id: 'selora.fileCloseWindow', title: 'Exit Selora IDE', action: { kind: 'close-window' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editUndo', title: 'Undo', action: { kind: 'editor-command', command: 'undo' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editRedo', title: 'Redo', action: { kind: 'editor-command', command: 'redo' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editCut', title: 'Cut', action: { kind: 'editor-command', command: 'cut' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editCopy', title: 'Copy', action: { kind: 'editor-command', command: 'copy' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editPaste', title: 'Paste', action: { kind: 'editor-command', command: 'paste' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editFind', title: 'Find', action: { kind: 'editor-command', command: 'find' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editReplace', title: 'Replace', action: { kind: 'editor-command', command: 'replace' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editSelectAll', title: 'Select All', action: { kind: 'editor-command', command: 'select-all' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.editGoToLine', title: 'Go to Line…', action: { kind: 'editor-command', command: 'go-to-line' }, fixedBinding: null, rebindable: null },
   { id: 'selora.editFindInFiles', title: 'Find in Files', action: { kind: 'toggle-surface', surface: 'search' }, fixedBinding: null, rebindable: 'fuzzy_find' },
   { id: 'selora.editCommandPalette', title: 'Command Palette', action: { kind: 'open-palette' }, fixedBinding: null, rebindable: null },
   { id: 'selora.helpDocumentation', title: 'Documentation', action: { kind: 'open-documentation' }, fixedBinding: null, rebindable: null },
@@ -110,6 +128,8 @@ export const MENU_COMMAND_IDS: Record<'file' | 'edit' | 'help', CommandId[]> = {
     'selora.fileCloseWindow',
   ],
   edit: [
+    'selora.editUndo', 'selora.editRedo', 'selora.editCut', 'selora.editCopy', 'selora.editPaste',
+    'selora.editFind', 'selora.editReplace', 'selora.editSelectAll', 'selora.editGoToLine',
     'selora.editFindInFiles',
     'selora.editCommandPalette',
     'selora.showKeyboardShortcuts',
@@ -154,6 +174,15 @@ const COMMAND_CATEGORIES: Record<CommandId, CommandCategory> = {
   'selora.fileSave': 'File Actions',
   'selora.fileCloseEditor': 'File Actions',
   'selora.fileCloseWindow': 'File Actions',
+  'selora.editUndo': 'File Actions',
+  'selora.editRedo': 'File Actions',
+  'selora.editCut': 'File Actions',
+  'selora.editCopy': 'File Actions',
+  'selora.editPaste': 'File Actions',
+  'selora.editFind': 'File Actions',
+  'selora.editReplace': 'File Actions',
+  'selora.editSelectAll': 'File Actions',
+  'selora.editGoToLine': 'File Actions',
   'selora.editFindInFiles': 'File Actions',
   'selora.editCommandPalette': 'View & Layout',
   'selora.helpDocumentation': 'Help',
@@ -237,6 +266,19 @@ export function buildCommandList(settings: SettingsView | null): CommandSpec[] {
 }
 
 /** Fuzzy-filter the palette list (UI_SPEC §5: fuzzy, no regex). */
+export function validateKeymapConflicts(settings: SettingsView | null): KeymapConflict[] {
+  const grouped = new Map<string, Array<{ id: CommandId; title: string }>>();
+  for (const command of buildCommandList(settings)) {
+    if (!command.shortcut) continue;
+    const entries = grouped.get(command.shortcut) ?? [];
+    entries.push({ id: command.id, title: command.title });
+    grouped.set(command.shortcut, entries);
+  }
+  return [...grouped.entries()]
+    .filter(([, entries]) => entries.length > 1)
+    .map(([shortcut, entries]) => ({ shortcut, commands: entries }));
+}
+
 export function filterCommands(commands: CommandSpec[], query: string): CommandSpec[] {
   const q = query.trim().toLowerCase();
   if (!q) return commands;
@@ -306,6 +348,9 @@ export function runCommandAction(id: CommandId, deps: CommandDeps): void {
       return;
     case 'close-window':
       deps.closeWindow?.();
+      return;
+    case 'editor-command':
+      window.dispatchEvent(new CustomEvent('selora:editor-command', { detail: action.command }));
       return;
     case 'open-documentation':
       deps.openDocumentation?.();

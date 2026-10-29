@@ -16,6 +16,8 @@ export type EditorTabView = {
   isDirty: boolean;
 /** Local "Keep Open" pin; bulk closes spare pinned tabs. */
   isPinned?: boolean;
+  /** Single-click preview tab: the next single click replaces it. */
+  isPreview?: boolean;
   /** P2 gap 3: the file changed on disk while this tab held unsaved edits. */
   externallyChanged?: boolean;
 };
@@ -24,7 +26,7 @@ export type EditorTabBarProps = {
   tabs: EditorTabView[];
   activeTabId: string | null;
   onSelectTab: (id: string) => void;
-  onCloseTab: (id: string) => void;
+  onCloseTab: (id: string, discardDirty?: boolean) => void;
   /**
    * Save one buffer and resolve `false` when the save failed. Dirty tabs never
    * close until this resolves successfully.
@@ -165,7 +167,7 @@ export function EditorTabBar({
     setClosePrompt(null);
     setSaving(false);
     setSaveFailed(false);
-    onCloseTab(id);
+    onCloseTab(id, true);
   };
 
   const confirmSave = async () => {
@@ -243,7 +245,7 @@ export function EditorTabBar({
           return (
             <div
               key={tab.id}
-              className={`editor-tab-shell${isActive ? ' is-active' : ''}${tab.isPinned ? ' is-pinned' : ''}`}
+              className={`editor-tab-shell${isActive ? ' is-active' : ''}${tab.isPinned ? ' is-pinned' : ''}${tab.isPreview ? ' is-preview' : ''}`}
               onContextMenu={(event) => openMenu(event, tab)}
             >
               <button
@@ -256,6 +258,7 @@ export function EditorTabBar({
                     ? `${tab.filename}, changed on disk`
                     : tab.filename
                 }
+                aria-description={tab.isPreview ? 'Preview tab' : undefined}
                 aria-controls="editor-surface"
                 tabIndex={isActive ? 0 : -1}
                 className={`editor-tab${isActive ? ' is-active' : ''}${tab.isDirty ? ' is-dirty' : ''}${tab.externallyChanged ? ' is-externally-changed' : ''}`}

@@ -452,6 +452,7 @@ mod tests {
                 shell: "powershell".to_owned(),
                 auto_approve_commands: allowlist.iter().map(|s| s.to_string()).collect(),
                 brave_api_key: None,
+                ..AgentToolSettings::default()
             },
         )
     }

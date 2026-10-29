@@ -15,6 +15,7 @@ import {
   type TerminalExitedPayload,
   type TerminalOutputPayload,
 } from '../../bridge/bridge';
+import { toastStore } from '../toasts/toast-store';
 
 export type TerminalSessionStatus = 'running' | 'exited';
 
@@ -42,6 +43,11 @@ export const TERMINAL_CREATE_TIMEOUT_MS = 15_000;
 /** Output held while no view is attached yet; old chunks are dropped past this. */
 const OUTPUT_BUFFER_LIMIT = 512 * 1024;
 
+function clampTerminalSize(cols: number, rows: number): { cols: number; rows: number } {
+  const clamp = (value: number) => Number.isFinite(value) ? Math.min(1000, Math.max(1, Math.floor(value))) : 1;
+  return { cols: clamp(cols), rows: clamp(rows) };
+}
+
 const EMPTY_STATE: TerminalState = {
   sessions: [],
   active_id: null,
@@ -57,6 +63,8 @@ const listeners = new Set<Listener>();
 const outputListeners = new Map<string, Set<OutputListener>>();
 const pendingOutput = new Map<string, string[]>();
 let pendingOutputBytes = 0;
+/** The last partial output line per terminal, for split cargo status lines. */
+const buildOutput = new Map<string, string>();
 
 function notify(): void {
   snapshot = {
@@ -138,6 +146,7 @@ export const terminalStore = {
    */
   requestCreate(cols: number, rows: number, ctx: EnvelopeContext): Promise<void> {
     if (state.creating) return Promise.resolve();
+    ({ cols, rows } = clampTerminalSize(cols, rows));
     clearCreateTimer();
     state = { ...state, creating: true, error: null };
     notify();
@@ -212,6 +221,7 @@ export const terminalStore = {
     if (cols <= 0 || rows <= 0) return;
     const session = state.sessions.find((entry) => entry.terminal_id === terminalId);
     if (!session) return;
+    ({ cols, rows } = clampTerminalSize(cols, rows));
     void terminalResize(terminalId, cols, rows, ctx).catch(() => {
       // Same global error path as TerminalInput.
     });
@@ -260,11 +270,23 @@ export const terminalStore = {
       creating: false,
       error: null,
     };
+    buildOutput.delete(payload.terminal_id);
     notify();
   },
 
   handleOutput(payload: TerminalOutputPayload): void {
     if (!state.sessions.some((session) => session.terminal_id === payload.terminal_id)) return;
+    const text = (buildOutput.get(payload.terminal_id) ?? '') + payload.data;
+    const lines = text.split(/\r\n|\n|\r/);
+    buildOutput.set(payload.terminal_id, (lines.pop() ?? '').slice(-4096));
+    for (const line of lines) {
+      const clean = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim();
+      if (/^Finished `(?:dev|release|test)` profile .* in \S+$/i.test(clean)) {
+        toastStore.pushLocal('success', `Cargo build finished: ${clean}`);
+      } else if (/^error: could not compile .+$/i.test(clean)) {
+        toastStore.pushLocal('error', `Cargo build failed: ${clean}`);
+      }
+    }
     const handlers = outputListeners.get(payload.terminal_id);
     if (handlers && handlers.size > 0) {
       for (const handler of handlers) handler(payload.data);
@@ -282,6 +304,7 @@ export const terminalStore = {
 
   handleExited(payload: TerminalExitedPayload): void {
     if (!state.sessions.some((session) => session.terminal_id === payload.terminal_id)) return;
+    buildOutput.delete(payload.terminal_id);
     state = {
       ...state,
       sessions: state.sessions.map((session) =>
@@ -309,6 +332,7 @@ export const terminalStore = {
     clearCreateTimer();
     outputListeners.clear();
     pendingOutput.clear();
+    buildOutput.clear();
     pendingOutputBytes = 0;
     state = EMPTY_STATE;
     notify();

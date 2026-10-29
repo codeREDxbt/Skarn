@@ -185,6 +185,25 @@ impl ActiveRequest {
     }
 }
 
+/// One live transcript record waiting for the OS keyring to become readable
+/// again. Records are kept in arrival order so the durable transcript never
+/// reorders a tool call after the result that answers it.
+struct PendingTranscriptRecord {
+    session_id: SessionId,
+    entry: TranscriptEntry,
+}
+
+/// Why a live tool record did not reach disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptAppend {
+    /// The keyring could not be read; the record is queued for retry. The
+    /// turn may continue: no durable data was lost.
+    Queued,
+    /// There is no store, or the append itself failed. The turn must fail
+    /// visibly.
+    Failed,
+}
+
 /// One finalized transcript entry (the streaming half lives in the relay
 /// until it lands here at the terminal event).
 struct StoredMessage {
@@ -300,6 +319,7 @@ struct SubagentCardRoute {
     request_id: RequestId,
     session_id: SessionId,
     is_question: bool,
+    child_id: String,
 }
 
 struct EngineInner {
@@ -330,13 +350,16 @@ pub(crate) struct SessionEngine {
     /// §19.3: the one relay receiver for the runtime's completion and card
     /// events. Taken by the first agent turn; the relay then lives for the
     /// engine's lifetime so a child may finish while the user edits.
-    subagent_events: Mutex<Option<mpsc::UnboundedReceiver<selora_ai::SubagentEvent>>>,
+    subagent_events: Mutex<Option<mpsc::Receiver<selora_ai::SubagentEvent>>>,
     /// Child cards waiting on the parent's decision rail. The runtime owns the
     /// single-use decision slot; this map only validates request/session/card
     /// type before forwarding.
     subagent_cards: Mutex<BTreeMap<ApprovalId, SubagentCardRoute>>,
     /// Keys captured by child backends, including keys rotated before activity arrives.
     subagent_redaction_keys: Mutex<Vec<String>>,
+    /// Tool records that arrived while the keyring was unavailable. Drained in
+    /// arrival order by the next store access; never dropped.
+    pending_transcript: Mutex<Vec<PendingTranscriptRecord>>,
     /// The agent tools' root. The Z3 shell has no folder picker (that lands
     /// in Z4 with the workbench), so `SELORA_WORKSPACE_ROOT` is the one way
     /// to point the tools at a real tree today; without it `SendAgent`
@@ -369,7 +392,7 @@ impl SessionEngine {
             .or_else(|| config.active_model.clone());
 
         let runtime = selora_ai::SubagentRuntime::new();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         runtime.set_event_sink(tx);
         Self {
             inner: Mutex::new(EngineInner {
@@ -387,12 +410,16 @@ impl SessionEngine {
             subagents: runtime,
             subagent_events: Mutex::new(Some(rx)),
             subagent_cards: Mutex::new(BTreeMap::new()),
-            subagent_redaction_keys: Mutex::new(Vec::new()),
+            subagent_redaction_keys: Mutex::new(initial_key.into_iter().collect()),
+            pending_transcript: Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) fn set_workspace_root(&self, root: Option<PathBuf>) {
-        *self.workspace_root.lock().expect("workspace root lock") = root;
+        *self
+            .workspace_root
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = root;
     }
 
     // -----------------------------------------------------------------
@@ -402,16 +429,97 @@ impl SessionEngine {
     /// The store rooted at the live workspace. No workspace means no agent
     /// session can exist (the same rule as `SendAgent`).
     fn store(&self) -> Option<AgentSessionStore> {
+        self.store_with_keys().ok().flatten()
+    }
+
+    /// [`Self::store`] that distinguishes a transient keyring failure
+    /// (`Err`) from "no workspace" (`Ok(None)`). The keyring error must never
+    /// be mistaken for a missing store: writing without the active key would
+    /// leak it into the durable transcript.
+    fn store_with_keys(&self) -> Result<Option<AgentSessionStore>, ()> {
         let root = self
             .workspace_root
             .lock()
-            .expect("workspace root lock")
-            .clone()?;
-        let store = AgentSessionStore::new(root);
-        match self.config.key_source.get().ok().flatten() {
-            Some(key) => Some(store.with_redaction_key(key)),
-            None => Some(store),
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        let current = self.config.key_source.get().map_err(|_| ())?;
+        if let Some(key) = current {
+            self.register_subagent_redaction_key(&key);
         }
+        let keys = self
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(Some(
+            keys.iter()
+                .fold(AgentSessionStore::new(root), |store, key| {
+                    store.with_redaction_key(key)
+                }),
+        ))
+    }
+
+    /// Append one live transcript record. A transient keyring failure queues
+    /// the record instead of dropping it; the next successful store access
+    /// retries the whole queue in arrival order.
+    fn append_transcript(
+        &self,
+        session_id: &SessionId,
+        entry: TranscriptEntry,
+    ) -> Result<(), TranscriptAppend> {
+        let store = match self.store_with_keys() {
+            Ok(Some(store)) => store,
+            Ok(None) => return Err(TranscriptAppend::Failed),
+            Err(()) => {
+                self.pending_transcript
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(PendingTranscriptRecord {
+                        session_id: session_id.clone(),
+                        entry,
+                    });
+                return Err(TranscriptAppend::Queued);
+            }
+        };
+        // Earlier records must land first: a queued call cannot follow its
+        // own result on disk.
+        self.drain_pending_transcript(&store)?;
+        store
+            .append(session_id.as_str(), &entry)
+            .map_err(|_| TranscriptAppend::Failed)
+    }
+
+    /// Append every queued record, keeping the queue intact when an append
+    /// fails so a later retry still delivers it.
+    fn drain_pending_transcript(&self, store: &AgentSessionStore) -> Result<(), TranscriptAppend> {
+        let mut pending = self
+            .pending_transcript
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(record) = pending.first() {
+            store
+                .append(record.session_id.as_str(), &record.entry)
+                .map_err(|_| TranscriptAppend::Failed)?;
+            pending.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Retry queued tool records. `Ok(())` when nothing is queued, even while
+    /// the keyring is unavailable.
+    fn persist_pending_transcript(&self) -> Result<(), ()> {
+        if self
+            .pending_transcript
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let store = self.store_with_keys().map_err(|_| ())?.ok_or(())?;
+        self.drain_pending_transcript(&store).map_err(|_| ())
     }
 
     /// The resume picker's list (read-only; newest first).
@@ -450,8 +558,16 @@ impl SessionEngine {
         let Some(store) = self.store() else {
             return;
         };
+        // Queued tool records keep their arrival order relative to the message
+        // tail; when they cannot land yet, leave the tail in memory too.
+        if self.drain_pending_transcript(&store).is_err() {
+            return;
+        }
         let (start, entries, state, todos) = {
-            let inner = self.inner.lock().expect("engine lock");
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(session) = inner.sessions.get(session_id) else {
                 return;
             };
@@ -480,7 +596,10 @@ impl SessionEngine {
         let _ = store.save_state(&state);
         let _ = store.save_todos(session_id.as_str(), &todos);
         if appended > 0 {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(session) = inner.sessions.get_mut(session_id) {
                 let end = (start + appended).min(session.messages.len());
                 session.durable_entries = end;
@@ -490,41 +609,46 @@ impl SessionEngine {
 
     /// Append a live tool-call batch to the transcript (not part of the
     /// in-memory message tail).
-    fn record_tool_calls(&self, session_id: &SessionId, calls: Vec<selora_ai::ToolCall>) {
-        let Some(store) = self.store() else {
-            return;
-        };
-        let _ = store.append(
-            session_id.as_str(),
-            &TranscriptEntry::ToolCalls {
+    fn record_tool_calls(
+        &self,
+        session_id: &SessionId,
+        calls: Vec<selora_ai::ToolCall>,
+    ) -> Result<(), TranscriptAppend> {
+        self.append_transcript(
+            session_id,
+            TranscriptEntry::ToolCalls {
                 id: Uuid::new_v4().to_string(),
                 timestamp: selora_ai::now_millis(),
                 calls,
             },
-        );
+        )
     }
 
     /// Append one tool result to the transcript.
-    fn record_tool_result(&self, session_id: &SessionId, result: &selora_ai::ToolResult) {
-        let Some(store) = self.store() else {
-            return;
-        };
-        let _ = store.append(
-            session_id.as_str(),
-            &TranscriptEntry::Tool {
+    fn record_tool_result(
+        &self,
+        session_id: &SessionId,
+        result: &selora_ai::ToolResult,
+    ) -> Result<(), TranscriptAppend> {
+        self.append_transcript(
+            session_id,
+            TranscriptEntry::Tool {
                 id: Uuid::new_v4().to_string(),
                 timestamp: selora_ai::now_millis(),
                 call_id: result.id.clone(),
                 ok: result.ok,
                 content: result.content.clone(),
             },
-        );
+        )
     }
 
     /// Record a successful compaction cursor. The transcript is not rewritten.
     fn record_compaction(&self, session_id: &SessionId, cursor: selora_ai::CompactionCursor) {
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(session) = inner.sessions.get_mut(session_id) {
                 session.compaction = cursor;
                 session.updated_at = selora_ai::now_millis();
@@ -537,7 +661,10 @@ impl SessionEngine {
     /// memory. Every session's auto-approve flag is cleared first: trust never
     /// transfers across a switch.
     pub(crate) fn switch_session(&self, session_id: &SessionId) -> Result<(), ProtocolErrorDto> {
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !inner.sessions.contains_key(session_id) {
             let loaded = self.load_session_from_disk(session_id)?;
             inner.sessions.insert(session_id.clone(), loaded);
@@ -574,7 +701,10 @@ impl SessionEngine {
         session.mode = AgentModeDto::Execute;
         session.model = state.model;
         session.durable = true;
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.activity_counter += 1;
         session.last_activity = inner.activity_counter;
         for open in inner.sessions.values_mut() {
@@ -595,7 +725,10 @@ impl SessionEngine {
     /// touched one), never a synthesized placeholder.
     pub(crate) fn delete_session(&self, session_id: &SessionId) -> Result<(), ProtocolErrorDto> {
         let store = self.store();
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let open = inner.sessions.get(session_id);
         if let Some(session) = open {
             if session.active_request.is_some()
@@ -625,6 +758,11 @@ impl SessionEngine {
             None if !known => return Err(unknown_session(session_id)),
             None => {}
         }
+        // A queued retry must not resurrect a deleted session's directory.
+        self.pending_transcript
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|record| record.session_id != *session_id);
         inner.sessions.remove(session_id);
         if inner.active_session.as_ref() == Some(session_id) {
             inner.active_session = inner
@@ -651,7 +789,10 @@ impl SessionEngine {
         session_id: &SessionId,
         enabled: bool,
     ) -> Result<(), ProtocolErrorDto> {
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(session) = inner.sessions.get_mut(session_id) else {
             return Err(ProtocolErrorDto {
                 code: "session_not_found".into(),
@@ -668,7 +809,10 @@ impl SessionEngine {
     /// fields, so this is where a reload's plan spine is captured.
     fn sync_plan_store(&self, session_id: &SessionId) {
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(session) = inner.sessions.get_mut(session_id) else {
                 return;
             };
@@ -767,14 +911,21 @@ impl SessionEngine {
     }
 
     pub(crate) fn base_url(&self) -> String {
-        self.inner.lock().expect("engine lock").base_url.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .base_url
+            .clone()
     }
 
     /// The live agent request/turn for a session, when one is running. Child
     /// cards group under it; a background child may outlive the turn, in
     /// which case the relay mints its own ids.
     fn active_request_for_session(&self, session_id: &SessionId) -> Option<(RequestId, TurnId)> {
-        let inner = self.inner.lock().expect("engine lock");
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner
             .active
             .iter()
@@ -789,7 +940,10 @@ impl SessionEngine {
     }
 
     pub(crate) fn set_base_url(&self, base_url: String) {
-        self.inner.lock().expect("engine lock").base_url = base_url;
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .base_url = base_url;
     }
 
     pub(crate) fn set_models_and_connection(
@@ -798,7 +952,10 @@ impl SessionEngine {
         connection: ConnectionStatus,
         active_model: Option<String>,
     ) {
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.models = models;
         inner.connection = connection;
         inner.active_model = active_model;
@@ -809,13 +966,16 @@ impl SessionEngine {
     // -----------------------------------------------------------------
 
     pub(crate) fn connection(&self) -> ConnectionStatus {
-        self.inner.lock().expect("engine lock").connection
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connection
     }
 
     pub(crate) fn models_dto(&self) -> Vec<ModelDto> {
         self.inner
             .lock()
-            .expect("engine lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .models
             .iter()
             .map(model_dto)
@@ -823,21 +983,36 @@ impl SessionEngine {
     }
 
     pub(crate) fn active_model_id(&self) -> Option<String> {
-        self.inner.lock().expect("engine lock").active_model.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_model
+            .clone()
     }
 
     /// The bootstrap's `chat` block: every session, the flattened
     /// transcript, the live request/turn ids, the newest parked approval,
     /// and the active session's authoritative todos.
     pub(crate) fn chat_state(&self) -> ChatStateDto {
-        let redaction_key = self
+        let key_available = self
             .config
             .key_source
             .get()
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let inner = self.inner.lock().expect("engine lock");
+            .map(|key| {
+                if let Some(key) = key {
+                    self.register_subagent_redaction_key(&key);
+                }
+            })
+            .is_ok();
+        let keys = self
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut sessions = Vec::new();
         let mut messages = Vec::new();
         let mut active_session_id = inner
@@ -856,7 +1031,11 @@ impl SessionEngine {
             let plan = selora_ai::plan::snapshot(&session.plan_store);
             sessions.push(SessionDto {
                 session_id: session_id.clone(),
-                title: session.title.clone(),
+                title: if key_available {
+                    redact_with_keys(&session.title, &keys)
+                } else {
+                    "[REDACTED]".into()
+                },
                 message_ids: session
                     .messages
                     .iter()
@@ -864,18 +1043,35 @@ impl SessionEngine {
                     .collect(),
                 active: session.active_request.is_some(),
                 plan_phase: plan_phase_dto(plan.phase),
-                plan: plan
-                    .plan
-                    .as_ref()
-                    .map(|draft| plan_approval_dto(draft, &redaction_key)),
-                todos: plan.todos.iter().map(todo_dto).collect(),
+                plan: plan.plan.as_ref().map(|draft| {
+                    if key_available {
+                        scrub_serializable(plan_approval_dto(draft, ""), &keys)
+                    } else {
+                        PlanApprovalDto {
+                            summary: None,
+                            steps: Vec::new(),
+                        }
+                    }
+                }),
+                todos: if key_available {
+                    plan.todos
+                        .iter()
+                        .map(|todo| scrub_serializable(todo_dto(todo), &keys))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             });
             for message in &session.messages {
                 messages.push(MessageDto {
                     message_id: message.message_id.clone(),
                     session_id: session_id.clone(),
                     role: message.role,
-                    text: message.text.clone(),
+                    text: if key_available {
+                        redact_with_keys(&message.text, &keys)
+                    } else {
+                        "[REDACTED]".into()
+                    },
                 });
             }
             if let Some(request_id) = &session.active_request {
@@ -892,7 +1088,12 @@ impl SessionEngine {
                 }
             }
             if let Some(approval) = &session.pending_approval {
-                pending_approvals.push((session_id.clone(), approval.clone()));
+                if key_available {
+                    pending_approvals.push((
+                        session_id.clone(),
+                        scrub_serializable(approval.clone(), &keys),
+                    ));
+                }
             }
         }
         // Prefer the active session's park; otherwise the first in recency
@@ -914,23 +1115,30 @@ impl SessionEngine {
                 .into_iter()
                 .map(|(_, approval)| approval)
                 .collect(),
-            todos: active_session_id
-                .as_ref()
-                .and_then(|id| inner.sessions.get(id))
-                .map(|session| {
-                    selora_ai::plan::snapshot(&session.plan_store)
-                        .todos
-                        .iter()
-                        .map(todo_dto)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            todos: if !key_available {
+                Vec::new()
+            } else {
+                active_session_id
+                    .as_ref()
+                    .and_then(|id| inner.sessions.get(id))
+                    .map(|session| {
+                        selora_ai::plan::snapshot(&session.plan_store)
+                            .todos
+                            .iter()
+                            .map(|todo| scrub_serializable(todo_dto(todo), &keys))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
         }
     }
 
     /// The session the engine currently considers active (new/switch/send).
     pub(crate) fn active_session_id(&self) -> Option<SessionId> {
-        let inner = self.inner.lock().expect("engine lock");
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.active_session.clone().or_else(|| {
             inner
                 .sessions
@@ -970,7 +1178,7 @@ impl SessionEngine {
         if self
             .inner
             .lock()
-            .expect("engine lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .sessions
             .get(&session_id)
             .is_none_or(|session| session.durable)
@@ -980,7 +1188,10 @@ impl SessionEngine {
             return Ok(request_id);
         }
         let (spec, text) = {
-            let inner = self.inner.lock().expect("engine lock");
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let session = inner
                 .sessions
                 .get(&session_id)
@@ -1086,7 +1297,10 @@ impl SessionEngine {
             .or_else(|| self.active_model_id())
             .ok_or_else(no_model_selected)?;
 
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(target) = &retry {
             truncate_for_retry(&mut inner, target)?;
         }
@@ -1166,12 +1380,15 @@ impl SessionEngine {
         let root = self
             .workspace_root
             .lock()
-            .expect("workspace root lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(no_workspace)?;
         let turn_id = fresh_turn_id();
 
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(target) = &retry {
             truncate_for_retry(&mut inner, target)?;
         }
@@ -1265,7 +1482,10 @@ impl SessionEngine {
         let (decision_tx, join) =
             selora_ai::spawn_agent_turn(&tokio_handle, input, chat, tools, events_tx);
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.active.insert(
                 request_id.clone(),
                 ActiveRequest::Agent {
@@ -1301,7 +1521,7 @@ impl SessionEngine {
         let receiver = self
             .subagent_events
             .lock()
-            .expect("subagent events lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         let Some(events_rx) = receiver else {
             return;
@@ -1365,7 +1585,10 @@ impl SessionEngine {
         request_id: &RequestId,
         envelope_session: Option<SessionId>,
     ) -> Result<(), ProtocolErrorDto> {
-        let inner = self.inner.lock().expect("engine lock");
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(active) = inner.active.get(request_id) {
             if envelope_session.is_some_and(|session| session != *active.session_id()) {
                 return Err(stale_session());
@@ -1467,7 +1690,7 @@ impl SessionEngine {
         if let Some(route) = self
             .subagent_cards
             .lock()
-            .expect("subagent card lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(approval_id)
             .cloned()
         {
@@ -1493,7 +1716,7 @@ impl SessionEngine {
             }
             self.subagent_cards
                 .lock()
-                .expect("subagent card lock")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(approval_id);
             let loop_id = Uuid::parse_str(approval_id.as_str()).map_err(|_| ProtocolErrorDto {
                 code: "approval_mismatch".into(),
@@ -1510,7 +1733,10 @@ impl SessionEngine {
                 });
         }
 
-        let mut inner = self.inner.lock().expect("engine lock");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // The session whose parked card belongs to this request.
         let Some((session_id, session)) = inner
             .sessions
@@ -1673,7 +1899,10 @@ impl SessionEngine {
     ) -> Result<(), ProtocolErrorDto> {
         let store = self.store().ok_or_else(no_workspace)?;
         let (prompt, model, mode, entries) = {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if inner
                 .sessions
                 .get(&session_id)
@@ -1816,7 +2045,10 @@ impl SessionEngine {
             })
             .or_else(|| models.first().map(|m| m.id.clone()));
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.models = models.clone();
             inner.connection = ConnectionStatus::Connected;
             inner.active_model = active_model.clone();
@@ -1837,7 +2069,10 @@ impl SessionEngine {
     }
 
     fn set_connection(&self, status: ConnectionStatus) {
-        self.inner.lock().expect("engine lock").connection = status;
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connection = status;
     }
 
     // -----------------------------------------------------------------
@@ -1853,7 +2088,10 @@ impl SessionEngine {
         assistant: Option<(MessageId, String)>,
     ) {
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.active.remove(request_id);
             if let Some(session) = inner.sessions.get_mut(session_id) {
                 if session.active_request.as_ref() == Some(request_id) {
@@ -1877,7 +2115,10 @@ impl SessionEngine {
         assistant: Option<(MessageId, String)>,
     ) {
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.active.remove(request_id);
             if let Some(session) = inner.sessions.get_mut(session_id) {
                 if session.active_request.as_ref() == Some(request_id) {
@@ -1907,7 +2148,10 @@ impl SessionEngine {
         tool_name: String,
     ) {
         {
-            let mut inner = self.inner.lock().expect("engine lock");
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(session) = inner.sessions.get_mut(session_id) {
                 session.pending_approval = Some(approval);
                 session.pending_card = Some(card);
@@ -1924,20 +2168,25 @@ impl SessionEngine {
     // -----------------------------------------------------------------
 
     pub(crate) fn fetch_api_key(&self) -> Result<String, ProtocolErrorDto> {
-        self.config.key_source.get().and_then(|key| {
+        let key = self.config.key_source.get().and_then(|key| {
             key.ok_or_else(|| ProtocolErrorDto {
                 code: "not_connected".into(),
                 message: "No Selora API key is stored — connect first.".into(),
                 retryable: true,
             })
-        })
+        })?;
+        self.register_subagent_redaction_key(&key);
+        Ok(key)
     }
 
     fn register_subagent_redaction_key(&self, key: &str) {
         if key.is_empty() {
             return;
         }
-        let mut keys = self.subagent_redaction_keys.lock().expect("subagent keys lock");
+        let mut keys = self
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !keys.iter().any(|known| known == key) {
             keys.push(key.to_owned());
         }
@@ -1948,7 +2197,10 @@ impl SessionEngine {
             .map(str::to_owned)
             .or_else(|| self.active_model_id())
             .ok_or_else(no_model_selected)?;
-        let inner = self.inner.lock().expect("engine lock");
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(found) = inner.models.iter().find(|model| {
             model.id == id
                 || model.id.eq_ignore_ascii_case(&id)
@@ -2065,10 +2317,27 @@ async fn chat_relay<R: tauri::Runtime>(ctx: ChatRelayCtx<R>) {
 
     let mut delta_seq: u64 = 0;
     let mut text = String::new();
+    let mut delta_buffer = SubagentDeltaBuffer::default();
     let mut terminal: Option<Result<ChatReceipt, SeloraError>> = None;
+    let mut key_failed = false;
     while let Some(event) = events_rx.recv().await {
+        if engine.fetch_api_key().is_err() {
+            key_failed = true;
+            delta_buffer.pending.clear();
+            stream.abort();
+            break;
+        }
+        delta_buffer.keys = engine
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         match event {
             ChatEvent::Delta(delta) => {
+                let delta = delta_buffer.push(&delta, &api_key, false);
+                if delta.is_empty() {
+                    continue;
+                }
                 text.push_str(&delta);
                 delta_seq += 1;
                 log.record_session(
@@ -2099,15 +2368,40 @@ async fn chat_relay<R: tauri::Runtime>(ctx: ChatRelayCtx<R>) {
         }
     }
 
+    let tail = delta_buffer.push("", &api_key, true);
+    if !tail.is_empty() {
+        text.push_str(&tail);
+        delta_seq += 1;
+        log.record_session(
+            &app,
+            FrontendEvent::ChatDelta(ChatDeltaDto {
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                message_id: message_id.clone(),
+                sequence: delta_seq,
+                text: tail,
+            }),
+            Some(request_id.clone()),
+            session_id.clone(),
+        );
+    }
+
     // Always join the stream task: when it resolved normally its terminal
     // event was already relayed; a cancel resolved `None` (silent by
     // design); a panicking subtask is surfaced as a `ChatFailed` (never a
     // silent cancel, PLAN.md §8).
-    let outcome = match stream.await {
-        Ok(joined) => terminal.or(joined),
-        Err(join_error) => Some(Err(SeloraError::Other(format!(
-            "chat worker died: {join_error}"
-        )))),
+    let outcome = if key_failed {
+        Some(Err(SeloraError::Other(
+            "Credential store unavailable; stream stopped.".into(),
+        )))
+    } else {
+        match stream.await {
+            Ok(joined) => terminal.or(joined),
+            Err(join_error) => Some(Err(SeloraError::Other(format!(
+                "chat worker died: {join_error}"
+            )))),
+        }
     };
     match outcome {
         Some(Ok(receipt)) => {
@@ -2143,13 +2437,20 @@ async fn chat_relay<R: tauri::Runtime>(ctx: ChatRelayCtx<R>) {
                 Some((message_id, text.clone()))
             };
             engine.finish_chat(&request_id, &session_id, assistant);
+            let keys = engine
+                .subagent_redaction_keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let mut error = to_protocol_error(&error, "");
+            error.message = redact_with_keys(&error.message, &keys);
             log.record_session(
                 &app,
                 FrontendEvent::ChatFailed(ChatFailedDto {
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
                     turn_id,
-                    error: to_protocol_error(&error, &api_key),
+                    error,
                 }),
                 Some(request_id),
                 session_id,
@@ -2224,8 +2525,55 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
     let mut last_call: Option<selora_ai::ToolCall> = None;
     let mut done_seen = false;
     let mut final_text = String::new();
+    let mut delta_buffer = SubagentDeltaBuffer::default();
+    let mut failure = None;
 
     while let Some(event) = events_rx.recv().await {
+        if engine.fetch_api_key().is_err() {
+            failure = Some("Credential store unavailable; turn stopped.");
+            delta_buffer.pending.clear();
+            if let Some(ActiveRequest::Agent { decisions, .. }) = engine
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active
+                .get(&request_id)
+            {
+                let _ = decisions.send((Uuid::nil(), selora_ai::AgentDecision::Stop));
+            }
+            engine.subagents.cancel_parent(session_id.as_str());
+            join.abort();
+            break;
+        }
+        let keys = engine
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        delta_buffer.keys = keys.clone();
+        if is_message_boundary(&event) && !delta_buffer.pending.is_empty() {
+            // A new message or terminal event ends this message, so a partial
+            // key prefix can no longer be completed by a later delta. Ordinary
+            // events (tool state, plans, todos) must leave the prefix buffered:
+            // the stream may resume and complete the key.
+            let text = delta_buffer.push("", &api_key, true);
+            final_text.push_str(&text);
+            delta_seq += 1;
+            let message_id = current_message.get_or_insert_with(fresh_message_id).clone();
+            log.record_session(
+                &app,
+                FrontendEvent::ChatDelta(ChatDeltaDto {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: turn_id.clone(),
+                    message_id,
+                    sequence: delta_seq,
+                    text,
+                }),
+                Some(request_id.clone()),
+                session_id.clone(),
+            );
+        }
         match event {
             selora_ai::AgentEvent::State(state) => {
                 // A new round is a new streaming message.
@@ -2241,13 +2589,17 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         session_id: session_id.clone(),
                         turn_id: turn_id.clone(),
                         state: phase,
-                        tool_name,
+                        tool_name: tool_name.map(|name| redact_with_keys(&name, &keys)),
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
                 );
             }
             selora_ai::AgentEvent::Delta(delta) => {
+                let delta = delta_buffer.push(&delta, &api_key, false);
+                if delta.is_empty() {
+                    continue;
+                }
                 final_text.push_str(&delta);
                 delta_seq += 1;
                 let message_id = current_message.get_or_insert_with(fresh_message_id).clone();
@@ -2266,16 +2618,35 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 );
             }
             selora_ai::AgentEvent::ToolCallStarted(call) => {
-                engine.record_tool_calls(&session_id, vec![call.clone()]);
+                match engine.record_tool_calls(&session_id, vec![call.clone()]) {
+                    // The keyring is temporarily unreadable: the record is
+                    // queued and retried, so the turn continues.
+                    Ok(()) | Err(TranscriptAppend::Queued) => {}
+                    Err(TranscriptAppend::Failed) => {
+                        failure = Some("Could not persist tool call; turn stopped.");
+                        if let Some(ActiveRequest::Agent { decisions, .. }) = engine
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .active
+                            .get(&request_id)
+                        {
+                            let _ = decisions.send((Uuid::nil(), selora_ai::AgentDecision::Stop));
+                        }
+                        engine.subagents.cancel_parent(session_id.as_str());
+                        join.abort();
+                        break;
+                    }
+                }
                 log.record_session(
                     &app,
                     FrontendEvent::ToolCallStarted(ToolCallStartedDto {
                         request_id: request_id.clone(),
                         session_id: session_id.clone(),
                         turn_id: turn_id.clone(),
-                        call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                        args_json: call.arguments.clone(),
+                        call_id: redact_with_keys(&call.id, &keys),
+                        tool_name: redact_with_keys(&call.name, &keys),
+                        args_json: redact_json_text(&call.arguments, &keys),
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -2283,15 +2654,32 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 last_call = Some(call);
             }
             selora_ai::AgentEvent::ToolResult(result) => {
-                engine.record_tool_result(&session_id, &result);
+                match engine.record_tool_result(&session_id, &result) {
+                    Ok(()) | Err(TranscriptAppend::Queued) => {}
+                    Err(TranscriptAppend::Failed) => {
+                        failure = Some("Could not persist tool result; turn stopped.");
+                        if let Some(ActiveRequest::Agent { decisions, .. }) = engine
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .active
+                            .get(&request_id)
+                        {
+                            let _ = decisions.send((Uuid::nil(), selora_ai::AgentDecision::Stop));
+                        }
+                        engine.subagents.cancel_parent(session_id.as_str());
+                        join.abort();
+                        break;
+                    }
+                }
                 log.record_session(
                     &app,
                     FrontendEvent::ToolResult(ToolResultDto {
                         request_id: request_id.clone(),
                         session_id: session_id.clone(),
                         turn_id: turn_id.clone(),
-                        call_id: result.id.clone(),
-                        result_summary: result.content.clone(),
+                        call_id: redact_with_keys(&result.id, &keys),
+                        result_summary: redact_with_keys(&result.content, &keys),
                         is_err: !result.ok,
                     }),
                     Some(request_id.clone()),
@@ -2299,10 +2687,10 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 );
             }
             selora_ai::AgentEvent::ApprovalNeeded { approval_id, card } => {
-                let card = redact_card(card, &api_key);
+                let card = redact_card_with_keys(card, &keys);
                 let tool_name = last_call
                     .as_ref()
-                    .map(|call| call.name.clone())
+                    .map(|call| redact_with_keys(&call.name, &keys))
                     .unwrap_or_else(|| fallback_tool_name(&card));
                 let (path_or_command, diff_or_input, workflow) = approval_body(&card);
                 let plan = approval_plan(&card);
@@ -2359,7 +2747,7 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         phase: plan_phase_dto(phase),
                         plan: plan
                             .as_ref()
-                            .map(|draft| plan_approval_dto(draft, &api_key)),
+                            .map(|draft| scrub_serializable(plan_approval_dto(draft, ""), &keys)),
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -2371,7 +2759,10 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                     &app,
                     FrontendEvent::TodosChanged(TodosDto {
                         session_id: session_id.clone(),
-                        todos: todos.iter().map(todo_dto).collect(),
+                        todos: todos
+                            .iter()
+                            .map(|todo| scrub_serializable(todo_dto(todo), &keys))
+                            .collect(),
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -2394,8 +2785,9 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         request_id: request_id.clone(),
                         session_id: session_id.clone(),
                         turn_id: turn_id.clone(),
-                        message: redact(&message, &api_key),
-                        partial_summary: partial_summary.map(|summary| redact(&summary, &api_key)),
+                        message: redact_with_keys(&message, &keys),
+                        partial_summary: partial_summary
+                            .map(|summary| redact_with_keys(&summary, &keys)),
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -2403,13 +2795,17 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
             }
             selora_ai::AgentEvent::TurnDone(report) => {
                 done_seen = true;
+                // A queued tool record that still cannot be written is a
+                // visible turn failure, never a silent hole in the
+                // transcript.
+                let persisted = engine.persist_pending_transcript().is_ok();
                 // The final answer is the last round's message; an empty
                 // final (a tools-only abort) adds nothing.
                 let assistant = if report.final_message.trim().is_empty() {
                     None
                 } else {
                     let message_id = current_message.get_or_insert_with(fresh_message_id).clone();
-                    Some((message_id, report.final_message.clone()))
+                    Some((message_id, redact_with_keys(&report.final_message, &keys)))
                 };
                 engine.finish_agent(&request_id, &session_id, assistant);
                 if final_text.is_empty() && !report.final_message.trim().is_empty() {
@@ -2422,7 +2818,7 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                             turn_id: turn_id.clone(),
                             message_id,
                             sequence: 1,
-                            text: report.final_message.clone(),
+                            text: redact_with_keys(&report.final_message, &keys),
                         }),
                         Some(request_id.clone()),
                         session_id.clone(),
@@ -2439,8 +2835,12 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         num_tools: report.summary.tools_used,
                         approved: report.summary.approved,
                         denied: report.summary.denied,
-                        completed: report.summary.completed,
-                        end_message: redact(&report.end.toast(), &api_key),
+                        completed: report.summary.completed && persisted,
+                        end_message: if persisted {
+                            redact_with_keys(&report.end.toast(), &keys)
+                        } else {
+                            "Could not persist tool records; credential store unavailable.".into()
+                        },
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -2455,9 +2855,32 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
     // terminal event — from the report if it completed, else a synthetic
     // `Failed`.
     if !done_seen {
-        let (summary, end_message) = match join.await {
-            Ok(report) => (report.summary, report.end.toast()),
-            Err(join_error) => (
+        if failure.is_none() && !delta_buffer.pending.is_empty() {
+            let text = delta_buffer.push("", &api_key, true);
+            final_text.push_str(&text);
+            delta_seq += 1;
+            let message_id = current_message.get_or_insert_with(fresh_message_id).clone();
+            log.record_session(
+                &app,
+                FrontendEvent::ChatDelta(ChatDeltaDto {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: turn_id.clone(),
+                    message_id,
+                    sequence: delta_seq,
+                    text,
+                }),
+                Some(request_id.clone()),
+                session_id.clone(),
+            );
+        }
+        if failure.is_none() && engine.persist_pending_transcript().is_err() {
+            // The keyring stayed unavailable for the whole turn: report the
+            // unwritten tool records instead of ending as if they landed.
+            failure = Some("Could not persist tool records; credential store unavailable.");
+        }
+        let (summary, end_message) = if let Some(message) = failure {
+            (
                 AgentSummary {
                     iterations: 0,
                     tools_used: 0,
@@ -2467,8 +2890,24 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                     cost_usd: 0.0,
                     completed: false,
                 },
-                format!("agent worker died: {join_error}"),
-            ),
+                message.to_owned(),
+            )
+        } else {
+            match join.await {
+                Ok(report) => (report.summary, report.end.toast()),
+                Err(join_error) => (
+                    AgentSummary {
+                        iterations: 0,
+                        tools_used: 0,
+                        approved: 0,
+                        denied: 0,
+                        tokens: 0,
+                        cost_usd: 0.0,
+                        completed: false,
+                    },
+                    format!("agent worker died: {join_error}"),
+                ),
+            }
         };
         let assistant = if final_text.is_empty() {
             None
@@ -2476,6 +2915,11 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
             Some((fresh_message_id(), final_text.clone()))
         };
         engine.finish_agent(&request_id, &session_id, assistant);
+        let keys = engine
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         log.record_session(
             &app,
             FrontendEvent::AgentTurnDone(AgentTurnDoneDto {
@@ -2488,7 +2932,7 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 approved: summary.approved,
                 denied: summary.denied,
                 completed: summary.completed,
-                end_message: redact(&end_message, &api_key),
+                end_message: redact_with_keys(&end_message, &keys),
             }),
             Some(request_id),
             session_id,
@@ -2504,7 +2948,7 @@ struct SubagentRelayCtx<R: tauri::Runtime> {
     log: Arc<EventLog>,
     engine: Arc<SessionEngine>,
     app: tauri::AppHandle<R>,
-    events_rx: mpsc::UnboundedReceiver<selora_ai::SubagentEvent>,
+    events_rx: mpsc::Receiver<selora_ai::SubagentEvent>,
 }
 
 #[derive(Default)]
@@ -2524,9 +2968,19 @@ impl SubagentDeltaBuffer {
         let mut consumed = 0;
         while consumed < self.pending.len() {
             let remaining = &self.pending[consumed..];
-            if !flush && self.keys.iter().any(|key| key.len() > remaining.len() && key.starts_with(remaining)) {
+            if !flush
+                && self
+                    .keys
+                    .iter()
+                    .any(|key| key.len() > remaining.len() && key.starts_with(remaining))
+            {
                 break;
-            } else if let Some(key) = self.keys.iter().filter(|key| remaining.starts_with(key.as_str())).max_by_key(|key| key.len()) {
+            } else if let Some(key) = self
+                .keys
+                .iter()
+                .filter(|key| remaining.starts_with(key.as_str()))
+                .max_by_key(|key| key.len())
+            {
                 consumed += key.len();
                 output.push_str("[REDACTED]");
             } else {
@@ -2542,25 +2996,22 @@ impl SubagentDeltaBuffer {
 
 type SubagentDeltaBuffers = BTreeMap<(String, String, String), SubagentDeltaBuffer>;
 
-fn redact_with_keys(text: &str, keys: &[String]) -> String {
-    let mut buffer = SubagentDeltaBuffer { keys: keys.iter().filter(|key| !key.is_empty()).cloned().collect(), ..Default::default() };
-    buffer.push(text, "", true)
+/// True for events that end one streaming message: only there can a buffered
+/// key prefix never be completed by a later delta. Every other event is
+/// ordinary output and must preserve the buffered text.
+fn is_message_boundary(event: &selora_ai::AgentEvent) -> bool {
+    matches!(
+        event,
+        selora_ai::AgentEvent::State(AgentTurnState::Thinking) | selora_ai::AgentEvent::TurnDone(_)
+    )
 }
 
-// Do not expose a possible key prefix across an intervening event. Keep the
-// sequence counter because the same message can resume after that event.
-fn seal_subagent_prefixes<R: tauri::Runtime>(
-    buffers: &mut SubagentDeltaBuffers,
-    log: &EventLog,
-    app: &tauri::AppHandle<R>,
-    except: Option<&(String, String, String)>,
-) {
-    for (identity, buffer) in buffers.iter_mut() {
-        if Some(identity) != except && !buffer.pending.is_empty() {
-            buffer.pending.clear();
-            emit_subagent_delta(log, app, identity, buffer, "[REDACTED]".into());
-        }
-    }
+fn redact_with_keys(text: &str, keys: &[String]) -> String {
+    let mut buffer = SubagentDeltaBuffer {
+        keys: keys.iter().filter(|key| !key.is_empty()).cloned().collect(),
+        ..Default::default()
+    };
+    buffer.push(text, "", true)
 }
 
 fn emit_subagent_delta<R: tauri::Runtime>(
@@ -2573,7 +3024,9 @@ fn emit_subagent_delta<R: tauri::Runtime>(
     if text.is_empty() {
         return;
     }
-    let Ok(parent) = SessionId::new(identity.0.clone()) else { return };
+    let Ok(parent) = SessionId::new(identity.0.clone()) else {
+        return;
+    };
     buffer.sequence += 1;
     log.record_session(
         app,
@@ -2617,19 +3070,68 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
         mut events_rx,
     } = ctx;
     let mut delta_buffers = SubagentDeltaBuffers::new();
-    while let Some(event) = events_rx.recv().await {
-        // Preserve event order while the keyring is unavailable. No event or
-        // buffered text is emitted until the active key can be read again.
-        let api_key = loop {
-            if let Ok(key) = engine.fetch_api_key() {
-                if !key.is_empty() {
-                    break key;
+    let mut changes = engine.subagents.subscribe_changes();
+    let mut sink_closed = false;
+    loop {
+        // Drain already queued activity before terminal events retained on
+        // overflow. The retained terminal is bounded to one per child.
+        let event = match events_rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                sink_closed = true;
+                engine.subagents.take_sink_terminal()
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if let Some(event) = engine.subagents.take_sink_terminal() {
+                    Some(event)
+                } else {
+                    tokio::select! {
+                        event = events_rx.recv() => event,
+                        _ = changes.changed() => continue,
+                    }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        let Some(event) = event else { break };
+        // Preserve event order while the keyring is unavailable. No event or
+        // buffered text is emitted until the active key can be read again.
+        let Ok(api_key) = engine.fetch_api_key() else {
+            // Cancel the child before discarding a card that cannot be shown.
+            let child = match &event {
+                selora_ai::SubagentEvent::Activity(activity) => Some(activity.child_id.as_str()),
+                selora_ai::SubagentEvent::ApprovalNeeded(card) => Some(card.child_id.as_str()),
+                _ => None,
+            };
+            if let Some(child) = child {
+                engine.subagents.cancel_child(child);
+                engine
+                    .subagent_cards
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|_, route| route.child_id != child);
+            }
+            if matches!(
+                &event,
+                selora_ai::SubagentEvent::Cancelled { .. } | selora_ai::SubagentEvent::Completed(_)
+            ) {
+                engine.subagents.defer_sink_terminal(event);
+                if sink_closed {
+                    // No producer remains to wake this relay again; keep the
+                    // terminal reserved for the next reader instead of
+                    // spinning on it while the keyring is down.
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            delta_buffers.clear();
+            continue;
         };
         engine.register_subagent_redaction_key(&api_key);
-        let keys = engine.subagent_redaction_keys.lock().expect("subagent keys lock").clone();
+        let keys = engine
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         for buffer in delta_buffers.values_mut() {
             for key in &keys {
                 if !buffer.keys.contains(key) {
@@ -2639,8 +3141,13 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
         }
         match event {
             selora_ai::SubagentEvent::Completed(completion) => {
-                flush_subagent_deltas(&mut delta_buffers, &log, &app, Some((&completion.parent_session, &completion.child_id)), &api_key);
-                seal_subagent_prefixes(&mut delta_buffers, &log, &app, None);
+                flush_subagent_deltas(
+                    &mut delta_buffers,
+                    &log,
+                    &app,
+                    Some((&completion.parent_session, &completion.child_id)),
+                    &api_key,
+                );
                 let Ok(parent) = SessionId::new(completion.parent_session.clone()) else {
                     continue;
                 };
@@ -2651,27 +3158,27 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                     artifact.kind = redact_with_keys(&artifact.kind, &keys);
                     artifact.path = redact_with_keys(&artifact.path, &keys);
                 }
-                log.record_session(
-                    &app,
-                    FrontendEvent::SubagentCompleted(dto),
-                    None,
-                    parent,
-                );
+                log.record_session(&app, FrontendEvent::SubagentCompleted(dto), None, parent);
             }
             selora_ai::SubagentEvent::Activity(activity) => {
-                if let selora_ai::SubagentActivityKind::Delta { message_id, text, .. } = &activity.kind {
+                if let selora_ai::SubagentActivityKind::Delta {
+                    message_id, text, ..
+                } = &activity.kind
+                {
                     if SessionId::new(activity.parent_session.clone()).is_err() {
                         continue;
                     }
-                    let identity = (activity.parent_session.clone(), activity.child_id.clone(), message_id.clone());
-                    seal_subagent_prefixes(&mut delta_buffers, &log, &app, Some(&identity));
+                    let identity = (
+                        activity.parent_session.clone(),
+                        activity.child_id.clone(),
+                        message_id.clone(),
+                    );
                     let buffer = delta_buffers.entry(identity.clone()).or_default();
                     buffer.keys = keys.clone();
                     let text = buffer.push(text, &api_key, false);
                     emit_subagent_delta(&log, &app, &identity, buffer, text);
                     continue;
                 }
-                seal_subagent_prefixes(&mut delta_buffers, &log, &app, None);
                 let child_id = activity.child_id.clone();
                 let Ok(parent) = SessionId::new(activity.parent_session.clone()) else {
                     continue;
@@ -2690,8 +3197,18 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                 child_id,
                 parent_session,
             } => {
-                flush_subagent_deltas(&mut delta_buffers, &log, &app, Some((&parent_session, &child_id)), &api_key);
-                seal_subagent_prefixes(&mut delta_buffers, &log, &app, None);
+                engine
+                    .subagent_cards
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|_, route| route.child_id != child_id);
+                flush_subagent_deltas(
+                    &mut delta_buffers,
+                    &log,
+                    &app,
+                    Some((&parent_session, &child_id)),
+                    &api_key,
+                );
                 let Ok(parent) = SessionId::new(parent_session) else {
                     continue;
                 };
@@ -2706,7 +3223,12 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                 );
             }
             selora_ai::SubagentEvent::ApprovalNeeded(child_card) => {
-                seal_subagent_prefixes(&mut delta_buffers, &log, &app, None);
+                if matches!(
+                    engine.subagents.child_state(&child_card.child_id),
+                    Some(selora_ai::ChildState::Cancelled)
+                ) {
+                    continue;
+                }
                 let Ok(session_id) = SessionId::new(child_card.parent_session.clone()) else {
                     continue;
                 };
@@ -2731,13 +3253,14 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                 engine
                     .subagent_cards
                     .lock()
-                    .expect("subagent card lock")
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(
                         approval_id.clone(),
                         SubagentCardRoute {
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
                             is_question,
+                            child_id: child_id.clone(),
                         },
                     );
                 log.record_session(
@@ -2764,7 +3287,11 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
     if let Ok(api_key) = engine.fetch_api_key() {
         if !api_key.is_empty() {
             engine.register_subagent_redaction_key(&api_key);
-            let keys = engine.subagent_redaction_keys.lock().expect("subagent keys lock").clone();
+            let keys = engine
+                .subagent_redaction_keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             for buffer in delta_buffers.values_mut() {
                 buffer.keys = keys.clone();
             }
@@ -2902,6 +3429,7 @@ fn agent_tool_settings(
         shell: settings.shell.clone(),
         auto_approve_commands: settings.auto_approve_commands.clone(),
         brave_api_key,
+        workspace_trusted: settings.workspace_trusted,
     }
 }
 
@@ -3450,7 +3978,7 @@ fn subagent_activity_dto(
             parent_session_id: parent,
             call_id: redact_with_keys(&call_id, keys),
             tool_name: redact_with_keys(&tool_name, keys),
-            args_json: redact_with_keys(&args_json, keys),
+            args_json: redact_json_text(&args_json, keys),
         },
         selora_ai::SubagentActivityKind::ToolResult {
             call_id,
@@ -3505,15 +4033,26 @@ fn status_changed(status: ConnectionStatus, active_model: &Option<String>) -> Fr
 /// from the message (the client scrubs its own error bodies; this is the
 /// second seam, for anything that slipped through).
 fn to_protocol_error(error: &SeloraError, api_key: &str) -> ProtocolErrorDto {
-    let (code, retryable) = match error {
-        SeloraError::Auth(_) => ("auth_failed", false),
-        SeloraError::Net(_) => ("network_error", true),
-        SeloraError::Ai(_) => ("gateway_error", true),
-        _ => ("chat_failed", false),
+    // The failure class comes from the client's typed view (timeout, auth,
+    // network, gateway down, rejected, unparseable). Codes stay stable for
+    // the frontend; the message is actionable copy, never a raw transport
+    // dump and never the key.
+    let (code, retryable) = match selora_ai::classify_failure(error) {
+        selora_ai::GatewayFailure::Timeout => ("timeout", true),
+        selora_ai::GatewayFailure::Auth => ("auth_failed", false),
+        selora_ai::GatewayFailure::Network => ("network_error", true),
+        selora_ai::GatewayFailure::Unavailable => ("gateway_unavailable", true),
+        selora_ai::GatewayFailure::Rejected => ("gateway_error", false),
+        selora_ai::GatewayFailure::InvalidResponse => match error {
+            SeloraError::Auth(_) => ("auth_failed", false),
+            SeloraError::Net(_) => ("network_error", true),
+            SeloraError::Ai(_) => ("gateway_error", true),
+            _ => ("chat_failed", false),
+        },
     };
     ProtocolErrorDto {
         code: code.into(),
-        message: redact(&error.to_string(), api_key),
+        message: redact(&selora_ai::user_message(error), api_key),
         retryable,
     }
 }
@@ -3526,7 +4065,57 @@ fn redact(text: &str, api_key: &str) -> String {
     }
 }
 
+fn redact_json_text(text: &str, keys: &[String]) -> String {
+    fn walk(value: serde_json::Value, keys: &[String]) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(redact_with_keys(&text, keys))
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.into_iter().map(|item| walk(item, keys)).collect())
+            }
+            serde_json::Value::Object(items) => serde_json::Value::Object(
+                items
+                    .into_iter()
+                    .map(|(name, item)| (redact_with_keys(&name, keys), walk(item, keys)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => serde_json::to_string(&walk(value, keys)).expect("JSON serializes"),
+        Err(_) => redact_with_keys(text, keys),
+    }
+}
+
+fn scrub_serializable<T: serde::Serialize + serde::de::DeserializeOwned>(
+    value: T,
+    keys: &[String],
+) -> T {
+    fn walk(value: &mut serde_json::Value, keys: &[String]) {
+        match value {
+            serde_json::Value::String(text) => *text = redact_with_keys(text, keys),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| walk(item, keys)),
+            serde_json::Value::Object(items) => {
+                for (name, item) in items {
+                    if !name.ends_with("_id")
+                        && !matches!(name.as_str(), "status" | "kind" | "type" | "role" | "phase")
+                    {
+                        walk(item, keys);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(value).expect("DTO serializes");
+    walk(&mut value, keys);
+    serde_json::from_value(value).expect("redaction preserves DTO schema")
+}
+
 /// Apply the same approval redaction to plan summaries and every plan step.
+#[cfg(test)]
 fn redact_card(card: ApprovalCard, api_key: &str) -> ApprovalCard {
     redact_card_with_keys(card, &[api_key.to_owned()])
 }
@@ -4026,6 +4615,226 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    fn agent_relay_preserves_prefix_across_intervening_events() {
+        for (first, second, expected) in [("sec", "ond", "second"), ("sec", "ret", "[REDACTED]")] {
+            let state = DesktopState::with_settings(selora_settings::Settings::default());
+            let log = Arc::new(EventLog::new(state.core_instance_id()));
+            let engine = Arc::new(SessionEngine::new(EngineConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                active_model: None,
+                agent: selora_settings::AgentSettings::default(),
+                key_source: ApiKeySource::Fixed(Some("secret".into())),
+            }));
+            let report = selora_ai::AgentTurnReport {
+                summary: AgentSummary {
+                    iterations: 0,
+                    tools_used: 0,
+                    approved: 0,
+                    denied: 0,
+                    tokens: 0,
+                    cost_usd: 0.0,
+                    completed: true,
+                },
+                end: selora_ai::TurnEnd::Completed,
+                final_message: format!("{first}{second}"),
+                conversation: Vec::new(),
+            };
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send(selora_ai::AgentEvent::Delta(first.into())).unwrap();
+            tx.send(selora_ai::AgentEvent::State(AgentTurnState::RunningTool(
+                "read_file".into(),
+            )))
+            .unwrap();
+            tx.send(selora_ai::AgentEvent::Delta(second.into()))
+                .unwrap();
+            tx.send(selora_ai::AgentEvent::TurnDone(report.clone()))
+                .unwrap();
+            drop(tx);
+            tauri::async_runtime::block_on(async {
+                let join = tokio::spawn(async move { report });
+                agent_relay(AgentRelayCtx {
+                    log: Arc::clone(&log),
+                    engine,
+                    app: mock_app_handle(),
+                    request_id: RequestId::new("request-1").unwrap(),
+                    session_id: SessionId::new("session-1").unwrap(),
+                    turn_id: TurnId::new("turn-1").unwrap(),
+                    api_key: "secret".into(),
+                    events_rx: rx,
+                    join,
+                })
+                .await;
+            });
+            let text: String = log
+                .events_after(0)
+                .into_iter()
+                .filter_map(|event| match event.payload {
+                    FrontendEvent::ChatDelta(delta) => Some(delta.text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn agent_relay_keeps_a_key_prefix_across_ordinary_events() {
+        // A tool-neutral ordinary event (todos) must not seal a buffered key
+        // prefix: the stream resumes and completes the key in one redaction.
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        let log = Arc::new(EventLog::new(state.core_instance_id()));
+        let engine = Arc::new(SessionEngine::new(EngineConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Fixed(Some("secret".into())),
+        }));
+        let report = selora_ai::AgentTurnReport {
+            summary: AgentSummary {
+                iterations: 0,
+                tools_used: 0,
+                approved: 0,
+                denied: 0,
+                tokens: 0,
+                cost_usd: 0.0,
+                completed: true,
+            },
+            end: selora_ai::TurnEnd::Completed,
+            final_message: "secret".into(),
+            conversation: Vec::new(),
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(selora_ai::AgentEvent::Delta("sec".into())).unwrap();
+        tx.send(selora_ai::AgentEvent::TodosChanged(Vec::new()))
+            .unwrap();
+        tx.send(selora_ai::AgentEvent::Delta("ret".into())).unwrap();
+        tx.send(selora_ai::AgentEvent::TurnDone(report.clone()))
+            .unwrap();
+        drop(tx);
+        tauri::async_runtime::block_on(async {
+            let join = tokio::spawn(async move { report });
+            agent_relay(AgentRelayCtx {
+                log: Arc::clone(&log),
+                engine,
+                app: mock_app_handle(),
+                request_id: RequestId::new("request-1").unwrap(),
+                session_id: SessionId::new("session-1").unwrap(),
+                turn_id: TurnId::new("turn-1").unwrap(),
+                api_key: "secret".into(),
+                events_rx: rx,
+                join,
+            })
+            .await;
+        });
+        let events = log.events_after(0);
+        let todos = events
+            .iter()
+            .position(|event| matches!(event.payload, FrontendEvent::TodosChanged(_)))
+            .expect("ordinary event relayed");
+        assert!(
+            !events[..todos]
+                .iter()
+                .any(|event| matches!(event.payload, FrontendEvent::ChatDelta(_))),
+            "a prefix must not be sealed before the stream resolves"
+        );
+        let text: String = events
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                FrontendEvent::ChatDelta(delta) => Some(delta.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "[REDACTED]");
+        assert!(!serde_json::to_string(&log.events_after(0))
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[test]
+    fn agent_relay_fails_when_tool_record_cannot_be_persisted() {
+        for (tool_event, message) in [
+            (
+                selora_ai::AgentEvent::ToolCallStarted(selora_ai::ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }),
+                "Could not persist tool call; turn stopped.",
+            ),
+            (
+                selora_ai::AgentEvent::ToolResult(selora_ai::ToolResult::success(
+                    "call-1", "result",
+                )),
+                "Could not persist tool result; turn stopped.",
+            ),
+        ] {
+            let state = DesktopState::with_settings(selora_settings::Settings::default());
+            let log = Arc::new(EventLog::new(state.core_instance_id()));
+            let engine = Arc::new(SessionEngine::new(EngineConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                active_model: None,
+                agent: selora_settings::AgentSettings::default(),
+                key_source: ApiKeySource::Fixed(Some("secret".into())),
+            }));
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send(tool_event).unwrap();
+            drop(tx);
+            tauri::async_runtime::block_on(async {
+                let join = tokio::spawn(std::future::pending::<selora_ai::AgentTurnReport>());
+                agent_relay(AgentRelayCtx {
+                    log: Arc::clone(&log),
+                    engine,
+                    app: mock_app_handle(),
+                    request_id: RequestId::new("request-1").unwrap(),
+                    session_id: SessionId::new("session-1").unwrap(),
+                    turn_id: TurnId::new("turn-1").unwrap(),
+                    api_key: "secret".into(),
+                    events_rx: rx,
+                    join,
+                })
+                .await;
+            });
+            let events = log.events_after(0);
+            assert!(!events.iter().any(|event| matches!(
+                event.payload,
+                FrontendEvent::ToolCallStarted(_) | FrontendEvent::ToolResult(_)
+            )));
+            assert!(events.iter().any(|event| matches!(&event.payload, FrontendEvent::AgentTurnDone(done) if !done.completed && done.end_message == message)));
+        }
+    }
+
+    #[test]
+    fn chat_stream_redacts_a_key_split_across_deltas() {
+        let app = mock_app_handle();
+        let server = mock_gateway(
+            vec![(
+                "echo",
+                sse(&[
+                    content_chunk("sk-gw-desktop-"),
+                    content_chunk("test-key"),
+                    usage_chunk("stop", 1, 1, 0.0),
+                ]),
+            )],
+            true,
+        );
+        let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        state
+            .dispatch(
+                &app,
+                envelope(&state, send_chat("chat-1", "session-1", "echo")),
+            )
+            .unwrap();
+        let events = wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::ChatCompleted(_))
+        });
+        let wire = serde_json::to_string(&events).unwrap();
+        assert!(!wire.contains("sk-gw-desktop-test-key"));
+        assert!(wire.contains("[REDACTED]"));
+        let snapshot = serde_json::to_string(&state.bootstrap().chat).unwrap();
+        assert!(!snapshot.contains("sk-gw-desktop-test-key"));
+    }
+
+    #[test]
     fn send_chat_streams_deltas_and_lands_the_transcript() {
         let app = mock_app_handle();
         let server = mock_gateway(
@@ -4197,6 +5006,57 @@ mod tests {
         let chat = state.bootstrap().chat;
         assert_eq!(chat.messages.len(), 2);
         assert_eq!(chat.messages[1].text, "Hello ");
+    }
+
+    #[test]
+    fn stream_failures_map_to_typed_user_readable_codes() {
+        let key = "sk-secret-key";
+        let timeout = SeloraError::Net(format!(
+            "{}chat stream timed out after 90s",
+            selora_ai::TIMEOUT_MARKER
+        ));
+        let timeout = to_protocol_error(&timeout, key);
+        assert_eq!(timeout.code, "timeout");
+        assert!(timeout.retryable);
+        assert!(timeout.message.contains("did not answer in time"));
+        assert!(
+            !timeout.message.contains(key),
+            "key leaked: {}",
+            timeout.message
+        );
+
+        let auth = to_protocol_error(
+            &SeloraError::Auth("key invalid or not authorized (HTTP 401)".into()),
+            key,
+        );
+        assert_eq!(auth.code, "auth_failed");
+        assert!(!auth.retryable);
+        assert!(auth.message.contains("Check the key in Settings"));
+        assert!(!auth.message.contains(key));
+
+        let offline = to_protocol_error(
+            &SeloraError::Net("cannot reach the AI gateway (https://x): refused".into()),
+            key,
+        );
+        assert_eq!(offline.code, "network_error");
+        assert!(offline.retryable);
+        assert!(offline.message.contains("internet connection"));
+
+        let down = to_protocol_error(
+            &SeloraError::Ai("gateway unavailable (HTTP 503): busy".into()),
+            key,
+        );
+        assert_eq!(down.code, "gateway_unavailable");
+        assert!(down.retryable);
+        assert!(down.message.contains("temporarily unavailable"));
+
+        let rejected = to_protocol_error(
+            &SeloraError::Ai("gateway rejected request (HTTP 400): bad model".into()),
+            key,
+        );
+        assert_eq!(rejected.code, "gateway_error");
+        assert!(!rejected.retryable);
+        assert!(rejected.message.contains("bad model"));
     }
 
     #[test]
@@ -6294,6 +7154,106 @@ mod tests {
     }
 
     #[test]
+    fn durable_store_fails_closed_and_remembers_rotated_keys() {
+        let root = temp_workspace("rotated-redaction");
+        let key = Arc::new(Mutex::new(Ok(Some("old-secret".to_owned()))));
+        let engine = SessionEngine::new(EngineConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Mutable(Arc::clone(&key)),
+        });
+        engine.set_workspace_root(Some(root.clone()));
+        engine.fetch_api_key().unwrap();
+        *key.lock().unwrap() = Err(ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "error".into(),
+            retryable: true,
+        });
+        assert!(engine.store().is_none());
+        assert!(!root.join(".selora/agent-sessions").exists());
+        *key.lock().unwrap() = Ok(Some("new-secret".into()));
+        let store = engine.store().unwrap();
+        store
+            .create(
+                "session-1",
+                "old-secret new-secret",
+                None,
+                AgentSessionMode::Execute,
+            )
+            .unwrap();
+        let state =
+            std::fs::read_to_string(root.join(".selora/agent-sessions/session-1/state.json"))
+                .unwrap();
+        assert!(!state.contains("old-secret") && !state.contains("new-secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keyring_failure_queues_tool_records_and_retries_in_order() {
+        let root = temp_workspace("queued-tool-records");
+        let key = Arc::new(Mutex::new(Ok(Some("secret".to_owned()))));
+        let engine = SessionEngine::new(EngineConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Mutable(Arc::clone(&key)),
+        });
+        engine.set_workspace_root(Some(root.clone()));
+        engine.fetch_api_key().unwrap();
+        let session_id = engine.new_session().unwrap();
+        let store = AgentSessionStore::new(&root);
+        *key.lock().unwrap() = Err(ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "error".into(),
+            retryable: true,
+        });
+        let call = selora_ai::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        // A transient failure between the turn's key check and the record
+        // queues the data; it is never dropped and never fails the turn.
+        assert_eq!(
+            engine.record_tool_calls(&session_id, vec![call]),
+            Err(TranscriptAppend::Queued)
+        );
+        assert_eq!(
+            engine.record_tool_result(&session_id, &selora_ai::ToolResult::success("call-1", "ok")),
+            Err(TranscriptAppend::Queued)
+        );
+        assert_eq!(engine.pending_transcript.lock().unwrap().len(), 2);
+        assert!(store
+            .load_transcript(session_id.as_str())
+            .unwrap()
+            .entries
+            .is_empty());
+        // The key comes back: the retry writes both records, call before result.
+        *key.lock().unwrap() = Ok(Some("secret".to_owned()));
+        engine.persist_pending_transcript().unwrap();
+        assert!(engine.pending_transcript.lock().unwrap().is_empty());
+        let entries = store.load_transcript(session_id.as_str()).unwrap().entries;
+        let order: Vec<&str> = entries
+            .iter()
+            .map(|entry| match entry {
+                TranscriptEntry::ToolCalls { .. } => "call",
+                TranscriptEntry::Tool { .. } => "result",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(order, vec!["call", "result"]);
+        let transcript = std::fs::read_to_string(
+            root.join(".selora/agent-sessions")
+                .join(session_id.as_str())
+                .join("transcript.jsonl"),
+        )
+        .unwrap();
+        assert!(!transcript.contains("secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn session_state_on_disk_never_contains_the_api_key() {
         let root = temp_workspace("no-key");
         let state = DesktopState::with_settings(selora_settings::Settings::default());
@@ -6389,7 +7349,11 @@ mod tests {
     #[test]
     fn subagent_delta_buffer_redacts_split_keys_and_flushes_prefixes() {
         let key = "sëcret";
-        for split in key.char_indices().map(|(i, _)| i).chain(std::iter::once(key.len())) {
+        for split in key
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(key.len()))
+        {
             let mut buffer = SubagentDeltaBuffer::default();
             let mut text = buffer.push(&format!("before {}", &key[..split]), key, false);
             text.push_str(&buffer.push(&format!("{} after së", &key[split..]), key, false));
@@ -6403,20 +7367,50 @@ mod tests {
         assert_eq!(buffer.push("", "abc", false), "");
         assert_eq!(buffer.push("abc", "abcdef", false), "");
         assert_eq!(buffer.push("def", "abcdef", false), "[REDACTED]");
-        assert_eq!(redact_with_keys("abcdef", &["abc".into(), "abcdef".into()]), "[REDACTED]");
+        assert_eq!(
+            redact_with_keys("abcdef", &["abc".into(), "abcdef".into()]),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn tool_json_redacts_escaped_credentials_in_keys_and_values() {
+        let secret = "a\"b\\c";
+        let input = serde_json::json!({(secret): secret}).to_string();
+        let output = redact_json_text(&input, &[secret.into()]);
+        let decoded: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(decoded, serde_json::json!({"[REDACTED]": "[REDACTED]"}));
     }
 
     #[test]
     fn subagent_activity_redacts_tool_identifiers_with_all_keys() {
         let keys = vec!["old-key".into(), "new-key".into()];
         for kind in [
-            selora_ai::SubagentActivityKind::ToolCallStarted { call_id: "old-key".into(), tool_name: "new-key".into(), args_json: "old-key".into() },
-            selora_ai::SubagentActivityKind::ToolResult { call_id: "old-key".into(), result_summary: "new-key".into(), is_err: false },
-            selora_ai::SubagentActivityKind::StateChanged { state: selora_ai::SubagentRunState::RunningTool, tool_name: Some("new-key".into()) },
+            selora_ai::SubagentActivityKind::ToolCallStarted {
+                call_id: "old-key".into(),
+                tool_name: "new-key".into(),
+                args_json: "old-key".into(),
+            },
+            selora_ai::SubagentActivityKind::ToolResult {
+                call_id: "old-key".into(),
+                result_summary: "new-key".into(),
+                is_err: false,
+            },
+            selora_ai::SubagentActivityKind::StateChanged {
+                state: selora_ai::SubagentRunState::RunningTool,
+                tool_name: Some("new-key".into()),
+            },
         ] {
-            let dto = subagent_activity_dto(selora_ai::SubagentActivity::new("child", "session-1", kind), &keys).unwrap();
+            let dto = subagent_activity_dto(
+                selora_ai::SubagentActivity::new("child", "session-1", kind),
+                &keys,
+            )
+            .unwrap();
             let json = serde_json::to_string(&dto).unwrap();
-            assert!(!json.contains("old-key") && !json.contains("new-key"), "{json}");
+            assert!(
+                !json.contains("old-key") && !json.contains("new-key"),
+                "{json}"
+            );
             assert!(json.contains("[REDACTED]"));
         }
     }
@@ -6428,9 +7422,133 @@ mod tests {
             steps: vec!["abcdef".into()],
         };
         let card = redact_card_with_keys(card, &["abc".into(), "abcdef".into()]);
-        let ApprovalCard::Plan { summary, steps } = card else { panic!("expected plan") };
+        let ApprovalCard::Plan { summary, steps } = card else {
+            panic!("expected plan")
+        };
         assert_eq!(summary.as_deref(), Some("[REDACTED] [REDACTED]"));
         assert_eq!(steps, vec!["[REDACTED]"]);
+    }
+
+    #[test]
+    fn overflow_cancellation_is_relayed_after_queue_drains() {
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        let log = Arc::new(EventLog::new(state.core_instance_id()));
+        let engine = Arc::new(SessionEngine::new(EngineConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Fixed(Some("secret".into())),
+        }));
+        engine
+            .subagents
+            .register(selora_ai::SpawnRequest::new(
+                "session-1",
+                "child-1",
+                selora_ai::SubagentPolicy::ReadOnly,
+                "mission",
+            ))
+            .unwrap();
+        for sequence in 1..=257 {
+            engine
+                .subagents
+                .emit_activity(selora_ai::SubagentActivity::new(
+                    "child-1",
+                    "session-1",
+                    selora_ai::SubagentActivityKind::Delta {
+                        message_id: "message".into(),
+                        sequence,
+                        text: "text ".into(),
+                    },
+                ));
+        }
+        assert_eq!(
+            engine.subagents.child_state("child-1"),
+            Some(selora_ai::ChildState::Cancelled)
+        );
+        let rx = engine.subagent_events.lock().unwrap().take().unwrap();
+        let task = tauri::async_runtime::spawn(subagent_relay(SubagentRelayCtx {
+            log: Arc::clone(&log),
+            engine,
+            app: mock_app_handle(),
+            events_rx: rx,
+        }));
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !log
+            .events_after(0)
+            .iter()
+            .any(|event| matches!(event.payload, FrontendEvent::SubagentCancelled(_)))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let events = log.events_after(0);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, FrontendEvent::SubagentCancelled(_)))
+                .count(),
+            1
+        );
+        task.abort();
+    }
+
+    #[test]
+    fn keyring_failure_cancels_parked_subagent_approval() {
+        let state = DesktopState::with_settings(selora_settings::Settings::default());
+        let log = Arc::new(EventLog::new(state.core_instance_id()));
+        let source = Arc::new(Mutex::new(Ok(Some("secret".into()))));
+        let engine = Arc::new(SessionEngine::new(EngineConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Mutable(Arc::clone(&source)),
+        }));
+        engine
+            .subagents
+            .register(selora_ai::SpawnRequest::new(
+                "session-1",
+                "child-1",
+                selora_ai::SubagentPolicy::Full,
+                "mission",
+            ))
+            .unwrap();
+        let approval_id = Uuid::new_v4();
+        let (decisions, _decision_rx) = mpsc::unbounded_channel();
+        engine
+            .subagents
+            .register_decision("child-1", approval_id, decisions);
+        *source.lock().unwrap() = Err(ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "error".into(),
+            retryable: true,
+        });
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(selora_ai::SubagentEvent::ApprovalNeeded(
+            selora_ai::SubagentCard {
+                child_id: "child-1".into(),
+                parent_session: "session-1".into(),
+                approval_id,
+                card: ApprovalCard::Command {
+                    command: "secret".into(),
+                },
+            },
+        ))
+        .unwrap();
+        drop(tx);
+        tauri::async_runtime::block_on(subagent_relay(SubagentRelayCtx {
+            log: Arc::clone(&log),
+            engine: Arc::clone(&engine),
+            app: mock_app_handle(),
+            events_rx: rx,
+        }));
+        assert!(log.events_after(0).is_empty());
+        assert!(engine
+            .subagents
+            .decide(
+                approval_id,
+                (approval_id, selora_ai::AgentDecision::Approve)
+            )
+            .is_err());
     }
 
     #[test]
@@ -6439,24 +7557,35 @@ mod tests {
         let log = Arc::new(EventLog::new(state.core_instance_id()));
         let key = Arc::new(Mutex::new(Ok(None)));
         let engine = Arc::new(SessionEngine::new(EngineConfig {
-            base_url: "http://127.0.0.1:1".into(), active_model: None,
-            agent: selora_settings::AgentSettings::default(), key_source: ApiKeySource::Mutable(Arc::clone(&key)),
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Mutable(Arc::clone(&key)),
         }));
-        let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new(
-            "child", "session-1", selora_ai::SubagentActivityKind::Delta {
-                message_id: "m".into(), sequence: 1, text: "sensitive".into(),
-            },
-        ))).unwrap();
+        let (tx, rx) = mpsc::channel(256);
+        tx.try_send(selora_ai::SubagentEvent::Activity(
+            selora_ai::SubagentActivity::new(
+                "child",
+                "session-1",
+                selora_ai::SubagentActivityKind::Delta {
+                    message_id: "m".into(),
+                    sequence: 1,
+                    text: "sensitive".into(),
+                },
+            ),
+        ))
+        .unwrap();
         drop(tx);
         let task = tauri::async_runtime::spawn(subagent_relay(SubagentRelayCtx {
-            log: Arc::clone(&log), engine, app: mock_app_handle(), events_rx: rx,
+            log: Arc::clone(&log),
+            engine,
+            app: mock_app_handle(),
+            events_rx: rx,
         }));
         std::thread::sleep(Duration::from_millis(250));
         assert!(log.events_after(0).is_empty());
-        *key.lock().unwrap() = Ok(Some("sensitive".into()));
         tauri::async_runtime::block_on(task).unwrap();
-        assert!(matches!(&log.events_after(0)[0].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED]"));
+        assert!(log.events_after(0).is_empty());
     }
 
     #[test]
@@ -6465,69 +7594,141 @@ mod tests {
         let log = Arc::new(EventLog::new(state.core_instance_id()));
         let key = Arc::new(Mutex::new(Ok(Some("old-key".to_string()))));
         let engine = Arc::new(SessionEngine::new(EngineConfig {
-            base_url: "http://127.0.0.1:1".into(), active_model: None,
-            agent: selora_settings::AgentSettings::default(), key_source: ApiKeySource::Mutable(Arc::clone(&key)),
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Mutable(Arc::clone(&key)),
         }));
         engine.register_subagent_redaction_key("original-key");
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         let task = tauri::async_runtime::spawn(subagent_relay(SubagentRelayCtx {
-            log: Arc::clone(&log), engine, app: mock_app_handle(), events_rx: rx,
+            log: Arc::clone(&log),
+            engine,
+            app: mock_app_handle(),
+            events_rx: rx,
         }));
-        let activity = |text: &str, sequence| selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new(
-            "child", "session-1", selora_ai::SubagentActivityKind::Delta {
-                message_id: "m".into(), sequence, text: text.into(),
-            },
-        ));
-        tx.send(activity("original-key old-key ", 1)).unwrap();
+        let activity = |text: &str, sequence| {
+            selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new(
+                "child",
+                "session-1",
+                selora_ai::SubagentActivityKind::Delta {
+                    message_id: "m".into(),
+                    sequence,
+                    text: text.into(),
+                },
+            ))
+        };
+        tx.try_send(activity("original-key old-key ", 1)).unwrap();
         let deadline = Instant::now() + TEST_TIMEOUT;
         while log.events_after(0).is_empty() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(log.events_after(0).len(), 1);
-        assert!(matches!(&log.events_after(0)[0].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] [REDACTED] "));
+        assert!(
+            matches!(&log.events_after(0)[0].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] [REDACTED] ")
+        );
         *key.lock().unwrap() = Ok(Some("new-key".into()));
-        tx.send(activity("new-key old-key ", 2)).unwrap();
+        tx.try_send(activity("new-key old-key ", 2)).unwrap();
         while log.events_after(0).len() < 2 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(log.events_after(0).len(), 2);
-        *key.lock().unwrap() = Err(ProtocolErrorDto { code: "keyring_unavailable".into(), message: "error".into(), retryable: true });
-        tx.send(activity("new-key recovered", 3)).unwrap();
+        *key.lock().unwrap() = Err(ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "error".into(),
+            retryable: true,
+        });
+        tx.try_send(activity("new-key recovered", 3)).unwrap();
         std::thread::sleep(Duration::from_millis(250));
         assert_eq!(log.events_after(0).len(), 2);
         *key.lock().unwrap() = Ok(Some("new-key".into()));
+        tx.try_send(activity("new-key recovered", 4)).unwrap();
         drop(tx);
         tauri::async_runtime::block_on(task).unwrap();
         let events = log.events_after(0);
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[1].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] [REDACTED] "));
-        assert!(matches!(&events[2].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] recovered"));
+        assert!(
+            matches!(&events[1].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] [REDACTED] ")
+        );
+        assert!(
+            matches!(&events[2].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED] recovered")
+        );
     }
 
     #[test]
-    fn subagent_relay_seals_prefix_before_other_activity() {
+    fn subagent_relay_keeps_prefix_across_ordinary_activity() {
         let state = DesktopState::with_settings(selora_settings::Settings::default());
         let log = Arc::new(EventLog::new(state.core_instance_id()));
         let engine = Arc::new(SessionEngine::new(EngineConfig {
-            base_url: "http://127.0.0.1:1".into(), active_model: None,
-            agent: selora_settings::AgentSettings::default(), key_source: ApiKeySource::Fixed(Some("secret".into())),
+            base_url: "http://127.0.0.1:1".into(),
+            active_model: None,
+            agent: selora_settings::AgentSettings::default(),
+            key_source: ApiKeySource::Fixed(Some("secret".into())),
         }));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         for kind in [
-            selora_ai::SubagentActivityKind::Delta { message_id: "m".into(), sequence: 1, text: "pre sec".into() },
-            selora_ai::SubagentActivityKind::StateChanged { state: selora_ai::SubagentRunState::Thinking, tool_name: None },
-            selora_ai::SubagentActivityKind::Delta { message_id: "m".into(), sequence: 2, text: "ret post".into() },
+            selora_ai::SubagentActivityKind::Delta {
+                message_id: "m".into(),
+                sequence: 1,
+                text: "pre sec".into(),
+            },
+            selora_ai::SubagentActivityKind::StateChanged {
+                state: selora_ai::SubagentRunState::Thinking,
+                tool_name: None,
+            },
+            selora_ai::SubagentActivityKind::Delta {
+                message_id: "m".into(),
+                sequence: 2,
+                text: "ret post".into(),
+            },
         ] {
-            tx.send(selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new("child", "session-1", kind))).unwrap();
+            tx.try_send(selora_ai::SubagentEvent::Activity(
+                selora_ai::SubagentActivity::new("child", "session-1", kind),
+            ))
+            .unwrap();
         }
         drop(tx);
         tauri::async_runtime::block_on(subagent_relay(SubagentRelayCtx {
-            log: Arc::clone(&log), engine, app: mock_app_handle(), events_rx: rx,
+            log: Arc::clone(&log),
+            engine,
+            app: mock_app_handle(),
+            events_rx: rx,
         }));
         let events = log.events_after(0);
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[1].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. }) if text == "[REDACTED]"));
-        assert!(matches!(&events[2].payload, FrontendEvent::SubagentActivity(SubagentActivityDto::StateChanged { .. })));
+        let deltas: Vec<(u64, String)> = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                FrontendEvent::SubagentActivity(SubagentActivityDto::Delta {
+                    sequence,
+                    text,
+                    ..
+                }) => Some((*sequence, text.clone())),
+                _ => None,
+            })
+            .collect();
+        // The ordinary state event did not seal the "sec" prefix; the stream
+        // resumed and completed the key once.
+        assert_eq!(
+            deltas,
+            vec![(1, "pre ".to_string()), (2, "[REDACTED] post".to_string())]
+        );
+        let state_event = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.payload,
+                    FrontendEvent::SubagentActivity(SubagentActivityDto::StateChanged { .. })
+                )
+            })
+            .expect("state event relayed");
+        assert!(
+            !events[..state_event].iter().any(|event| matches!(
+                &event.payload,
+                FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { text, .. })
+                    if text.contains("[REDACTED]")
+            )),
+            "a key prefix must not be replaced before the stream resolves"
+        );
     }
 
     #[test]
@@ -6541,43 +7742,74 @@ mod tests {
             agent: selora_settings::AgentSettings::default(),
             key_source: ApiKeySource::Fixed(Some(KEY.into())),
         }));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         let task = tauri::async_runtime::spawn(subagent_relay(SubagentRelayCtx {
-            log: Arc::clone(&log), engine, app: mock_app_handle(), events_rx: rx,
+            log: Arc::clone(&log),
+            engine,
+            app: mock_app_handle(),
+            events_rx: rx,
         }));
         for (child, message, sequence, text) in [
             ("child-1", "m1", 1, "hello sk-"),
             ("child-1", "m1", 2, "secret tail sk-"),
         ] {
-            tx.send(selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new(
-                child, "session-1", selora_ai::SubagentActivityKind::Delta {
-                    message_id: message.into(), sequence, text: text.into(),
-                },
-            ))).unwrap();
+            tx.try_send(selora_ai::SubagentEvent::Activity(
+                selora_ai::SubagentActivity::new(
+                    child,
+                    "session-1",
+                    selora_ai::SubagentActivityKind::Delta {
+                        message_id: message.into(),
+                        sequence,
+                        text: text.into(),
+                    },
+                ),
+            ))
+            .unwrap();
         }
-        tx.send(selora_ai::SubagentEvent::Cancelled {
-            child_id: "child-1".into(), parent_session: "session-1".into(),
-        }).unwrap();
-        tx.send(selora_ai::SubagentEvent::Activity(selora_ai::SubagentActivity::new(
-            "child-2", "session-1", selora_ai::SubagentActivityKind::Delta {
-                message_id: "m2".into(), sequence: 1, text: "sk-".into(),
-            },
-        ))).unwrap();
+        tx.try_send(selora_ai::SubagentEvent::Cancelled {
+            child_id: "child-1".into(),
+            parent_session: "session-1".into(),
+        })
+        .unwrap();
+        tx.try_send(selora_ai::SubagentEvent::Activity(
+            selora_ai::SubagentActivity::new(
+                "child-2",
+                "session-1",
+                selora_ai::SubagentActivityKind::Delta {
+                    message_id: "m2".into(),
+                    sequence: 1,
+                    text: "sk-".into(),
+                },
+            ),
+        ))
+        .unwrap();
         drop(tx);
         tauri::async_runtime::block_on(task).unwrap();
         let events = log.events_after(0);
         let mut children = BTreeMap::<String, String>::new();
         let mut sequences = BTreeMap::<String, Vec<u64>>::new();
         for event in &events {
-            if let FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { child_id, text, sequence, .. }) = &event.payload {
+            if let FrontendEvent::SubagentActivity(SubagentActivityDto::Delta {
+                child_id,
+                text,
+                sequence,
+                ..
+            }) = &event.payload
+            {
                 children.entry(child_id.clone()).or_default().push_str(text);
-                sequences.entry(child_id.clone()).or_default().push(*sequence);
+                sequences
+                    .entry(child_id.clone())
+                    .or_default()
+                    .push(*sequence);
             }
         }
         assert_eq!(children["child-1"], "hello [REDACTED] tail sk-");
         assert_eq!(children["child-2"], "sk-");
         assert_eq!(sequences["child-1"], vec![1, 2, 3]);
-        let cancel = events.iter().position(|e| matches!(e.payload, FrontendEvent::SubagentCancelled(_))).unwrap();
+        let cancel = events
+            .iter()
+            .position(|e| matches!(e.payload, FrontendEvent::SubagentCancelled(_)))
+            .unwrap();
         assert!(events[..cancel].iter().any(|e| matches!(&e.payload, FrontendEvent::SubagentActivity(SubagentActivityDto::Delta { child_id, text, .. }) if child_id == "child-1" && text == "sk-")));
     }
 
@@ -6593,14 +7825,14 @@ mod tests {
             agent: selora_settings::AgentSettings::default(),
             key_source: ApiKeySource::Fixed(Some(KEY.into())),
         }));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         tauri::async_runtime::spawn(subagent_relay(SubagentRelayCtx {
             log: Arc::clone(&log),
             engine: Arc::clone(&engine),
             app,
             events_rx: rx,
         }));
-        tx.send(selora_ai::SubagentEvent::Activity(
+        tx.try_send(selora_ai::SubagentEvent::Activity(
             selora_ai::SubagentActivity::new(
                 "child-1",
                 "session-1",
@@ -6612,7 +7844,7 @@ mod tests {
             ),
         ))
         .unwrap();
-        tx.send(selora_ai::SubagentEvent::Activity(
+        tx.try_send(selora_ai::SubagentEvent::Activity(
             selora_ai::SubagentActivity::new(
                 "child-1",
                 "session-1",
@@ -6624,12 +7856,12 @@ mod tests {
             ),
         ))
         .unwrap();
-        tx.send(selora_ai::SubagentEvent::Cancelled {
+        tx.try_send(selora_ai::SubagentEvent::Cancelled {
             child_id: "child-1".into(),
             parent_session: "session-1".into(),
         })
         .unwrap();
-        tx.send(selora_ai::SubagentEvent::ApprovalNeeded(
+        tx.try_send(selora_ai::SubagentEvent::ApprovalNeeded(
             selora_ai::SubagentCard {
                 child_id: "child-1".into(),
                 parent_session: "session-1".into(),

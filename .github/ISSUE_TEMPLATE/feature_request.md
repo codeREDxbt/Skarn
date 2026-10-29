@@ -7,9 +7,7 @@ assignees: ""
 ---
 
 **The problem this solves**
-A clear description of the gap. (Requests that implement something the plan
-lists as a non-goal — `PLAN.md` §2 — will be closed; propose a plan change
-first.)
+A clear description of the gap and who hits it.
 
 **The shape of the solution**
 What the feature does and where it lives (panel, dialog, keybind…).
@@ -18,5 +16,5 @@ What the feature does and where it lives (panel, dialog, keybind…).
 Workarounds you have tried.
 
 **Design fit**
-One sentence on why this belongs in the Selora design language
-(`DESIGN_TOKENS.md`) — or which rule it needs an exception from.
+One sentence on why this belongs in the Selora design language, or which
+existing rule it needs an exception from.

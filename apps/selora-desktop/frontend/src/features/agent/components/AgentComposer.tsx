@@ -43,6 +43,9 @@ import type { FileTreeNode, Model } from '../../../bridge/bridge';
 import type { PermissionMode, ReasoningEffort } from '../types';
 import { agentStore, getComposerGate, resolveModelId } from '../agent-store';
 import { activeEditorContext, editorStore } from '../../editor/editor-store';
+import { getAppSnapshot, subscribeApp } from '../../../app/app-store';
+import { providerIdForModel } from '../../auth/provider-visibility';
+import { safeWorkspaceRelativePath } from './chat-safety';
 import './agent-attachments.css';
 
 export type AgentComposerProps = {
@@ -232,6 +235,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   promptHistory,
 }) => {
   const storeState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
+  const appSnapshot = useSyncExternalStore(subscribeApp, getAppSnapshot);
   const availableModels = storeState.availableModels;
   const selectedModelId = storeState.selectedModel;
   const gate = getComposerGate(storeState);
@@ -246,6 +250,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachQuery, setAttachQuery] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const workspaceRoot = storeState.workspace?.root ?? null;
 
   const editor = useSyncExternalStore(editorStore.subscribe, editorStore.getSnapshot);
 
@@ -253,17 +259,35 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
     const seen = new Set<string>();
     const options: Array<{ path: string; name: string; open: boolean }> = [];
     for (const tab of editor.tabs ?? []) {
-      if (!tab.path || seen.has(tab.path)) continue;
-      seen.add(tab.path);
-      options.push({ path: tab.path, name: tab.filename, open: true });
+      const path = safeWorkspaceRelativePath(workspaceRoot, tab.path);
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      options.push({ path, name: tab.filename, open: true });
     }
-    for (const path of flattenFileTree(editor.fileTree ?? null)) {
+    for (const rawPath of flattenFileTree(editor.fileTree ?? null)) {
+      const path = safeWorkspaceRelativePath(workspaceRoot, rawPath);
+      if (!path) continue;
       if (seen.has(path)) continue;
       seen.add(path);
       options.push({ path, name: baseName(path), open: false });
     }
     return options;
-  }, [editor.tabs, editor.fileTree]);
+  }, [editor.tabs, editor.fileTree, workspaceRoot]);
+
+  useEffect(() => setAttachments([]), [workspaceRoot]);
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragOver(false);
+    const dropped = Array.from(event.dataTransfer.files)
+      .map((file) => {
+        const path = (file as File & { path?: string }).path ?? '';
+        if (!/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path)) return null;
+        return safeWorkspaceRelativePath(workspaceRoot, path);
+      })
+      .filter((path): path is string => path !== null);
+    setAttachments((current) => Array.from(new Set([...current, ...dropped])).slice(0, MAX_ATTACHMENTS));
+  };
 
   const filteredFiles = useMemo(() => {
     const query = attachQuery.trim().toLowerCase();
@@ -480,10 +504,18 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
 
   const autoApplyArmed = permissionMode === 'full';
 
-  const resolvedModels: ModelItem[] = useMemo(
-    () => availableModels.map(describeModel),
-    [availableModels],
-  );
+  const resolvedModels: ModelItem[] = useMemo(() => {
+    // Settings > AI Gateway can disable whole providers. Keep the currently
+    // selected model visible so a live session is never broken implicitly.
+    const disabled = appSnapshot.bootstrap?.settings.disabled_providers ?? [];
+    return availableModels
+      .filter((model) => {
+        if (model.id === selectedModelId) return true;
+        const provider = providerIdForModel(model.id, model.display_name ?? '');
+        return !provider || !disabled.includes(provider);
+      })
+      .map(describeModel);
+  }, [availableModels, selectedModelId, appSnapshot.bootstrap?.settings.disabled_providers]);
 
   const filteredModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
@@ -512,7 +544,16 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
       ref={containerRef}
       className={`agent-composer hero-composer-card ${isFocused ? 'is-focused' : ''} ${
         inFlight ? 'is-in-flight' : ''
-      }`}
+      }${isDragOver ? ' is-drag-over' : ''}`}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+        event.preventDefault();
+        setIsDragOver(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDragOver(false);
+      }}
+      onDrop={handleDrop}
     >
       {/* 1. Border Beam (Animated perimeter aura during in-flight runs) */}
       <BorderBeam active={inFlight} durationMs={2400} borderRadius={8} colorPreset="emerald" />

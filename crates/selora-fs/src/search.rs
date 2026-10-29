@@ -18,9 +18,17 @@
 //! 2. **The built-in line scanner** over the `ignore`-crate walker (the
 //!    same `hidden` / `git_ignore` / `ignore` configuration as
 //!    [`crate::tree::build_tree`]) when `rg` is absent. It streams each
-//!    file line by line: there is no whole-file size cap, so a huge file
-//!    is still searched, while a single pathological line is bounded by
-//!    [`MAX_SCANNED_LINE_BYTES`] rather than exhausting memory.
+//!    file line by line up to [`MAX_SCANNED_FILE_BYTES`], bounds a single
+//!    pathological line by [`MAX_SCANNED_LINE_BYTES`], and stops after
+//!    [`MAX_SCANNED_BYTES`] / [`SEARCH_DEADLINE`].
+//!
+//! Both engines are bounded: [`MAX_HITS`], [`MAX_TOTAL_HIT_BYTES`] and
+//! [`MAX_HIT_LINE_CHARS`] cap the result set; [`SEARCH_DEADLINE`] caps the
+//! run time; [`SearchCancel`] cancels cooperatively (the `rg` child is
+//! killed from a watchdog thread, and `ChildKiller` kills it on any exit or
+//! panic). [`search_in_files_interactive`] additionally supersedes the
+//! previous interactive search on the same root, so a new query never waits
+//! behind a stale monorepo scan.
 //!
 //! Synchronous and pure like `build_tree`: the app shell calls it off the
 //! frame path (`spawn_blocking` + `Effect::Search`, ARCHITECTURE.md §2.2)
@@ -35,9 +43,10 @@
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
 use regex::Regex;
@@ -46,6 +55,29 @@ use regex::Regex;
 /// millions; the panel is not virtualized in Lite, so the engine stops
 /// here. (Result streaming is a v2 concern.)
 pub const MAX_HITS: usize = 10_000;
+
+/// The longest hit line kept in memory. A minified bundle is one multi-MB
+/// line; storing 10k of those would blow the result buffer. Longer lines are
+/// truncated to this many **chars** and their out-of-range spans dropped.
+pub const MAX_HIT_LINE_CHARS: usize = 4_000;
+
+/// Total bytes of `line_text` the engine keeps across all hits. Together with
+/// [`MAX_HITS`] this bounds a result set at ~8 MiB of preview text (or the
+/// 4 KiB-per-line cap, whichever is smaller per hit).
+pub const MAX_TOTAL_HIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Bytes the built-in scanner may read in one search before it returns the
+/// hits found so far. A 512 MiB read on a cold disk is seconds, not minutes.
+pub const MAX_SCANNED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// A single file larger than this is skipped by the built-in scanner. It is
+/// almost always a binary blob or a generated artefact; `rg` applies the same
+/// policy via its own size heuristics.
+pub const MAX_SCANNED_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Wall-clock budget for one search. The engine returns partial results when
+/// it expires, so a search can never hold the workspace lock for minutes.
+pub const SEARCH_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The longest single line the built-in scanner buffers. This is a
 /// memory-safety guard, not a file-size limit: files of any size are
@@ -79,6 +111,136 @@ impl SearchId {
     /// The raw counter value (debugging, logging).
     pub fn as_u64(self) -> u64 {
         self.0
+    }
+}
+
+/// A cooperative cancellation flag shared with a running search.
+///
+/// Clone it cheaply and cancel from any thread: the built-in scanner checks
+/// per line, and the `rg` path kills the child process from a watchdog
+/// thread (a blocked stdout read would otherwise never see the flag).
+#[derive(Clone, Debug, Default)]
+pub struct SearchCancel {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl SearchCancel {
+    /// A fresh, uncancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request cancellation. Idempotent and safe from any thread.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether cancellation was requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// A guard that cancels this token when dropped (for `spawn_blocking`
+    /// request lifetimes where the caller may simply drop the task).
+    pub fn guard(&self) -> SearchCancelGuard {
+        SearchCancelGuard(self.clone())
+    }
+}
+
+/// Cancels its [`SearchCancel`] token on drop.
+#[derive(Debug)]
+pub struct SearchCancelGuard(SearchCancel);
+
+impl Drop for SearchCancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// Owns one interactive search's slot on a root. Dropping it releases the
+/// slot and cancels the token, so an abandoned search stops even when its
+/// worker never returns.
+#[derive(Debug)]
+pub struct SearchGuard {
+    root: PathBuf,
+    cancel: SearchCancel,
+}
+
+impl SearchGuard {
+    /// Whether this search has been superseded or cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// The cooperative token to hand to the cancellable engine.
+    pub fn cancel_token(&self) -> &SearchCancel {
+        &self.cancel
+    }
+}
+
+impl Drop for SearchGuard {
+    fn drop(&mut self) {
+        end_interactive(&self.root, &self.cancel);
+        self.cancel.cancel();
+    }
+}
+
+/// The per-root "latest interactive search wins" slots. A new interactive
+/// search on the same root cancels the running one and takes its place; the
+/// entry is removed when that search returns. Isolated searches (agent tools,
+/// workflows) never register here, so they cannot cancel each other.
+fn interactive_slots() -> &'static Mutex<std::collections::HashMap<PathBuf, SearchCancel>> {
+    static SLOTS: OnceLock<Mutex<std::collections::HashMap<PathBuf, SearchCancel>>> =
+        OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Register `root` as the running interactive search, cancelling the previous
+/// one, and return the guard that owns the new slot.
+pub fn start_interactive_search(root: &Path) -> SearchGuard {
+    let cancel = SearchCancel::new();
+    let mut slots = interactive_slots()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(previous) = slots.insert(root.to_path_buf(), cancel.clone()) {
+        previous.cancel();
+    }
+    SearchGuard {
+        root: root.to_path_buf(),
+        cancel,
+    }
+}
+
+/// Cancel `root`'s running interactive search, if any, without registering a
+/// new one.
+///
+/// The desktop calls this before it takes the workspace mutex: the running
+/// scan then stops and releases the mutex, so a newer request is not queued
+/// behind a stale one. Returns whether a search was actually cancelled.
+pub fn cancel_interactive_search(root: &Path) -> bool {
+    let mut slots = interactive_slots()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    match slots.remove(root) {
+        Some(running) => {
+            running.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove `root`'s slot if it still points at `token` (a newer search may
+/// already have replaced it).
+fn end_interactive(root: &Path, token: &SearchCancel) {
+    let mut slots = interactive_slots()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if slots
+        .get(root)
+        .is_some_and(|current| Arc::ptr_eq(&current.cancelled, &token.cancelled))
+    {
+        slots.remove(root);
     }
 }
 
@@ -159,6 +321,9 @@ pub enum SearchError {
     Rg(String),
     /// The user's regex pattern did not compile (`.*` toggle is on).
     InvalidPattern(String),
+    /// A newer search superseded this one, or the caller cancelled it. The
+    /// child process is killed before this is returned.
+    Cancelled,
 }
 
 impl fmt::Display for SearchError {
@@ -169,6 +334,7 @@ impl fmt::Display for SearchError {
             SearchError::InvalidPattern(message) => {
                 write!(f, "invalid regular expression: {message}")
             }
+            SearchError::Cancelled => write!(f, "search cancelled"),
         }
     }
 }
@@ -177,7 +343,7 @@ impl std::error::Error for SearchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SearchError::Io(err) => Some(err),
-            SearchError::Rg(_) | SearchError::InvalidPattern(_) => None,
+            SearchError::Rg(_) | SearchError::InvalidPattern(_) | SearchError::Cancelled => None,
         }
     }
 }
@@ -197,16 +363,55 @@ impl From<io::Error> for SearchError {
 /// Shells out to `rg` when one is on PATH, otherwise uses the built-in
 /// scanner. `.gitignore` is respected and hidden entries are skipped on
 /// both paths. An empty pattern returns no hits. Results are capped at
-/// [`MAX_HITS`].
+/// [`MAX_HITS`], [`MAX_TOTAL_HIT_BYTES`], [`SEARCH_DEADLINE`] and
+/// [`MAX_SCANNED_BYTES`].
+///
+/// This entry point is *isolated*: it never cancels another search. Use
+/// [`search_in_files_interactive`] for the panel, where a new search must
+/// supersede the running one.
 pub fn search_in_files(root: &Path, query: &SearchQuery) -> Result<Vec<SearchHit>, SearchError> {
+    search_in_files_cancellable(root, query, &SearchCancel::new())
+}
+
+/// [`search_in_files`] with an explicit cancellation token.
+pub fn search_in_files_cancellable(
+    root: &Path,
+    query: &SearchQuery,
+    cancel: &SearchCancel,
+) -> Result<Vec<SearchHit>, SearchError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    if rg_on_path() {
-        run_rg(root, query)
-    } else {
-        Ok(search_builtin(root, query))
+    if cancel.is_cancelled() {
+        return Err(SearchError::Cancelled);
     }
+    let deadline = Instant::now() + SEARCH_DEADLINE;
+    if rg_on_path() {
+        run_rg(root, &rg_source(query, true), cancel, deadline)
+    } else {
+        search_builtin_with(root, query, cancel, deadline)
+    }
+}
+
+/// Interactive (search panel) search: cancels the previous interactive search
+/// on the same root before it starts, so a fast typist never waits for a
+/// stale monorepo scan.
+pub fn search_in_files_interactive(
+    root: &Path,
+    query: &SearchQuery,
+) -> Result<Vec<SearchHit>, SearchError> {
+    let guard = start_interactive_search(root);
+    search_in_files_cancellable(root, query, guard.cancel_token())
+}
+
+/// Interactive variant of [`search_in_files_regex`] (see
+/// [`search_in_files_interactive`]).
+pub fn search_in_files_regex_interactive(
+    root: &Path,
+    query: &SearchQuery,
+) -> Result<Vec<SearchHit>, SearchError> {
+    let guard = start_interactive_search(root);
+    search_in_files_regex_cancellable(root, query, guard.cancel_token())
 }
 
 /// Whether an `rg` binary resolves on PATH (probed once per process).
@@ -229,14 +434,44 @@ fn rg_on_path() -> bool {
 const KEY_ENV_VARS: [&str; 2] = ["SELORA_API_KEY", "OPENAI_API_KEY"];
 
 /// Run the literal engine through `rg`.
-fn run_rg(root: &Path, query: &SearchQuery) -> Result<Vec<SearchHit>, SearchError> {
-    run_rg_source(root, &rg_source(query, true))
+fn run_rg(
+    root: &Path,
+    source: &str,
+    cancel: &SearchCancel,
+    deadline: Instant,
+) -> Result<Vec<SearchHit>, SearchError> {
+    run_rg_source(root, source, cancel, deadline)
+}
+
+/// Kills the child on drop (cancellation, early error, or panic). Killing an
+/// already-exited child is a harmless no-op.
+struct ChildKiller {
+    child: Arc<Mutex<Child>>,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for ChildKiller {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Relaxed);
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
 }
 
 /// Run one regex source through `rg` in JSON mode. The caller built the
 /// source with [`rg_source`], the same shape the built-in engine compiles,
 /// so both paths share literal escaping, case folding and word edges.
-fn run_rg_source(root: &Path, source: &str) -> Result<Vec<SearchHit>, SearchError> {
+///
+/// A watchdog thread kills the child when `cancel` is set or `deadline`
+/// passes: the stdout read itself can block for minutes, so the read loop
+/// cannot be the thing that notices.
+fn run_rg_source(
+    root: &Path,
+    source: &str,
+    cancel: &SearchCancel,
+    deadline: Instant,
+) -> Result<Vec<SearchHit>, SearchError> {
     let mut command = Command::new("rg");
     // A search subprocess never needs the gateway key.
     for name in KEY_ENV_VARS {
@@ -271,40 +506,73 @@ fn run_rg_source(root: &Path, source: &str) -> Result<Vec<SearchHit>, SearchErro
         text
     });
 
+    let child = Arc::new(Mutex::new(child));
+    let finished = Arc::new(AtomicBool::new(false));
+    let killer = ChildKiller {
+        child: Arc::clone(&child),
+        finished: Arc::clone(&finished),
+    };
+    // The watchdog is the only way cancellation reaches a blocked read.
+    let watchdog = {
+        let child = Arc::clone(&child);
+        let finished = Arc::clone(&finished);
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            while !finished.load(Ordering::Relaxed) {
+                if cancel.is_cancelled() || Instant::now() >= deadline {
+                    if let Ok(mut child) = child.lock() {
+                        let _ = child.kill();
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
     // Stream records and stop at the cap: `Command::output` would buffer every
     // match in a monorepo-sized result set.
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, stdout);
     let mut record = Vec::new();
     let mut hits = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut capped = false;
     loop {
         let read = read_bounded_line(&mut reader, &mut record, MAX_RG_RECORD_BYTES);
         let overflow = match read {
             Ok(None) => break,
             Ok(Some(overflow)) => overflow,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_reader.join();
-                return Err(error.into());
-            }
+            Err(_) => break, // the child died; classified after the wait
         };
+        if cancel.is_cancelled() {
+            break;
+        }
         if overflow {
             continue; // an unrepresentable record: skip it
         }
         if let Some(hit) = parse_rg_line(&String::from_utf8_lossy(&record)) {
+            let hit = bounded_hit(hit);
+            total_bytes = total_bytes.saturating_add(hit.line_text.len());
             hits.push(hit);
-            if hits.len() >= MAX_HITS {
-                let _ = child.kill();
+            if hits.len() >= MAX_HITS || total_bytes >= MAX_TOTAL_HIT_BYTES {
+                capped = true;
                 break;
             }
         }
     }
-    let status = child.wait()?;
+    let status = child
+        .lock()
+        .map_err(|_| SearchError::Rg("ripgrep child lock poisoned".into()))?
+        .wait()?;
+    drop(killer); // release the watchdog; the child is already reaped
+    let _ = watchdog.join();
     let stderr = stderr_reader.join().unwrap_or_default();
+    if cancel.is_cancelled() || Instant::now() >= deadline {
+        return Err(SearchError::Cancelled);
+    }
     // rg exits 1 for "no matches" (a normal outcome); anything other than
     // 0/1 is a real failure to surface (no silent fallback — PLAN.md §8).
-    // A deliberate kill after the hit cap is not a failure.
-    let capped = hits.len() >= MAX_HITS;
+    // A deliberate kill after a cap (hits, bytes, deadline) is not a failure.
     if !capped && !status.success() && status.code() != Some(1) {
         return Err(SearchError::Rg(format!(
             "exit {}: {}",
@@ -327,16 +595,37 @@ fn run_rg_source(root: &Path, source: &str) -> Result<Vec<SearchHit>, SearchErro
 /// The walker mirrors [`crate::tree::build_tree`]: hidden entries and
 /// `.gitignore`/`.ignore` rules are respected (with `require_git(false)`
 /// so a plain folder behaves like a workspace). Files are streamed line by
-/// line — no file-size cap — and a NUL byte marks the file binary (its
-/// already-collected hits are retracted, like `rg` skips it).
+/// line up to [`MAX_SCANNED_FILE_BYTES`], the scan stops after
+/// [`MAX_SCANNED_BYTES`] or [`SEARCH_DEADLINE`], and a NUL byte marks the
+/// file binary (its already-collected hits are retracted, like `rg` skips
+/// it).
 ///
 /// `spans_for_line` is the engine: [`find_matches`] for literal queries,
 /// [`find_regex_matches`] for regex ones.
-fn scan_builtin(
+#[cfg(test)]
+fn scan_builtin(root: &Path, spans_for_line: impl FnMut(&str) -> Vec<MatchSpan>) -> Vec<SearchHit> {
+    scan_builtin_bounded(
+        root,
+        spans_for_line,
+        &SearchCancel::new(),
+        Instant::now() + SEARCH_DEADLINE,
+        MAX_SCANNED_BYTES,
+    )
+    .unwrap_or_default()
+}
+
+/// [`scan_builtin`] with cancellation, a wall-clock deadline, and a byte
+/// budget (all state the public entry points own).
+fn scan_builtin_bounded(
     root: &Path,
     mut spans_for_line: impl FnMut(&str) -> Vec<MatchSpan>,
-) -> Vec<SearchHit> {
+    cancel: &SearchCancel,
+    deadline: Instant,
+    byte_budget: u64,
+) -> Result<Vec<SearchHit>, SearchError> {
     let mut hits: Vec<SearchHit> = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut scanned = 0u64;
     let walker = WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
@@ -345,13 +634,25 @@ fn scan_builtin(
         .build();
 
     'files: for entry in walker.flatten() {
-        if hits.len() >= MAX_HITS {
+        if cancel.is_cancelled() {
+            return Err(SearchError::Cancelled);
+        }
+        if hits.len() >= MAX_HITS
+            || total_bytes >= MAX_TOTAL_HIT_BYTES
+            || scanned >= byte_budget
+            || Instant::now() >= deadline
+        {
             break;
         }
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.path();
+        // A single multi-GB artefact is never editor text; skip it instead of
+        // streaming it for minutes (rg applies the same policy).
+        if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SCANNED_FILE_BYTES) {
+            continue;
+        }
         let Ok(file) = std::fs::File::open(path) else {
             continue; // unreadable (locked, permissions): skip, not fail
         };
@@ -360,9 +661,16 @@ fn scan_builtin(
         let mut line_bytes = Vec::new();
         let mut line_number = 0usize;
         loop {
+            if cancel.is_cancelled() {
+                return Err(SearchError::Cancelled);
+            }
+            if Instant::now() >= deadline || scanned >= byte_budget {
+                break 'files;
+            }
             match read_bounded_line(&mut reader, &mut line_bytes, MAX_SCANNED_LINE_BYTES) {
                 Ok(None) => break,
                 Ok(Some(overflow)) => {
+                    scanned = scanned.saturating_add(line_bytes.len() as u64 + 1);
                     // An over-long line is not represented as a hit; keep
                     // scanning the rest of the file (huge generated files
                     // must not disappear).
@@ -373,6 +681,7 @@ fn scan_builtin(
                 }
                 Err(_) => break, // read error: the rest of this file is unknown
             }
+            scanned = scanned.saturating_add(line_bytes.len() as u64 + 1);
             if line_bytes.contains(&0) {
                 hits.truncate(first_hit); // binary: retract this file's hits
                 continue 'files;
@@ -382,19 +691,38 @@ fn scan_builtin(
             line_number += 1;
             let spans = spans_for_line(line);
             if !spans.is_empty() {
-                hits.push(SearchHit {
+                let hit = bounded_hit(SearchHit {
                     path: path.to_path_buf(),
                     line_number,
                     line_text: line.to_owned(),
                     spans,
                 });
-                if hits.len() >= MAX_HITS {
+                total_bytes = total_bytes.saturating_add(hit.line_text.len());
+                hits.push(hit);
+                if hits.len() >= MAX_HITS || total_bytes >= MAX_TOTAL_HIT_BYTES {
                     break;
                 }
             }
         }
     }
-    hits
+    Ok(hits)
+}
+
+/// Truncate an over-long hit line to [`MAX_HIT_LINE_CHARS`] and drop spans
+/// that no longer fit. Minified bundles are one multi-MB line; keeping ten
+/// thousand of those is what made a search balloon memory.
+fn bounded_hit(mut hit: SearchHit) -> SearchHit {
+    if hit.line_text.len() > MAX_HIT_LINE_CHARS {
+        let cut = hit
+            .line_text
+            .char_indices()
+            .nth(MAX_HIT_LINE_CHARS)
+            .map(|(offset, _)| offset)
+            .unwrap_or(hit.line_text.len());
+        hit.line_text.truncate(cut);
+        hit.spans.retain(|span| span.end <= MAX_HIT_LINE_CHARS);
+    }
+    hit
 }
 
 /// Read one newline-terminated line into `buf`, never keeping more than
@@ -439,20 +767,41 @@ fn read_bounded_line<R: std::io::BufRead>(
     }
 }
 
-/// [`scan_builtin`] driven by the literal matcher: the `rg`-absent path of
-/// [`search_in_files`].
+/// [`scan_builtin`] driven by the literal matcher (test/diagnostic wrapper:
+/// the public paths use [`search_builtin_with`]).
+#[cfg(test)]
 fn search_builtin(root: &Path, query: &SearchQuery) -> Vec<SearchHit> {
+    search_builtin_with(
+        root,
+        query,
+        &SearchCancel::new(),
+        Instant::now() + SEARCH_DEADLINE,
+    )
+    .unwrap_or_default()
+}
+
+/// The literal built-in engine with cancellation and the search deadline.
+fn search_builtin_with(
+    root: &Path,
+    query: &SearchQuery,
+    cancel: &SearchCancel,
+    deadline: Instant,
+) -> Result<Vec<SearchHit>, SearchError> {
     let needle: Vec<char> = if query.case_sensitive {
         query.pattern.chars().collect()
     } else {
         query.pattern.chars().map(fold_char).collect()
     };
     if needle.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    scan_builtin(root, |line| {
-        find_matches(line, &needle, query.case_sensitive, query.whole_word)
-    })
+    scan_builtin_bounded(
+        root,
+        |line| find_matches(line, &needle, query.case_sensitive, query.whole_word),
+        cancel,
+        deadline,
+        MAX_SCANNED_BYTES,
+    )
 }
 
 /// Single-char case fold that preserves char count (and therefore column
@@ -542,16 +891,35 @@ pub fn search_in_files_regex(
     root: &Path,
     query: &SearchQuery,
 ) -> Result<Vec<SearchHit>, SearchError> {
+    search_in_files_regex_cancellable(root, query, &SearchCancel::new())
+}
+
+/// [`search_in_files_regex`] with an explicit cancellation token.
+pub fn search_in_files_regex_cancellable(
+    root: &Path,
+    query: &SearchQuery,
+    cancel: &SearchCancel,
+) -> Result<Vec<SearchHit>, SearchError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
     // Validate locally first: an invalid pattern is the same typed error on
     // both engines, and rg must never be the thing that reports the typo.
     let regex = build_regex(query)?;
+    if cancel.is_cancelled() {
+        return Err(SearchError::Cancelled);
+    }
+    let deadline = Instant::now() + SEARCH_DEADLINE;
     if rg_on_path() {
-        run_rg_source(root, &rg_source(query, false))
+        run_rg_source(root, &rg_source(query, false), cancel, deadline)
     } else {
-        Ok(scan_builtin(root, |line| find_regex_matches(line, &regex)))
+        scan_builtin_bounded(
+            root,
+            |line| find_regex_matches(line, &regex),
+            cancel,
+            deadline,
+            MAX_SCANNED_BYTES,
+        )
     }
 }
 
@@ -1407,7 +1775,13 @@ mod tests {
         write(&root, ".gitignore", "ignored.txt\n");
 
         let query = SearchQuery::new("rope");
-        let via_rg = run_rg(&root, &query).expect("rg run");
+        let via_rg = run_rg(
+            &root,
+            &rg_source(&query, true),
+            &SearchCancel::new(),
+            Instant::now() + SEARCH_DEADLINE,
+        )
+        .expect("rg run");
         let via_builtin = search_builtin(&root, &query);
 
         let key = |hit: &SearchHit| {
@@ -1537,7 +1911,13 @@ mod tests {
             SearchQuery::new("C++").whole_word(true),
             SearchQuery::new("->").whole_word(true),
         ] {
-            let via_rg = run_rg(&root, &query).expect("rg run");
+            let via_rg = run_rg(
+                &root,
+                &rg_source(&query, true),
+                &SearchCancel::new(),
+                Instant::now() + SEARCH_DEADLINE,
+            )
+            .expect("rg run");
             let via_builtin = search_builtin(&root, &query);
             assert_eq!(sorted_keys(&via_rg), sorted_keys(&via_builtin), "{query:?}");
         }
@@ -1567,7 +1947,13 @@ mod tests {
             SearchQuery::new(r"C\+\+").whole_word(true),
         ] {
             let source = rg_source(&query, false);
-            let via_rg = run_rg_source(&root, &source).expect("rg regex run");
+            let via_rg = run_rg_source(
+                &root,
+                &source,
+                &SearchCancel::new(),
+                Instant::now() + SEARCH_DEADLINE,
+            )
+            .expect("rg regex run");
             let regex = build_regex(&query).expect("valid regex");
             let via_builtin = scan_builtin(&root, |line| find_regex_matches(line, &regex));
             assert_eq!(sorted_keys(&via_rg), sorted_keys(&via_builtin), "{query:?}");
@@ -1624,5 +2010,156 @@ mod tests {
         assert!(err.to_string().contains("io error"));
         let err = SearchError::InvalidPattern("unclosed group".into());
         assert!(err.to_string().contains("invalid regular expression"));
+        assert_eq!(SearchError::Cancelled.to_string(), "search cancelled");
+    }
+
+    // -- responsiveness: cancellation, deadlines and memory caps --------------
+
+    #[test]
+    fn cancelled_search_returns_the_cancelled_error_before_touching_disk() {
+        let root = temp_root("cancel-pre");
+        write(&root, "a.txt", "needle\n");
+        let cancel = SearchCancel::new();
+        cancel.cancel();
+        let literal = search_in_files_cancellable(&root, &SearchQuery::new("needle"), &cancel);
+        assert!(matches!(literal, Err(SearchError::Cancelled)));
+        let regex = search_in_files_regex_cancellable(&root, &SearchQuery::new("needle"), &cancel);
+        assert!(matches!(regex, Err(SearchError::Cancelled)));
+    }
+
+    #[test]
+    fn cancellation_stops_the_builtin_scanner_mid_file() {
+        let root = temp_root("cancel-mid");
+        write(&root, "a.txt", "needle\nneedle\nneedle\n");
+        let cancel = SearchCancel::new();
+        let canceller = cancel.clone();
+        let result = scan_builtin_bounded(
+            &root,
+            |line| {
+                // Cancel after the first matching line is reported.
+                if line.contains("needle") {
+                    canceller.cancel();
+                }
+                find_matches(line, &['n', 'e', 'e', 'd', 'l', 'e'], true, false)
+            },
+            &cancel,
+            Instant::now() + SEARCH_DEADLINE,
+            MAX_SCANNED_BYTES,
+        );
+        assert!(matches!(result, Err(SearchError::Cancelled)));
+    }
+
+    #[test]
+    fn search_guard_cancels_its_token_on_drop() {
+        let cancel = SearchCancel::new();
+        {
+            let _guard = cancel.guard();
+            assert!(!cancel.is_cancelled());
+        }
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn a_new_interactive_search_supersedes_the_previous_one() {
+        let root = temp_root("interactive");
+        let first = start_interactive_search(&root);
+        assert!(!first.is_cancelled());
+        let second = start_interactive_search(&root);
+        assert!(
+            first.is_cancelled(),
+            "the previous search must be cancelled"
+        );
+        assert!(!second.is_cancelled());
+        drop(second);
+        // A later search must not see a stale slot.
+        let third = start_interactive_search(&root);
+        assert!(!third.is_cancelled());
+    }
+
+    #[test]
+    fn cancelling_without_starting_stops_the_running_search_and_clears_its_slot() {
+        let root = temp_root("cancel-before-lock");
+        let running = start_interactive_search(&root);
+        assert!(!running.is_cancelled());
+        assert!(cancel_interactive_search(&root));
+        assert!(
+            running.is_cancelled(),
+            "the running search must observe the cancel signal"
+        );
+        // The slot is gone, so a retry does not cancel a phantom search.
+        assert!(!cancel_interactive_search(&root));
+        // Dropping the superseded guard must not remove the next search's slot.
+        drop(running);
+        let next = start_interactive_search(&root);
+        assert!(!next.is_cancelled());
+    }
+
+    #[test]
+    fn over_long_hit_lines_are_truncated_and_their_spans_clipped() {
+        let root = temp_root("minified");
+        // One 20k-char line with the needle at the start and at the end.
+        let mut line = String::from("needle");
+        line.push_str(&"x".repeat(20_000));
+        line.push_str("needle");
+        write(&root, "bundle.min.js", &format!("{line}\n"));
+
+        let hits = search_builtin(&root, &SearchQuery::new("needle"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_text.chars().count(), MAX_HIT_LINE_CHARS);
+        assert_eq!(
+            spans_of(&hits[0]),
+            vec![(0, 6)],
+            "spans past the preview cap are dropped"
+        );
+    }
+
+    #[test]
+    fn hit_budget_stops_the_builtin_scan_early() {
+        let root = temp_root("budget");
+        for index in 0..50 {
+            write(&root, &format!("f{index:02}.txt"), "needle\n");
+        }
+        // 7 bytes covers the first file exactly; the next file is not read.
+        let hits = scan_builtin_bounded(
+            &root,
+            |line| find_matches(line, &['n', 'e', 'e', 'd', 'l', 'e'], true, false),
+            &SearchCancel::new(),
+            Instant::now() + SEARCH_DEADLINE,
+            7,
+        )
+        .expect("scan");
+        assert_eq!(hits.len(), 1, "the byte budget bounds the scan");
+    }
+
+    #[test]
+    fn expired_deadline_stops_the_builtin_scan() {
+        let root = temp_root("deadline");
+        for index in 0..20 {
+            write(&root, &format!("f{index:02}.txt"), "needle\n");
+        }
+        let hits = scan_builtin_bounded(
+            &root,
+            |line| find_matches(line, &['n', 'e', 'e', 'd', 'l', 'e'], true, false),
+            &SearchCancel::new(),
+            Instant::now(),
+            1024 * 1024,
+        )
+        .expect("scan");
+        assert!(
+            hits.len() < 20,
+            "an expired deadline returns partial results, got {}",
+            hits.len()
+        );
+    }
+
+    #[test]
+    fn bounded_hit_keeps_short_lines_untouched() {
+        let hit = SearchHit {
+            path: PathBuf::from("a.rs"),
+            line_number: 1,
+            line_text: "let x = 1;".to_owned(),
+            spans: vec![MatchSpan { start: 4, end: 5 }],
+        };
+        assert_eq!(bounded_hit(hit.clone()), hit);
     }
 }

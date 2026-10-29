@@ -176,6 +176,19 @@ pub const LARGE_FILE_LINES: usize = 50_000;
 /// How long a large buffer waits between re-parses (seconds).
 pub const REPARSE_DEBOUNCE_SECS: f64 = 0.5;
 
+/// Buffers larger than this are never handed to tree-sitter. A full parse of
+/// a multi-MB file can take seconds per keystroke, which freezes the pane;
+/// the editor then paints plain `SYN_DEFAULT` text. The desktop workspace
+/// already refuses editors files over 2 MiB, so this is the matching guard for
+/// the custom editor (and for generated buffers).
+pub const MAX_HIGHLIGHT_BYTES: usize = 2 * 1024 * 1024;
+
+/// A single line longer than this (a minified bundle or a generated
+/// one-liner) disables highlighting too: per-line scope extraction and the
+/// painter both degrade badly on such a line even below
+/// [`MAX_HIGHLIGHT_BYTES`].
+pub const MAX_HIGHLIGHT_LINE_BYTES: usize = 16 * 1024;
+
 /// Whether a pending edit should trigger a re-parse at `now`. Small files
 /// always re-parse immediately (a few hundred microseconds); large files wait
 /// out the debounce so typing stays cheap on 50k+-line buffers.
@@ -386,7 +399,9 @@ impl SyntaxLayer {
     }
 
     /// Replace the whole source (file open, buffer swap, or a detected
-    /// desync). Full parse + full highlight, immediately.
+    /// desync). Full parse + full highlight, immediately — unless the text
+    /// exceeds [`MAX_HIGHLIGHT_BYTES`] / [`MAX_HIGHLIGHT_LINE_BYTES`], in
+    /// which case highlighting stays off and the pane paints plain text.
     pub fn set_source(&mut self, text: &str) {
         self.source.clear();
         self.source.push_str(text);
@@ -395,9 +410,36 @@ impl SyntaxLayer {
         self.spans.clear();
         self.tree = None;
         self.pending_shift = None;
+        self.dirty = false;
+        if self.exceeds_highlight_limits() {
+            self.last_parse = 0.0;
+            return;
+        }
         self.dirty = true;
         self.reparse();
         self.last_parse = 0.0;
+    }
+
+    /// Whether this layer draws plain text because the source is too large
+    /// (see [`MAX_HIGHLIGHT_BYTES`] and [`MAX_HIGHLIGHT_LINE_BYTES`]).
+    pub fn suppresses_highlighting(&self) -> bool {
+        self.exceeds_highlight_limits()
+    }
+
+    /// Size guard checked before every parse: total bytes, then the longest
+    /// line (a minified bundle is one huge line).
+    fn exceeds_highlight_limits(&self) -> bool {
+        if self.source.len() > MAX_HIGHLIGHT_BYTES {
+            return true;
+        }
+        let mut longest = self
+            .source
+            .len()
+            .saturating_sub(*self.line_starts.last().unwrap_or(&0));
+        for window in self.line_starts.windows(2) {
+            longest = longest.max(window[1].saturating_sub(window[0]));
+        }
+        longest > MAX_HIGHLIGHT_LINE_BYTES
     }
 
     /// Apply one edit, described LSP-style: the text between `start` and
@@ -535,7 +577,15 @@ impl SyntaxLayer {
 
     /// Re-parse the shadow source (incrementally, with the old tree as the
     /// hint) and refresh the cached spans when the syntax actually changed.
+    /// Over the size caps the tree and spans are cleared and nothing parses.
     fn reparse(&mut self) {
+        if self.exceeds_highlight_limits() {
+            self.tree = None;
+            self.spans.clear();
+            self.pending_shift = None;
+            self.dirty = false;
+            return;
+        }
         let old_tree = self.tree.take();
         let new_tree = match self.tree_engine.as_mut() {
             Some(engine) => engine.parser.parse(self.source.as_str(), old_tree.as_ref()),
@@ -1376,5 +1426,41 @@ mod tests {
         layer.tick(0.6);
         assert!(!layer.is_dirty());
         assert_eq!(layer.source(), format!("xy{}", &big[1..]));
+    }
+
+    // -- parse limits (responsiveness) ---------------------------------------
+
+    #[test]
+    fn oversized_source_skips_tree_sitter_entirely() {
+        let big = "a".repeat(MAX_HIGHLIGHT_BYTES + 1);
+        let mut layer = layer_for(Language::Rust, &big);
+        assert!(layer.suppresses_highlighting());
+        assert!(layer.spans().is_empty());
+        assert!(!layer.is_dirty(), "no pending parse is left behind");
+        assert!(layer.line_sections(0, &big).is_empty());
+
+        // An edit keeps it suppressed and does not start a parse.
+        layer.edit(Position::new(0, 0), Position::new(0, 0), "b", 1.0);
+        layer.tick(2.0);
+        assert!(layer.spans().is_empty());
+        assert!(!layer.is_dirty());
+    }
+
+    #[test]
+    fn minified_single_line_skips_highlighting() {
+        let line = "x".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1);
+        let layer = layer_for(Language::JavaScript, &line);
+        assert!(layer.suppresses_highlighting());
+        assert!(layer.spans().is_empty());
+        assert!(layer
+            .line_sections(0, &line[..MAX_HIGHLIGHT_LINE_BYTES + 1])
+            .is_empty());
+    }
+
+    #[test]
+    fn normal_sources_still_highlight() {
+        let layer = layer_for(Language::Rust, "fn main() {}\n");
+        assert!(!layer.suppresses_highlighting());
+        assert!(!layer.spans().is_empty());
     }
 }

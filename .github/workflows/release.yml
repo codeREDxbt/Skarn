@@ -1,4 +1,6 @@
-# Selora IDE - release pipeline (RELEASE.md section 4.2).
+# Selora IDE - release pipeline.
+#
+# Signing requirements: see SIGNING.md at the repository root.
 #
 # Trigger: push a tag matching v*.*.*. Produces a DRAFT GitHub Release with
 # the Inno Setup installer and its SHA256 checksum attached; the owner
@@ -9,8 +11,8 @@
 # trusting that ci.yml passed. It fails unless the tagged commit is an
 # ancestor of origin/main and unless fmt, clippy, and cargo-deny are clean.
 #
-# Code signing (RELEASE.md section 3) is optional and off until the owner
-# provides a certificate. Add two repository secrets to enable it:
+# Code signing is optional and off until the owner provides a certificate.
+# See SIGNING.md for what to supply. Add two repository secrets to enable it:
 #   SIGNING_CERT_BASE64   - the Authenticode PFX, base64-encoded
 #   SIGNING_CERT_PASSWORD - its password
 # The signing steps are skipped while SIGNING_CERT_BASE64 is empty. Set the

@@ -10,7 +10,8 @@
       * an optional -Tag vX.Y.Z matches that version and is numeric;
       * CHANGELOG.md has a "## [<version>]" section;
       * the repository slug agrees across Cargo.toml, package.json,
-        installer/selora-ide.iss, and docs/mkdocs.yml;
+        installer/selora-ide.iss, and docs/mkdocs.yml when the docs tree is
+        present (the public tree intentionally ships without docs/);
       * the About dialog and update check derive their URLs from those
         manifests instead of hard-coding a slug (a stale slug is how the
         update check returns 404);
@@ -223,6 +224,9 @@ if (-not $issRepo) {
     Add-Fail 'installer/selora-ide.iss has no #define RepoUrl'
 }
 
+# The public tree deliberately omits docs/ (STABILITY_PLAN.md Decisions), so
+# this check only runs when the docs tree is present. A missing mkdocs.yml is
+# not a release blocker; a present one with the wrong slug still is.
 $mkdocsPath = Join-Path $RepoRoot 'docs\mkdocs.yml'
 $mkdocsRepo = ''
 if (Test-Path -LiteralPath $mkdocsPath -PathType Leaf) {
@@ -230,9 +234,9 @@ if (Test-Path -LiteralPath $mkdocsPath -PathType Leaf) {
     if ($mkdocsText -match '(?m)^\s*repo_url:\s*(?<url>\S+)\s*$') {
         $mkdocsRepo = $Matches['url'].Trim('"').Trim("'")
     }
-}
-if (-not $mkdocsRepo) {
-    Add-Fail 'docs/mkdocs.yml has no repo_url'
+    if (-not $mkdocsRepo) {
+        Add-Fail 'docs/mkdocs.yml has no repo_url'
+    }
 }
 
 $normalized = @{}
@@ -267,7 +271,7 @@ if ($canonical) {
         }
     }
     if ($mismatched.Count -eq 0) {
-        Add-Pass "repository slug agrees across Cargo.toml, package.json, selora-ide.iss, and mkdocs.yml ($canonical)"
+        Add-Pass "repository slug agrees across the manifests and installer ($canonical)"
     }
     else {
         Add-Fail "repository slug mismatch: expected $canonical; found $($mismatched -join ', ')"

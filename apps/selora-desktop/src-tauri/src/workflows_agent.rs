@@ -133,6 +133,7 @@ struct WorkflowTools {
     router: RouterToolRunner,
     control: Arc<ToolWorkerControl>,
     effects: Option<Arc<EffectRecorder>>,
+    effect_step: Option<selora_workflow::ToolEffectStep>,
     #[cfg(test)]
     before_start: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -181,7 +182,11 @@ impl Drop for ToolJobGuard {
 }
 
 impl WorkflowTools {
-    fn new(context: ToolContext, effects: Option<Arc<EffectRecorder>>) -> Self {
+    fn new(
+        context: ToolContext,
+        effects: Option<Arc<EffectRecorder>>,
+        effect_step: Option<selora_workflow::ToolEffectStep>,
+    ) -> Self {
         Self {
             control: Arc::new(ToolWorkerControl {
                 cancelled: AtomicBool::new(false),
@@ -190,6 +195,7 @@ impl WorkflowTools {
             }),
             router: RouterToolRunner::new(context),
             effects,
+            effect_step,
             #[cfg(test)]
             before_start: None,
         }
@@ -313,7 +319,11 @@ impl ToolRunner for WorkflowTools {
         // A stable effect id also proves a tool call that already completed:
         // it is replayed, never executed twice.
         let effect = if selora_workflow::is_side_effecting_tool(&call.name) {
-            match self.effects.as_ref().map(|effects| effects.begin(&call)) {
+            match self
+                .effects
+                .as_ref()
+                .map(|effects| effects.begin_with_step(&call, self.effect_step.as_ref()))
+            {
                 Some(Ok(selora_workflow::EffectBegin::Execute { effect_id, attempt })) => {
                     Some((effect_id, attempt))
                 }
@@ -505,7 +515,11 @@ impl WorkflowHost {
                         .map_err(|error| {
                             HostError::new(format!("cannot start ask runtime: {error}"))
                         })?;
-                    runtime.block_on(self.run_workflow_turn(input))
+                    runtime.block_on(self.run_workflow_turn(
+                        input,
+                        request.step_id.clone(),
+                        request.agent.clone(),
+                    ))
                 })
                 .map_err(|error| HostError::new(format!("cannot start ask worker: {error}")))?
                 .join()
@@ -539,6 +553,8 @@ impl WorkflowHost {
     async fn run_workflow_turn(
         &self,
         input: TurnInput,
+        step_id: Option<String>,
+        agent: String,
     ) -> Result<(AgentTurnReport, Option<HostError>), HostError> {
         let context = ToolContext::new(
             self.root.clone(),
@@ -546,11 +562,18 @@ impl WorkflowHost {
                 // Even "git status" can be followed by shell syntax. No prefix
                 // allowlist is safe as a workflow script's implicit grant.
                 auto_approve_commands: Vec::new(),
+                // Workflow subagents obey the same workspace-trust gate as the
+                // agent dock: an untrusted workspace can never run risky shell.
+                workspace_trusted: self.config.workspace_trusted,
                 ..AgentToolSettings::default()
             },
         )
         .with_policy(SubagentPolicy::Full);
-        let tools = WorkflowTools::new(context, self.tool_effects.clone());
+        let effect_step = step_id.map(|step_id| selora_workflow::ToolEffectStep {
+            step_id,
+            agent: Some(agent),
+        });
+        let tools = WorkflowTools::new(context, self.tool_effects.clone(), effect_step);
         let chat = WorkflowChat::Client(ClientChatStream::new(SeloraClient::new(
             &self.config.base_url,
             &self.config.api_key,
@@ -1254,8 +1277,9 @@ mod tests {
             let mut tools = WorkflowTools::new(
                 ToolContext::new(
                     root.path(),
-                    AgentToolSettings { auto_approve_commands: Vec::new(), ..AgentToolSettings::default() },
+                    AgentToolSettings { auto_approve_commands: Vec::new(), workspace_trusted: true, ..AgentToolSettings::default() },
                 ),
+                None,
                 None,
             );
             for name in ["run_workflow", "manage_todo"] {
@@ -1531,6 +1555,7 @@ mod tests {
                     ..TurnCaps::spec_defaults(200_000)
                 })
                 .with_approval_handler(handler)
+                .with_workspace_trusted(true)
                 .with_tool_effect_ledger(root.path().join("tool-effects.jsonl"), "test-cancel"),
         );
         let result = ask(&host, "runner");
