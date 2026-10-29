@@ -258,3 +258,15 @@ Remaining risks (documented, not silently ignored):
 - Large dirty sets are copied on the command thread when snapshotting.
 - The legacy egui shell (`selora-app`) still uses the non-cancellable search
   entry point; the shipped Tauri shell does not.
+
+- 2026-10-29 (final verification, MAIN): `cargo test --workspace` green (exit 0),
+  frontend 196 tests green, clippy/fmt/deny green, release build green, and the
+  live desktop walkthrough passed 14/14 steps with zero renderer or console
+  errors. Installer `installer/output/Selora-IDE-Setup-0.1.0.exe`
+  (10,054,701 bytes, SHA-256
+  `facaa55ca92c84a0fcc5d69c77ae542439c75287596099933305aedc2927ed54`,
+  version 0.1.0, unsigned). Publishing to GitHub is intentionally NOT done.
+  E2E caught one real regression (preview tab accessible name broke the tab
+  selector); it was fixed by moving the preview hint to `aria-description`.
+  A pre-existing `sidebar.css` block of empty `var()` references was made
+  valid with the inherited foreground token.
