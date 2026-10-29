@@ -1103,6 +1103,19 @@ function sessionEnvelopeContext(): EnvelopeContext | null {
   return { ...context, session_id: state.activeSessionId || null };
 }
 
+/**
+ * Bootstrap hydration must never erase text this process already streamed.
+ * While a turn is live, a snapshot taken mid-stream may lag behind the local
+ * transcript, so keep the longer local copy; otherwise the snapshot wins.
+ */
+export function mergeHydratedTranscript(
+  local: ChatMessage[],
+  remote: ChatMessage[],
+  turnActive: boolean,
+): ChatMessage[] {
+  return turnActive && local.length > remote.length ? local : remote;
+}
+
 function notify() {
   if (state.activeSessionId) {
     sessionViews.set(state.activeSessionId, {
@@ -1269,8 +1282,19 @@ const activeSessionId =
 
     // Keep each backend session's transcript separate: switching a tab must
     // show that session's messages, not the flattened union of every session.
+    // Preserve what this process already streamed: a bootstrap arrives after
+    // commands (send, settings, approvals), and wiping the live transcript
+    // makes a just-sent prompt vanish until a session switch replays it.
     const transcripts: Record<string, ChatMessage[]> = {};
-    for (const session of sessions) transcripts[session.id] = [];
+    for (const session of sessions) {
+      transcripts[session.id] =
+        state.transcripts[session.id] ??
+        sessionViews.get(session.id)?.messages ??
+        [];
+    }
+    // The bootstrap's `chat.messages` fills each session below. Keep what this
+    // process already streamed: a snapshot taken mid-turn can lag behind it.
+    const previousTranscripts = state.transcripts;
     // Durable sessions come from `.selora/agent-sessions` — a read-only
     // projection Rust owns. Never synthesized locally.
     const resumableSessions: ResumableAgentSession[] = (bootstrap.agent_sessions ?? []).map(
@@ -1289,13 +1313,23 @@ const activeSessionId =
     for (const message of bootstrap.chat.messages) {
       if (!transcripts[message.session_id]) continue;
       if (message.role !== 'user' && message.role !== 'assistant') continue;
-      transcripts[message.session_id]!.push({
+      const list = transcripts[message.session_id]!;
+      // A live transcript already carries this id with newer streamed text.
+      if (list.some((entry) => entry.id === message.message_id)) continue;
+      list.push({
         id: message.message_id,
         role: message.role,
         content: message.text,
         status: 'complete',
         timestamp: Date.now(),
       });
+    }
+    for (const session of sessions) {
+      const previous = previousTranscripts[session.id] ?? [];
+      const merged = transcripts[session.id] ?? [];
+      const live = session.isRunning || (session.id === activeSessionId && state.inFlight);
+      // Never let a bootstrap snapshot truncate a longer live transcript.
+      transcripts[session.id] = mergeHydratedTranscript(previous, merged, live);
     }
     for (const session of sessions) {
       const previous = state.transcripts[session.id] ?? [];
