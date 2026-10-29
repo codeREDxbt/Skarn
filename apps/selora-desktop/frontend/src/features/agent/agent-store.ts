@@ -143,6 +143,9 @@ const INITIAL_SESSIONS: AgentSession[] = [];
  */
 export type CancelledChatMessage = ChatMessage & { cancelled?: boolean };
 
+/** Local failure detail is not carried by Rust's persisted message DTO. */
+type TerminalChatMessage = CancelledChatMessage & { terminalError?: string };
+
 /**
  * Mark the live assistant row as cancelled by the user. The partial text is
  * kept verbatim — a Stop must never discard what already streamed — and an
@@ -173,10 +176,11 @@ export function markActiveMessageFailed(
   const index = messages.length - 1;
   if (index < 0 || messages[index]?.role !== 'assistant') return messages;
   const last = messages[index]!;
-  const updated: ChatMessage = {
+  const updated: TerminalChatMessage = {
     ...last,
     content: last.content ? `${last.content}\n\n[Error: ${message}]` : `[Error: ${message}]`,
     status: 'error',
+    terminalError: message,
   };
   const next = [...messages];
   next[index] = updated;
@@ -876,6 +880,9 @@ let activeRequestId: string | null = null;
 type SessionView = Pick<AgentState, 'messages' | 'todos' | 'plan' | 'planPhase' | 'inFlight' |
   'thinkingState' | 'metrics' | 'promptQueue' | 'streamingActivityLevel'> & { requestId: string | null };
 const sessionViews = new Map<string, SessionView>();
+// Explicit Retry invalidates metadata on its old tail. Weak keys disappear
+// with those messages, without granting a replacement turn their old status.
+const retriedMessages = new WeakSet<ChatMessage>();
 let routingSessionEvent = false;
 
 function selectSessionView(sessionId: string, clearChildSelection = false) {
@@ -1113,7 +1120,30 @@ export function mergeHydratedTranscript(
   remote: ChatMessage[],
   turnActive: boolean,
 ): ChatMessage[] {
-  return turnActive && local.length > remote.length ? local : remote;
+  // Row counts can match while the snapshot's assistant text still lags.
+  if (!turnActive) return remote;
+  if (local.length > 0 && local.length >= remote.length) return local;
+  return remote.map((message) => {
+    const streamed = local.find((entry) => entry.id === message.id && entry.role === message.role);
+    return streamed && streamed.content.startsWith(message.content) ? streamed : message;
+  });
+}
+
+/** Match turn position among users, ignoring omitted local-only failure rows. */
+function hydratedPromptIndex(local: ChatMessage[], remote: ChatMessage[], position: number): number {
+  const prompt = local[position];
+  if (prompt?.role !== 'user') return -1;
+  const turnPosition = local.slice(0, position).filter((message) => message.role === 'user').length;
+  let turn = -1;
+  const index = remote.findIndex((message) => message.role === 'user' && ++turn === turnPosition);
+  const candidate = remote[index];
+  if (!candidate) return -1;
+  // Only optimistic user ids may reconcile by text; different durable ids
+  // identify replacement turns even when their prompt text repeats.
+  const text = prompt.isSteer
+    ? `[STEERING DIRECTIVE - IMMEDIATE COURSE CORRECTION]: ${prompt.content}`
+    : prompt.content;
+  return candidate.id === prompt.id || (/^msg_\d+_u$/.test(prompt.id) && candidate.content === text) ? index : -1;
 }
 
 function notify() {
@@ -1287,10 +1317,9 @@ const activeSessionId =
     // makes a just-sent prompt vanish until a session switch replays it.
     const transcripts: Record<string, ChatMessage[]> = {};
     for (const session of sessions) {
-      transcripts[session.id] =
-        state.transcripts[session.id] ??
-        sessionViews.get(session.id)?.messages ??
-        [];
+      // Build the snapshot independently: never push into a published array,
+      // or union optimistic ids with the backend's independently assigned ids.
+      transcripts[session.id] = [];
     }
     // The bootstrap's `chat.messages` fills each session below. Keep what this
     // process already streamed: a snapshot taken mid-turn can lag behind it.
@@ -1315,6 +1344,7 @@ const activeSessionId =
       if (message.role !== 'user' && message.role !== 'assistant') continue;
       const list = transcripts[message.session_id]!;
       // A live transcript already carries this id with newer streamed text.
+      // Reconcile that text below; deduplicate only snapshot rows here.
       if (list.some((entry) => entry.id === message.message_id)) continue;
       list.push({
         id: message.message_id,
@@ -1324,22 +1354,96 @@ const activeSessionId =
         timestamp: Date.now(),
       });
     }
+    const liveSessions = new Set<string>();
+    const hydratedRequests = new Map<string, string | null>();
     for (const session of sessions) {
-      const previous = previousTranscripts[session.id] ?? [];
+      const previousView = sessionViews.get(session.id);
+      const previous = previousTranscripts[session.id] ?? previousView?.messages ?? [];
       const merged = transcripts[session.id] ?? [];
-      const live = session.isRunning || (session.id === activeSessionId && state.inFlight);
+      const snapshotRequest = session.id === activeSessionId ? bootstrap.chat.active_request_id : null;
+      const snapshotEnded = Boolean(snapshotRequest && terminalRequests.has(snapshotRequest));
+      const remoteRequest = snapshotEnded ? null : snapshotRequest;
+      const backendLive = !snapshotEnded && Boolean(session.isRunning || remoteRequest);
+      const previousLive = previousView?.inFlight || Boolean(previousView?.requestId && !terminalRequests.has(previousView.requestId));
+      const sameTurn = !backendLive || Boolean(previousLive &&
+        (!remoteRequest || !previousView?.requestId || remoteRequest === previousView.requestId));
+      const promptIndex = previous.reduce((found, message, index) => message.role === 'user' ? index : found, -1);
+      const snapshotPromptIndex = hydratedPromptIndex(previous, merged, promptIndex);
+      // Rust persists an assistant only when its turn ends. With no backend
+      // live signal, that row after this turn's prompt proves a missed end.
+      // Match the prompt's position too: an older answer (even to the same
+      // prompt text) must not finish a newly sent turn.
+      const snapshotCompleted = Boolean(previousView?.inFlight && !session.isRunning && !snapshotRequest &&
+        snapshotPromptIndex >= 0 && merged[snapshotPromptIndex + 1]?.role === 'assistant');
+      if (snapshotCompleted && previousView?.requestId) terminalRequests.add(previousView.requestId);
+      const localLive = Boolean(previousView?.inFlight && sameTurn && !snapshotCompleted &&
+        (!previousView.requestId || !terminalRequests.has(previousView.requestId)));
+      const live = localLive || backendLive;
+      if (snapshotEnded && !localLive) session.isRunning = false;
+      if (live) liveSessions.add(session.id);
+      hydratedRequests.set(session.id, live ? remoteRequest ?? (localLive ? previousView?.requestId ?? null : null) : null);
       // Never let a bootstrap snapshot truncate a longer live transcript.
-      transcripts[session.id] = mergeHydratedTranscript(previous, merged, live);
+      // Approval restoration below also needs its own mutable array.
+      // A snapshot naming an already terminal request is explicitly stale,
+      // including its transcript, not just its running flag.
+      transcripts[session.id] = snapshotEnded && previous.length > 0
+        ? [...previous]
+        : [...mergeHydratedTranscript(sameTurn ? previous : [], merged, live)];
+      const list = transcripts[session.id]!;
+      if (live && list[list.length - 1]?.role === 'user') {
+        // Rust persists the user before streaming, but the assistant only at
+        // termination. Reconnect still needs a render row for live events.
+        list.push({
+          id: `msg_${hydratedRequests.get(session.id) ?? session.id}_a`,
+          role: 'assistant',
+          content: '',
+          status: 'streaming',
+          timestamp: Date.now(),
+          toolCalls: [],
+        });
+      }
     }
     for (const session of sessions) {
       const previous = state.transcripts[session.id] ?? [];
-      if (session.isRunning && previous.length > 0) {
-        transcripts[session.id] = previous;
-      } else {
-        for (const message of previous.filter((message) => message.toolCalls?.length)) {
-          const index = transcripts[session.id]!.findIndex((entry) => entry.id === message.id);
-          if (index >= 0) transcripts[session.id]![index] = { ...transcripts[session.id]![index]!, toolCalls: message.toolCalls };
-          else transcripts[session.id]!.push(message);
+      for (let position = 0; position < previous.length; position += 1) {
+        const message = previous[position] as TerminalChatMessage;
+        const terminal = message.role === 'assistant' && (message.status === 'error' || message.cancelled);
+        if (retriedMessages.has(message) || (!message.toolCalls?.length && !terminal)) continue;
+        const list = transcripts[session.id]!;
+        const promptPosition = previous.slice(0, position).reduce(
+          (found, entry, index) => entry.role === 'user' ? index : found, -1,
+        );
+        const matchingPrompt = hydratedPromptIndex(previous, list, promptPosition);
+        const currentPrompt = list.reduce((found, entry, index) => entry.role === 'user' ? index : found, -1);
+        const replacingLiveTurn = liveSessions.has(session.id) && matchingPrompt === currentPrompt;
+        let index = list.findIndex((entry) => entry.id === message.id && entry.role === message.role);
+        // A terminal agent snapshot assigns a fresh assistant id. Match only
+        // the same turn's position and user prompt before carrying UI cards.
+        if (index < 0 && matchingPrompt >= 0 && !replacingLiveTurn &&
+            list[matchingPrompt + 1]?.role === 'assistant') index = matchingPrompt + 1;
+        if (index >= 0) {
+          const target = list[index]!;
+          const keepTerminal = terminal && matchingPrompt >= 0 && !replacingLiveTurn;
+          const errorText = message.terminalError === undefined ? undefined : `[Error: ${message.terminalError}]`;
+          list[index] = {
+            ...target,
+            ...(message.toolCalls?.length ? { toolCalls: message.toolCalls } : {}),
+            ...(keepTerminal ? {
+              status: message.status,
+              ...(message.cancelled ? { cancelled: true } : {}),
+              ...(errorText ? {
+                terminalError: message.terminalError,
+                content: target.content.endsWith(errorText) ? target.content
+                  : target.content ? `${target.content}\n\n${errorText}` : errorText,
+              } : {}),
+            } : {}),
+          } as TerminalChatMessage;
+        } else if (terminal && matchingPrompt >= 0 && !replacingLiveTurn &&
+            list[matchingPrompt + 1]?.role !== 'assistant') {
+          // Empty failures/stops need not have a persisted assistant. Retain
+          // only a terminal row tied to the same surviving prompt, never an
+          // arbitrary tail removed by retry or authoritative truncation.
+          list.splice(matchingPrompt + 1, 0, message);
         }
       }
     }
@@ -1368,21 +1472,22 @@ const activeSessionId =
       : null;
 
     // Keep request routing aligned with the turn Rust says is live.
-    activeRequestId = bootstrap.chat.active_request_id ?? null;
+    // A pre-send snapshot may omit the local request; a terminal event must
+    // also stay terminal if an older running snapshot arrives afterwards.
+    activeRequestId = hydratedRequests.get(activeSessionId) ?? null;
     for (const session of bootstrap.chat.sessions) {
       const previous = sessionViews.get(session.session_id);
-      const isActive = session.session_id === activeSessionId;
       sessionViews.set(session.session_id, {
         messages: transcripts[session.session_id] ?? [],
         todos: todosBySession[session.session_id] ?? [],
         plan: validPlanApproval(session.plan) ? session.plan : null,
         planPhase: session.plan_phase ?? 'executing',
-        inFlight: Boolean(previous?.inFlight || session.active || (isActive && activeRequestId)),
-        thinkingState: previous?.thinkingState ?? 'breathing',
+        inFlight: liveSessions.has(session.session_id),
+        thinkingState: liveSessions.has(session.session_id) ? previous?.thinkingState ?? 'breathing' : 'breathing',
         metrics: previous?.metrics ?? { totalTokens: 0, costUsd: 0, activeToolsCount: 0, approvedCount: 0, deniedCount: 0, latencyMs: 0 },
         promptQueue: previous?.promptQueue ?? [],
-        streamingActivityLevel: previous?.streamingActivityLevel ?? 0,
-        requestId: previous?.requestId ?? (isActive ? activeRequestId : null),
+        streamingActivityLevel: liveSessions.has(session.session_id) ? previous?.streamingActivityLevel ?? 0 : 0,
+        requestId: hydratedRequests.get(session.session_id) ?? null,
       });
     }
 
@@ -1395,6 +1500,7 @@ const activeSessionId =
       ? bootstrap.chat.pending_approvals
       : bootstrap.chat.pending_approval ? [bootstrap.chat.pending_approval] : [];
     for (const pending of parks) {
+      if (terminalRequests.has(pending.request_id)) continue;
       pendingApprovalRequests.set(pending.approval_id, pending.request_id);
       const previousCall = state.messages.flatMap((message) => message.toolCalls ?? [])
         .find((call) => call.approvalId === pending.approval_id) as WorkflowToolCall | undefined;
@@ -1494,7 +1600,9 @@ const activeSessionId =
       todos: hydratedTodos,
       planPhase: hydratedPlanPhase,
       plan: hydratedPlan,
-      inFlight: Boolean(bootstrap.chat.active_request_id),
+      inFlight: liveSessions.has(activeSessionId),
+      thinkingState: liveSessions.has(activeSessionId) ? state.thinkingState : 'breathing',
+      streamingActivityLevel: liveSessions.has(activeSessionId) ? state.streamingActivityLevel : 0,
       sessionBusy: false,
       sessionError: null,
     };
@@ -1599,9 +1707,24 @@ const activeSessionId =
 
   /** Retry a user turn: Rust truncates the failed tail and dispatches once. */
   async retryMessage(messageId: string): Promise<boolean> {
-    const target = state.messages.find((message) => message.id === messageId);
+    const targetIndex = state.messages.findIndex((message) => message.id === messageId);
+    const target = state.messages[targetIndex];
     if (!target || target.role !== 'user') return false;
     if (!context || !state.activeSessionId) return false;
+    const source = {
+      sessionId: state.activeSessionId,
+      context: { ...context },
+      prefix: state.messages.slice(0, targetIndex + 1),
+      metrics: state.metrics,
+      changed: false,
+    };
+    const tail = state.messages.slice(targetIndex + 1);
+    tail.forEach((message) => retriedMessages.add(message));
+    const unsubscribe = this.subscribe(() => {
+      const view = sessionViews.get(source.sessionId);
+      // Remember replacement turns even if their terminal event is missed.
+      if (!view || view.inFlight || view.requestId || view.metrics !== source.metrics) source.changed = true;
+    });
     try {
       await bridgeRetryMessage(state.activeSessionId, messageId, {
         ...context,
@@ -1609,8 +1732,31 @@ const activeSessionId =
       });
       return true;
     } catch (error) {
+      tail.forEach((message) => retriedMessages.delete(message));
+      const view = sessionViews.get(source.sessionId);
+      // Hydration may have detached the invalidated tail before rejection.
+      // Restore only the unchanged, idle source projection. Metrics identity
+      // also rejects a newer completed turn, even if history was truncated.
+      if (!source.changed && tail.length > 0 && context?.workspace_id === source.context.workspace_id &&
+          context?.core_instance_id === source.context.core_instance_id && view &&
+          !view.inFlight && !view.requestId && view.metrics === source.metrics &&
+          state.sessions.some((session) => session.id === source.sessionId) &&
+          view.messages.length === source.prefix.length && view.messages.every((message, index) =>
+            message.id === source.prefix[index]!.id && message.role === source.prefix[index]!.role &&
+            message.content === source.prefix[index]!.content)) {
+        const messages = [...view.messages, ...tail];
+        sessionViews.set(source.sessionId, { ...view, messages });
+        state = {
+          ...state,
+          transcripts: { ...state.transcripts, [source.sessionId]: messages },
+          ...(state.activeSessionId === source.sessionId ? { messages } : {}),
+        };
+        notify();
+      }
       toastStore.pushLocal('error', sessionCommandError('retry', error));
       return false;
+    } finally {
+      unsubscribe();
     }
   },
 
@@ -2341,34 +2487,51 @@ const activeSessionId =
       },
     );
     activeRequestId = requestId;
+    // Persist request routing before a tab switch or bootstrap can read the
+    // session view saved by the optimistic render above.
+    notify();
     promise.catch((err: unknown) => {
-      const errObj = err as { code?: string; message?: string } | undefined;
-      const lastIdx = state.messages.length - 1;
-      if (lastIdx >= 0 && state.messages[lastIdx].role === 'assistant') {
-        const content =
-          errObj?.code === 'not_connected'
-            ? 'No AI provider is connected yet. Click the "connect" button in the bottom status bar or open Settings to configure your API key.'
-            : errObj?.code === 'no_workspace'
-            ? 'No workspace is currently open. Open a folder to start using the autonomous coding agent.'
-            : `Could not reach the assistant: ${errObj?.message || 'Connection unavailable.'}`;
+      // The command can reject after the user switches tabs or workspaces,
+      // or after a terminal event already closed this request.
+      if (context?.workspace_id !== sessionContext.workspace_id ||
+          context?.core_instance_id !== sessionContext.core_instance_id || terminalRequests.has(requestId)) return;
+      if (sessionContext.session_id && sessionContext.session_id !== state.activeSessionId &&
+          sessionViews.get(sessionContext.session_id)?.requestId !== requestId) return;
+      const payload = { request_id: requestId, session_id: sessionContext.session_id };
+      const applyFailure = () => {
+        if (!isActiveEvent(payload)) return;
+        const errObj = err as { code?: string; message?: string } | undefined;
+        const lastIdx = state.messages.length - 1;
+        if (lastIdx >= 0 && state.messages[lastIdx].role === 'assistant') {
+          const content =
+            errObj?.code === 'not_connected'
+              ? 'No AI provider is connected yet. Click the "connect" button in the bottom status bar or open Settings to configure your API key.'
+              : errObj?.code === 'no_workspace'
+              ? 'No workspace is currently open. Open a folder to start using the autonomous coding agent.'
+              : `Could not reach the assistant: ${errObj?.message || 'Connection unavailable.'}`;
 
-        const updated = {
-          ...state.messages[lastIdx],
-          content,
-          status: 'error' as const,
-        };
-        const newMsgs = [...state.messages];
-        newMsgs[lastIdx] = updated;
-        state = {
-          ...state,
-          messages: newMsgs,
-          inFlight: false,
-          thinkingState: 'breathing',
-          streamingActivityLevel: 0,
-        };
-        notify();
-        this.checkAndExecuteNextQueued();
-      }
+          const updated = {
+            ...state.messages[lastIdx],
+            content,
+            status: 'error' as const,
+            terminalError: content,
+          };
+          const newMsgs = [...state.messages];
+          newMsgs[lastIdx] = updated;
+          state = {
+            ...state,
+            messages: newMsgs,
+            inFlight: false,
+            thinkingState: 'breathing',
+            streamingActivityLevel: 0,
+          };
+          terminalRequests.add(requestId);
+          activeRequestId = null;
+          notify();
+          this.checkAndExecuteNextQueued();
+        }
+      };
+      if (!this.routeSessionEvent(payload, applyFailure)) applyFailure();
     });
     return true;
   },
@@ -2726,7 +2889,7 @@ const activeSessionId =
     if (lastMsgIndex >= 0) {
       const lastMsg = state.messages[lastMsgIndex];
       if (lastMsg && lastMsg.role === 'assistant') {
-        const updated = { ...lastMsg, status: 'complete' as const };
+        const updated = { ...lastMsg, status: lastMsg.status === 'error' ? 'error' as const : 'complete' as const };
         const newMessages = [...state.messages];
         newMessages[lastMsgIndex] = updated;
         state = { ...state, messages: newMessages };
@@ -2768,6 +2931,12 @@ const activeSessionId =
 
   handleChatCompleted(payload: ChatCompletedPayload) {
     if (!isActiveEvent(payload)) return;
+    const lastIndex = state.messages.length - 1;
+    if (lastIndex >= 0 && state.messages[lastIndex]?.role === 'assistant') {
+      const messages = [...state.messages];
+      messages[lastIndex] = { ...messages[lastIndex]!, id: payload.message_id, content: payload.text };
+      state = { ...state, messages };
+    }
     this.completeActiveTurn({
       totalTokens: payload.total_tokens,
       costUsd: payload.cost_usd,
