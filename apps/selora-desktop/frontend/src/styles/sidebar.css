@@ -24,10 +24,10 @@
   right: 12px;
   z-index: 50;
   padding: 6px 10px;
-  background: var();
+  background: var(--ink-mid);
   border: 1px solid var(--c-rgba-255-255-255-0p12);
   border-radius: var(--radius-2, 6px);
-  color: var();
+  color: var(--moonlight-200);
   font-size: 11px;
   line-height: 1.4;
   text-align: center;
@@ -77,12 +77,12 @@
 .no-folder-heading {
   font-size: 11.5px;
   font-weight: 600;
-  color: var();
+  color: var(--fg-default);
 }
 
 .no-folder-hint {
   font-size: 10.5px;
-  color: var();
+  color: var(--fg-muted);
   font-style: italic;
 }
 
@@ -93,8 +93,8 @@
   font-weight: 500;
   border-radius: var(--radius-1, 4px);
   background: transparent;
-  border: 1px solid var();
-  color: var();
+  border: 1px solid var(--ink-hi);
+  color: var(--fg-muted);
   cursor: default;
 }
 
@@ -124,7 +124,7 @@
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: var();
+  color: var(--fg-muted);
   text-transform: uppercase;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -147,14 +147,14 @@
   background: transparent;
   border: none;
   border-radius: var(--radius-1, 3px);
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
 
 .tree-action-btn:hover {
   background: var(--glow-accent);
-  color: var();
+  color: var(--fg-default);
 }
 
 .is-spinning {
@@ -185,12 +185,12 @@
 .tree-inline-input {
   flex: 1;
   min-width: 0;
-  background: var();
+  background: var(--ink-canvas);
   border: 1px solid var(--c-rgba-255-255-255-0p2);
   border-radius: 2px;
   padding: 1px 4px;
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   outline: none;
 }
 
@@ -219,7 +219,7 @@
   gap: 6px;
   cursor: pointer;
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   transition: background 0.1s ease;
   border-radius: 3px;
 }
@@ -259,7 +259,7 @@
 }
 
 .chevron-icon {
-  color: var();
+  color: var(--fg-muted);
   transition: transform 0.12s ease;
 }
 
@@ -316,7 +316,7 @@
 }
 
 .default-file-icon {
-  color: var();
+  color: var(--fg-muted);
   flex-shrink: 0;
 }
 
@@ -363,7 +363,7 @@
   background: transparent;
   border: none;
   border-radius: 2px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
 }
 
