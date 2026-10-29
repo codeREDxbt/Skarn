@@ -1,4 +1,4 @@
-# Selora IDE — Stability Plan
+﻿# Selora IDE â€” Stability Plan
 
 Status: active. Started 2026-10-29.
 Scope: stability only. No new features, no style refactors.
@@ -47,7 +47,7 @@ names and checks below were verified against the real repository.
 
 ## Real gaps and priorities
 
-### P1 — Data safety (owner: data-safety)
+### P1 â€” Data safety (owner: data-safety)
 - No hot-exit store: unsaved buffers are not continuously persisted, so a
   process kill or power cut loses edits. Add a workspace-scoped, atomic,
   size-capped snapshot of dirty buffers plus restore-on-boot that never
@@ -56,37 +56,37 @@ names and checks below were verified against the real repository.
   line endings/encoding; verify CRLF/LF and UTF-8 round-trip.
 - Snapshot cleanup: stale/mismatched-workspace snapshots must be discarded.
 
-### P2 — Crash handling (owner: crash) — queued
+### P2 â€” Crash handling (owner: crash) â€” queued
 - Panic log is a single non-rotating temp file; move to app-data logs with
   rotation and add an "Open Logs" command.
 - Audit `unwrap`/`expect`/`panic!` and unchecked indexing in non-test code on
   request paths; prefer typed errors.
 - Optional: attempt dirty-buffer snapshot in the panic hook.
 
-### P3 — Responsiveness (owner: responsiveness)
+### P3 â€” Responsiveness (owner: responsiveness)
 - Confirm no blocking I/O on the UI thread for open/save/search/tree.
 - Add cancellation and caps for long searches and large file opens; define
   behaviour for minified/huge files.
 - Debounce repeated frontend events where needed.
 
-### P4 — Language servers (owner: lsp)
+### P4 â€” Language servers (owner: lsp)
 - Restart with exponential backoff and a retry cap; surface status; ensure a
   dead server never blocks typing.
 
-### P5 — Terminal and Git (owner: terminal-git)
+### P5 â€” Terminal and Git (owner: terminal-git)
 - Timeouts and cancellation for PTY spawn and git network operations; clean
   shutdown with no orphan children; clear typed errors.
 
-### P6 — AI (owner: ai) — queued while credential work finishes
+### P6 â€” AI (owner: ai) â€” queued while credential work finishes
 - Request timeouts, visible cancel, retry/backoff, typed bad-key/network
   errors, chat history preserved on failure, AI failure isolated from editor.
 
-### P7 — Tests (owner: tests) — queued until feature work lands
+### P7 â€” Tests (owner: tests) â€” queued until feature work lands
 - Inline unit tests only (`#[cfg(test)]`). The public tree intentionally omits
   top-level `tests/` directories and screenshots, so do not recreate them.
 - Cover buffer edit/undo, atomic save, hot-exit restore, conflict handling.
 
-### P8 — CI and release (owner: ci)
+### P8 â€” CI and release (owner: ci)
 - Keep the existing gates green. Add a lightweight startup/large-file smoke
   check that fails on regression. Document unsigned-installer and updater
   signing requirements; never invent keys.
@@ -263,8 +263,8 @@ Remaining risks (documented, not silently ignored):
   frontend 196 tests green, clippy/fmt/deny green, release build green, and the
   live desktop walkthrough passed 14/14 steps with zero renderer or console
   errors. Installer `installer/output/Selora-IDE-Setup-0.1.0.exe`
-  (10,054,701 bytes, SHA-256
-  `facaa55ca92c84a0fcc5d69c77ae542439c75287596099933305aedc2927ed54`,
+  (10,054,587 bytes, SHA-256
+  `5c4871ac1e2b3a2cb9980b849a622853239a5b87ee01e4a9e8c79110680cac4d`,
   version 0.1.0, unsigned). Publishing to GitHub is intentionally NOT done.
   E2E caught one real regression (preview tab accessible name broke the tab
   selector); it was fixed by moving the preview hint to `aria-description`.
