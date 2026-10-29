@@ -395,7 +395,7 @@
   border: none;
   border-radius: 4px;
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   cursor: pointer;
   text-align: left;
   transition: background 0.1s ease;
@@ -417,7 +417,7 @@
   margin-left: auto;
   font-family: var(--font-mono, monospace);
   font-size: 9px;
-  color: var();
+  color: var(--fg-muted);
   padding: 1px 4px;
   background: var(--c-rgba-255-255-255-0p04);
   border-radius: 2px;
@@ -461,12 +461,12 @@
   background: transparent;
   border: none;
   border-radius: 2px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
 }
 
 .search-chevron-btn:hover {
-  color: var();
+  color: var(--fg-default);
 }
 
 .replace-indent-spacer {
@@ -492,7 +492,7 @@
 }
 
 .search-field-prefix-icon {
-  color: var();
+  color: var(--fg-muted);
   display: inline-flex;
   align-items: center;
 }
@@ -503,7 +503,7 @@
   background: transparent;
   border: none;
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   outline: none;
 }
 
@@ -513,13 +513,13 @@
   justify-content: center;
   background: transparent;
   border: none;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   padding: 0;
 }
 
 .search-clear-btn:hover {
-  color: var();
+  color: var(--fg-default);
 }
 
 .search-modifiers-group {
@@ -540,14 +540,14 @@
   border-radius: 2px;
   font-family: var(--font-mono, monospace);
   font-size: 10px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   transition: all 0.1s;
 }
 
 .modifier-btn:hover {
   background: var(--glow-accent);
-  color: var();
+  color: var(--fg-default);
 }
 
 .modifier-btn.is-active {
@@ -563,7 +563,7 @@
   background: var(--c-rgba-255-255-255-0p06);
   border: 1px solid var(--c-rgba-255-255-255-0p1);
   border-radius: 3px;
-  color: var();
+  color: var(--fg-default);
   cursor: pointer;
 }
 
@@ -585,11 +585,11 @@
 
 .search-count-label {
   font-size: 11px;
-  color: var();
+  color: var(--fg-muted);
 }
 
 .search-count-label strong {
-  color: var();
+  color: var(--moonlight-200);
 }
 
 .search-header-actions {
@@ -601,7 +601,7 @@
   background: transparent;
   border: none;
   font-size: 10.5px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   padding: 0;
 }
@@ -641,18 +641,18 @@
 .search-file-chevron {
   display: inline-flex;
   align-items: center;
-  color: var();
+  color: var(--fg-muted);
 }
 
 .search-file-name {
   font-size: 11.5px;
   font-weight: 600;
-  color: var();
+  color: var(--fg-default);
 }
 
 .search-file-path-hint {
   font-size: 10px;
-  color: var();
+  color: var(--fg-faint);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -665,7 +665,7 @@
   padding: 1px 6px;
   border-radius: 10px;
   background: var(--glow-accent);
-  color: var();
+  color: var(--moonlight-400);
 }
 
 .search-match-lines-list {
@@ -686,13 +686,13 @@
   cursor: pointer;
   font-family: var(--font-mono, monospace);
   font-size: 11px;
-  color: var();
+  color: var(--fg-muted);
   transition: background 0.1s;
 }
 
 .search-match-line-row:hover {
   background: var(--c-rgba-255-255-255-0p06);
-  color: var();
+  color: var(--fg-default);
 }
 
 .search-match-line-row.is-selected {
@@ -701,7 +701,7 @@
 }
 
 .match-line-number {
-  color: var();
+  color: var(--fg-faint);
   min-width: 20px;
   text-align: right;
   flex-shrink: 0;
@@ -755,7 +755,7 @@
 .git-branch-name {
   font-size: 11.5px;
   font-weight: 600;
-  color: var();
+  color: var(--moonlight-200);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -787,7 +787,7 @@
   background: transparent;
   border: none;
   border-radius: 3px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
 }
 
@@ -812,7 +812,7 @@
   padding: 8px;
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   resize: vertical;
   min-height: 54px;
   outline: none;
@@ -831,7 +831,7 @@
 
 .git-char-count {
   font-size: 10px;
-  color: var();
+  color: var(--fg-faint);
 }
 
 .git-commit-btn {
@@ -896,14 +896,14 @@
 .git-section-toggle {
   display: inline-flex;
   align-items: center;
-  color: var();
+  color: var(--fg-muted);
 }
 
 .git-section-title {
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.05em;
-  color: var();
+  color: var(--fg-muted);
 }
 
 .git-count-pill {
@@ -912,7 +912,7 @@
   padding: 1px 6px;
   border-radius: 10px;
   background: var(--c-rgba-255-255-255-0p06);
-  color: var();
+  color: var(--moonlight-400);
 }
 
 .git-section-actions {
@@ -930,7 +930,7 @@
   background: transparent;
   border: none;
   border-radius: 2px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   font-weight: 700;
 }
@@ -949,7 +949,7 @@
 
 .git-empty-hint {
   font-size: 11px;
-  color: var();
+  color: var(--fg-faint);
   font-style: italic;
   padding: 4px 0;
 }
@@ -962,7 +962,7 @@
   border-radius: 3px;
   cursor: pointer;
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-default);
   transition: background 0.1s;
 }
 
@@ -980,7 +980,7 @@
 
 .git-file-dir {
   font-size: 10px;
-  color: var();
+  color: var(--fg-faint);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1032,7 +1032,7 @@
   background: transparent;
   border: none;
   border-radius: 2px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   font-weight: 700;
 }
@@ -1073,7 +1073,7 @@
 
 .diff-file-label {
   font-size: 11px;
-  color: var();
+  color: var(--moonlight-400);
 }
 
 .diff-file-label strong {
@@ -1084,7 +1084,7 @@
   background: transparent;
   border: none;
   font-size: 14px;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   line-height: 1;
 }
@@ -1123,11 +1123,11 @@
 }
 
 .git-diff-line.is-same {
-  color: var();
+  color: var(--fg-muted);
 }
 
 .diff-line-no {
-  color: var();
+  color: var(--fg-faint);
   min-width: 18px;
   flex-shrink: 0;
 }
@@ -1163,14 +1163,14 @@
   border-radius: 4px;
   font-size: 10.5px;
   font-weight: 500;
-  color: var();
+  color: var(--fg-muted);
   cursor: pointer;
   transition: all 0.12s;
   white-space: nowrap;
 }
 
 .settings-tab-btn:hover {
-  color: var();
+  color: var(--fg-default);
 }
 
 .settings-tab-btn.is-active {
@@ -1230,7 +1230,7 @@
 .settings-card-hint {
   margin: 0;
   font-size: 11px;
-  color: var();
+  color: var(--fg-muted);
   line-height: 1.4;
 }
 
@@ -1269,7 +1269,7 @@
 
 .settings-label {
   font-size: 11.5px;
-  color: var();
+  color: var(--fg-muted);
   flex: 1;
 }
 
@@ -1279,7 +1279,7 @@
   border-radius: 4px;
   padding: 3px 6px;
   font-size: 11px;
-  color: var();
+  color: var(--fg-default);
   outline: none;
   cursor: pointer;
   max-width: 140px;
@@ -1298,7 +1298,7 @@
   border-radius: 4px;
   padding: 3px 6px;
   font-size: 11px;
-  color: var();
+  color: var(--fg-default);
   outline: none;
 }
 
@@ -1388,7 +1388,7 @@
 }
 
 .keybind-search-icon {
-  color: var();
+  color: var(--fg-muted);
 }
 
 .keybind-search-input {
@@ -1396,7 +1396,7 @@
   background: transparent;
   border: none;
   font-size: 11px;
-  color: var();
+  color: var(--fg-default);
   outline: none;
 }
 
@@ -1419,7 +1419,7 @@
   background: var(--c-rgba-255-255-255-0p03);
   font-size: 10px;
   font-weight: 600;
-  color: var();
+  color: var(--fg-muted);
   border-bottom: 1px solid var(--c-rgba-255-255-255-0p06);
 }
 
@@ -1439,12 +1439,12 @@
 }
 
 .keybinding-cmd-name {
-  color: var();
+  color: var(--fg-default);
 }
 
 .keybinding-category {
   font-size: 9.5px;
-  color: var();
+  color: var(--fg-faint);
 }
 
 .keybinding-key-cell {
@@ -1460,7 +1460,7 @@
   border: 1px solid var(--c-rgba-255-255-255-0p12);
   border-radius: 3px;
   padding: 1px 5px;
-  color: var();
+  color: var(--moonlight-200);
 }
 
 .settings-footer-info {
@@ -1471,7 +1471,7 @@
 
 .settings-later {
   font-size: 11px;
-  color: var();
+  color: var(--fg-faint);
   margin: 0;
 }
 
