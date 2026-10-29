@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { ChevronRight } from '../../../components/icons';
 import type { ChatMessage, SubagentInfo } from '../types';
 import { MarkdownMessage } from './MarkdownMessage';
+import { PET_WORLD_LABEL, PetWorldBadge, petWorldFor } from './SubagentPets';
 import { ToolCard } from './ToolCard';
 import './subagent-session-view.css';
 
@@ -42,6 +43,7 @@ export function SubagentSessionView({ child, parentTitle, onBack }: SubagentSess
   const status = liveStatus(child);
   const hasOutput = hasStreamedOutput(child.messages);
   const displayName = child.name?.trim() || child.id;
+  const world = petWorldFor(child.id);
 
   // Keyboard users land on the way back first, not inside the transcript.
   useEffect(() => {
@@ -65,11 +67,6 @@ export function SubagentSessionView({ child, parentTitle, onBack }: SubagentSess
           <ChevronRight size={13} aria-hidden="true" style={{ transform: 'scaleX(-1)' }} />
           <span>Back to parent</span>
         </button>
-        <div className="subagent-session-identity">
-          <strong className="subagent-session-name">{displayName}</strong>
-          <code className="subagent-session-id">{child.id}</code>
-        </div>
-        <span className="subagent-session-policy">{child.policy ?? 'Policy unknown'}</span>
         <span
           className={`subagent-session-status${running ? ' is-live' : ''}${child.status === 'failed' ? ' is-failed' : ''}`}
           role="status"
@@ -77,6 +74,15 @@ export function SubagentSessionView({ child, parentTitle, onBack }: SubagentSess
           {running && <span className="subagent-session-status-dot" aria-hidden="true" />}
           {status}
         </span>
+        <div className="subagent-session-identity">
+          <span className="subagent-session-world" data-world={world}>
+            <PetWorldBadge world={world} />
+            <span>{PET_WORLD_LABEL[world]}</span>
+          </span>
+          <strong className="subagent-session-name" title={displayName}>{displayName}</strong>
+          <code className="subagent-session-id" title={child.id}>{child.id}</code>
+        </div>
+        <span className="subagent-session-policy">{child.policy ?? 'Policy unknown'}</span>
       </header>
 
       {child.activeTool && (

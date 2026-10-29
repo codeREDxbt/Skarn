@@ -1,7 +1,8 @@
 ﻿# Selora IDE â€” Stability Plan
 
 Status: active. Started 2026-10-29.
-Scope: stability only. No new features, no style refactors.
+Scope: stability and the explicitly requested celestial-agent UI and compact-task fixes.
+Unrelated new features and broad style refactors remain out of scope.
 
 This plan replaces the draft supplied from a README-only review. Paths, crate
 names and checks below were verified against the real repository.
@@ -270,3 +271,75 @@ Remaining risks (documented, not silently ignored):
   selector); it was fixed by moving the preview hint to `aria-description`.
   A pre-existing `sidebar.css` block of empty `var()` references was made
   valid with the inherited foreground token.
+
+## Agent UI follow-up (2026-10-29)
+
+- Work stays in MAIN. Recovery worktrees must not overwrite this tree.
+- The previous installer and the verification above predate these changes.
+  They are historical evidence, not proof of the current working tree.
+- Added Earth, Mars, Jupiter and Saturn to the existing Sun, Moon, Star,
+  Comet, Nebula and Orbit worlds. Each real child keeps deterministic art and
+  routes to its own transcript. Earth is a decorative Agent-view shortcut when
+  no child exists, not a fabricated running subagent or a readiness claim.
+- Consolidated duplicate task panels into one collapsed 32px summary. Expanded
+  tasks have their own scroll region capped at 180px; chat retains its own
+  flexible scroll region. Small-window desktop checks are pending.
+- Shared celestial badges and visible world labels now also appear in child
+  result rows and transcript headers. The child-results area is height-bounded
+  and scrollable, rather than growing with every spawned child.
+- Added 8 task interaction regressions and 26 pet tests. Task expansion resets
+  on parent-session changes and reserves transcript space separately from the
+  composer. The full Plan tab remains available in short dock layouts.
+- Replaced the earlier count-only transcript patch with store-level recovery
+  coverage (39 hydration tests): immutable snapshots, lagging same-length text,
+  optimistic/backend ID reconciliation, reconnect assistant rows, terminal
+  authority, missed-terminal recovery, request routing, and session-scoped
+  delayed send failures, terminal-request snapshots, retained errors/cancellation
+  markers, and retry invalidation. The earlier explanation did not establish the sole
+  cause of the reported live UI symptom; no real-provider reproduction is claimed.
+- Current checks: Rust workspace tests, format check and
+  workspace clippy with warnings denied pass. Dependency policy passes with
+  existing duplicate-dependency warnings. Frontend production build passes with
+  the existing large-chunk warning. The full frontend suite now passes 262 tests
+  across 34 files, including the final terminal-history preservation regressions.
+- Layout fixtures use explicitly simulated events in an isolated browser.
+  Those checks cannot prove real provider streaming or backend
+  subagent spawning. No gateway request or GitHub publication is authorized by
+  these checks. Signing and public-history limitations above remain open.
+- The release desktop walkthrough passed 14/14 checks with zero renderer errors
+  before the final terminal-preservation changes. The running isolated desktop
+  subsequently acquired a live conversation and two child sessions; it is now
+  treated as user work and was not closed, reloaded or seeded by tests.
+  Its profile and workspace are preserved. The running generated binary was
+  renamed to `target/release/selora-desktop.previous-16424.exe` so the new
+  release binary could be built without terminating it. Final visual fixture
+  checks ran in a separate browser, not in that desktop conversation.
+- Final gates after all fixes: `cargo fmt --check`, workspace clippy `-D
+  warnings`, `cargo test --workspace --locked`, `cargo deny check`, frontend
+  typecheck, full frontend tests (272 across 34 files), frontend production
+  build, and `cargo build --release -p selora-desktop --locked` pass. The final
+  isolated 960x640/1440x900 visual fixture passes with six simulated children
+  and 30 todos; 12/12 celestial navigation checks pass with captured evidence.
+  No real provider/gateway streaming or backend-spawned child was exercised.
+- Final installer: `installer/output/Selora-IDE-Setup-0.1.0.exe`, 10,059,944
+  bytes, SHA-256
+  `1156a27ec3c7f8e4be0ef440497ea0eb00911b0271ad9c85a22c383c3214689f`,
+  ProductVersion 0.1.0, Authenticode NotSigned. A new desktop process was not
+  launched after packaging because the user's live conversation holds the
+  application instance; restarting or installing will load the final bundle.
+  The unsigned installer cannot be applied by the in-app updater and remains
+  unpublished.
+- Review also caught a pending-retry rejection race introduced by terminal
+  metadata retention. Guarded source-session restoration now covers that race,
+  with 6 additional regressions (92 targeted agent tests pass, including 45
+  hydration tests). A fresh full-suite/build gate is still required.
+- Isolated visual checks passed all 12 celestial identity/navigation cases but
+  found a real short-window layout failure: with 6 child results and 30 todos at
+  960x640, chat had only 48.80px and task details only 12.45px. Child results now
+  default to a compact 24px disclosure; a short-height rule caps the open list,
+  and expanded tasks reserve transcript space (`calc(100% - 130px)`).
+- Re-ran the same fixture with 6 children and both disclosures open: at 960x640
+  chat is 122px, task details 67px, and the final task and child row are reachable;
+  at 1440x900 chat is 149px. All 12 world/navigation checks still pass, drafts
+  survive pet visits, and there are zero uncaught errors. Evidence is local-only
+  under the approved temporary visual-fixture directory.

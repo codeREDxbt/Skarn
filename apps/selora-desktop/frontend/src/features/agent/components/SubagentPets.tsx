@@ -6,15 +6,20 @@
 // reloads. Clicking a pet opens that child's session and brings the agent
 // workbench forward. Purely decorative art lives in SVG/CSS — no emoji.
 import { agentStore } from '../agent-store';
+import type { ReactNode } from 'react';
 import type { SubagentInfo } from '../types';
 import './subagent-pets.css';
 
-export const PET_WORLDS = ['sun', 'moon', 'star', 'comet', 'nebula', 'orbit'] as const;
+export const PET_WORLDS = ['sun', 'moon', 'earth', 'mars', 'jupiter', 'saturn', 'star', 'comet', 'nebula', 'orbit'] as const;
 export type PetWorld = (typeof PET_WORLDS)[number];
 
 export const PET_WORLD_LABEL: Record<PetWorld, string> = {
   sun: 'Sun',
   moon: 'Moon',
+  earth: 'Earth',
+  mars: 'Mars',
+  jupiter: 'Jupiter',
+  saturn: 'Saturn',
   star: 'Star',
   comet: 'Comet',
   nebula: 'Nebula',
@@ -106,6 +111,51 @@ function WorldArt({ world }: { world: PetWorld }) {
           <circle cx="13.6" cy="7.4" r="1.9" opacity="0.75" />
         </g>
       );
+    case 'earth':
+      return (
+        <g className="pet-earth">
+          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="0.7" opacity="0.35" />
+          <circle cx="12" cy="12" r="7.4" fill="#0875b5" stroke="currentColor" strokeWidth="0.8" />
+          <path
+            d="M7 6.8 11 5l1.3 2.5-2 2.2-2.4-.2-.7 2.1-2.5-1.2Zm4 5 3 1 1.1 2.2-2.8 4-1.4-3.3Zm4-5.6 3.1 2.3.8 3.3-3.4-.8-1.3-2.2Z"
+            fill="#6ee7a0"
+          />
+        </g>
+      );
+    case 'mars':
+      return (
+        <g className="pet-mars">
+          <circle cx="12" cy="12" r="7.5" />
+          <circle cx="9" cy="9" r="1.7" fill="#963d36" opacity="0.8" />
+          <circle cx="14.5" cy="14" r="2.1" fill="#963d36" opacity="0.6" />
+          <path d="m8 16 3 1.2M14 7l2 1" fill="none" stroke="#ffd0aa" strokeWidth="1" />
+        </g>
+      );
+    case 'jupiter':
+      return (
+        <g className="pet-jupiter">
+          <circle cx="12" cy="12" r="8" fill="#e5b98b" />
+          <path d="M7 7h10M5 10h14M4.5 13h15M6.5 17h11" fill="none" stroke="#a96548" strokeWidth="1.5" />
+          <ellipse cx="14.5" cy="14" rx="2" ry="1.2" fill="#b94b36" />
+        </g>
+      );
+    case 'saturn':
+      return (
+        <g className="pet-saturn">
+          <ellipse cx="12" cy="12" rx="10" ry="3.6" fill="none" stroke="#b18a43" strokeWidth="2.2" transform="rotate(-20 12 12)" />
+          <circle cx="12" cy="12" r="5.5" />
+          <ellipse
+            cx="12"
+            cy="12"
+            rx="10"
+            ry="3.6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1"
+            transform="rotate(-20 12 12)"
+          />
+        </g>
+      );
     case 'orbit':
       return (
         <>
@@ -126,6 +176,18 @@ function WorldArt({ world }: { world: PetWorld }) {
         </>
       );
   }
+}
+
+/** Shared celestial art for title-bar pets and the agent's child-session surfaces. */
+export function PetWorldBadge({ world, children }: { world: PetWorld; children?: ReactNode }) {
+  return (
+    <span className={`subagent-pet-world world-${world}`} aria-hidden="true">
+      <svg className={`subagent-pet-art art-${world}`} viewBox="0 0 24 24" focusable="false">
+        <WorldArt world={world} />
+      </svg>
+      {children}
+    </span>
+  );
 }
 
 export type SubagentPetsProps = {
@@ -157,16 +219,37 @@ export function SubagentPets({
   maxVisible = Number.POSITIVE_INFINITY,
 }: SubagentPetsProps) {
   const pets = petsForSession(subagents, activeSessionId);
-  if (pets.length === 0) return null;
-
-  const limit = Number.isFinite(maxVisible) ? Math.max(1, Math.floor(maxVisible)) : pets.length;
-  const visible = pets.slice(0, limit);
-  const hiddenCount = pets.length - visible.length;
+  const companionWorld: PetWorld = 'earth';
 
   const activate = (childId: string) => {
     openSubagentSession(childId);
     onSelectViewMode?.('agent');
   };
+
+  // If no child subagents are spawned yet, render an interactive celestial companion
+  // so Earth/Moon/Sun worlds are always present in the title bar!
+  if (pets.length === 0) {
+    return (
+      <div className="subagent-pets subagent-pets-companion" role="group" aria-label="Celestial Companion">
+        <button
+          type="button"
+          className={`subagent-pet is-companion world-${companionWorld}`}
+          data-world={companionWorld}
+          onClick={() => onSelectViewMode?.('agent')}
+          onPointerDown={(event) => event.stopPropagation()}
+          title="Earth companion • Open Agent view (not a running subagent)"
+          aria-label="Celestial companion Earth (Click to open Agent view)"
+        >
+          <PetWorldBadge world={companionWorld} />
+          <span className="subagent-pet-name">Earth</span>
+        </button>
+      </div>
+    );
+  }
+
+  const limit = Number.isFinite(maxVisible) ? Math.max(1, Math.floor(maxVisible)) : pets.length;
+  const visible = pets.slice(0, limit);
+  const hiddenCount = pets.length - visible.length;
 
   return (
     <div
@@ -210,10 +293,7 @@ export function SubagentPets({
               activate(child.id);
             }}
           >
-            <span className="subagent-pet-world" aria-hidden="true">
-              <svg className={`subagent-pet-art art-${world}`} viewBox="0 0 24 24" focusable="false">
-                <WorldArt world={world} />
-              </svg>
+            <PetWorldBadge world={world}>
               {terminal ? (
                 <svg
                   className={`subagent-pet-mark mark-${child.status}`}
@@ -227,7 +307,7 @@ export function SubagentPets({
                   )}
                 </svg>
               ) : null}
-            </span>
+            </PetWorldBadge>
             <span className="subagent-pet-name">{label}</span>
           </button>
         );

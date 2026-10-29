@@ -14,7 +14,6 @@ import { agentStore, getComposerGate } from '../features/agent/agent-store';
 import { AgentSessionTabs } from '../features/agent/components/AgentSessionTabs';
 import { AgentSessionContextMenu } from '../features/agent/components/AgentSessionContextMenu';
 import { AgentSessionRail } from '../features/agent/components/AgentSessionRail';
-import { AgentTodoSpine } from '../features/agent/components/AgentTodoSpine';
 import { AgentExecutionFeed } from '../features/agent/components/AgentExecutionFeed';
 import { AgentPlanSpine } from '../features/agent/components/AgentPlanSpine';
 import { AgentComposer } from '../features/agent/components/AgentComposer';
@@ -58,6 +57,8 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
   const menuSession = state.sessions.find((session) => session.id === sessionMenu?.sessionId);
 
   const hasMessages = state.messages.length > 0;
+  const completedTodoCount = state.todos.filter((todo) => todo.status === 'completed').length;
+  const currentTask = state.todos.find((todo) => todo.status === 'in_progress')?.text;
   // Only a backend-reported workspace with a real root earns a name line.
   const workspaceName =
     state.workspace?.root &&
@@ -91,8 +92,12 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
     : undefined;
 
   useEffect(() => {
-    if (state.revealedSubagentId) setActiveTab('plan');
+    if (state.revealedSubagentId) setActiveTab('feed');
   }, [state.revealedSubagentId]);
+
+  useEffect(() => {
+    setInfeedPlanExpanded(false);
+  }, [state.activeSessionId]);
 
   const suggestions = SUGGESTIONS.filter((suggestion) => {
     if (suggestion === 'Explain this file') return editor.activeBuffer !== null;
@@ -284,89 +289,95 @@ export function AgentDock({ bootstrap, onExit }: AgentDockProps = {}) {
               </div>
             )}
 
-            {/* The live spine is always present; an absent list says so. */}
-            <AgentTodoSpine todos={state.todos} inFlight={state.inFlight} />
-
-            {/* Quick in-feed progress card whenever todos are present. */}
-            {state.todos.length > 0 && (
-              <div className="zcode-infeed-progress-wrap">
-                <button
-                  type="button"
-                  className="zcode-infeed-progress-toggle"
-                  onClick={() => setInfeedPlanExpanded(!infeedPlanExpanded)}
-                  aria-expanded={infeedPlanExpanded}
-                  aria-controls="zcode-infeed-progress-body"
-                >
-                  <div className="infeed-left">
-                    <span className="infeed-label">Plan &amp; Progress</span>
-                    <span className="infeed-pill">
-                      {state.todos.filter((t) => t.status === 'completed').length}/{state.todos.length}
+            <div className="agent-chat-content">
+              {/* Compact collapsible todo progress bar */}
+              {state.todos.length > 0 && (
+                <div className={`zcode-infeed-progress-wrap${infeedPlanExpanded ? ' is-expanded' : ''}`}>
+                  <button
+                    type="button"
+                    className="zcode-infeed-progress-toggle"
+                    onClick={() => setInfeedPlanExpanded(!infeedPlanExpanded)}
+                    aria-expanded={infeedPlanExpanded}
+                    aria-controls="zcode-infeed-progress-body"
+                    title={currentTask ? `Current: ${currentTask}` : undefined}
+                  >
+                    <span className="infeed-left">
+                      <span className="infeed-label">
+                        Tasks ({completedTodoCount}/{state.todos.length})
+                      </span>
+                      {currentTask ? (
+                        <>
+                          <span className="infeed-bullet" aria-hidden="true">•</span>
+                          <span className="infeed-current-task">{currentTask}</span>
+                        </>
+                      ) : null}
                     </span>
-                  </div>
-                  <div className="infeed-right">
-                    <span className="infeed-action">
-                      {infeedPlanExpanded ? 'Collapse' : 'View tasks'}
-                    </span>
-                    <ChevronDown
-                      size={12}
-                      style={{
-                        transform: infeedPlanExpanded ? 'rotate(180deg)' : 'none',
-                        transition: 'transform 150ms ease',
-                      }}
-                    />
-                  </div>
-                </button>
-                {infeedPlanExpanded && (
-                  <div id="zcode-infeed-progress-body" className="zcode-infeed-expanded-body">
-                    <AgentPlanSpine
-                      todos={state.todos}
-                      gitStatus={bootstrap?.git}
-                      isCompactInfeed={true}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-
-            {hasMessages ? (
-              <AgentExecutionFeed
-                messages={state.messages}
-                inFlight={state.inFlight}
-                thinkingState={state.thinkingState}
-                metrics={state.metrics}
-                promptQueue={state.promptQueue}
-              />
-            ) : (
-              <div className="agent-body">
-                <div className="agent-welcome">
-                  <h2 className="agent-welcome-heading">What are we building today?</h2>
-                  <p className="agent-welcome-sub">Ask about the code, or describe a change.</p>
-                  {workspaceName ? (
-                    <p className="agent-welcome-workspace" title={workspaceName}>
-                      {workspaceName}
-                    </p>
-                  ) : null}
-                  <div className="agent-suggestions" role="group" aria-label="Suggested prompts">
-                    {suggestions.map((suggestion) => (
-                      <button
-                        key={suggestion}
-                        type="button"
-                        className="agent-chip"
-                        disabled={!gate.ready}
-                        title={gate.ready ? undefined : gate.message ?? undefined}
-                        onClick={() => {
-                          const context = activeEditorContext();
-                          if (context) agentStore.sendUserMessage(suggestion, false, context);
-                          else agentStore.sendUserMessage(suggestion);
+                    <span className="infeed-right">
+                      <span className="infeed-action">
+                        {infeedPlanExpanded ? 'Collapse' : 'View tasks'}
+                      </span>
+                      <ChevronDown
+                        size={12}
+                        aria-hidden="true"
+                        style={{
+                          transform: infeedPlanExpanded ? 'rotate(180deg)' : 'none',
+                          transition: 'transform 150ms ease',
                         }}
-                      >
-                        {suggestion}
-                      </button>
-                    ))}
+                      />
+                    </span>
+                  </button>
+                  {infeedPlanExpanded && (
+                    <div id="zcode-infeed-progress-body" className="zcode-infeed-expanded-body">
+                      <AgentPlanSpine
+                        todos={state.todos}
+                        gitStatus={bootstrap?.git}
+                        isCompactInfeed={true}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {hasMessages ? (
+                <AgentExecutionFeed
+                  messages={state.messages}
+                  inFlight={state.inFlight}
+                  thinkingState={state.thinkingState}
+                  metrics={state.metrics}
+                  promptQueue={state.promptQueue}
+                />
+              ) : (
+                <div className="agent-body">
+                  <div className="agent-welcome">
+                    <h2 className="agent-welcome-heading">What are we building today?</h2>
+                    <p className="agent-welcome-sub">Ask about the code, or describe a change.</p>
+                    {workspaceName ? (
+                      <p className="agent-welcome-workspace" title={workspaceName}>
+                        {workspaceName}
+                      </p>
+                    ) : null}
+                    <div className="agent-suggestions" role="group" aria-label="Suggested prompts">
+                      {suggestions.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          className="agent-chip"
+                          disabled={!gate.ready}
+                          title={gate.ready ? undefined : gate.message ?? undefined}
+                          onClick={() => {
+                            const context = activeEditorContext();
+                            if (context) agentStore.sendUserMessage(suggestion, false, context);
+                            else agentStore.sendUserMessage(suggestion);
+                          }}
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             <AgentComposer
               inFlight={state.inFlight}

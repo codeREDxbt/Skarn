@@ -7,10 +7,11 @@
 }
 
 .subagent-session-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-shrink: 0;
   padding: 9px 12px;
   border-bottom: 1px solid var(--ink-hi);
   font-size: 12px;
@@ -20,6 +21,8 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  justify-self: start;
+  white-space: nowrap;
   padding: 3px 8px;
   border: 1px solid var(--ink-hi);
   border-radius: 6px;
@@ -31,16 +34,21 @@
 .subagent-session-back:hover { background: var(--surface-hover); }
 .subagent-session-back:focus-visible { outline: 2px solid var(--fg-default); outline-offset: 1px; }
 
-.subagent-session-identity { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
-.subagent-session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
-.subagent-session-id { color: var(--fg-muted); font-size: 11px; overflow-wrap: anywhere; }
+.subagent-session-identity { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.subagent-session-world { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
+.subagent-session-world .subagent-pet-world { width: 24px; height: 24px; }
+.subagent-session-world .subagent-pet-art { width: 20px; height: 20px; }
+.subagent-session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
+.subagent-session-id { flex: 0 2 14ch; min-width: 0; color: var(--fg-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-session-policy {
   padding: 2px 6px;
   border: 1px solid var(--ink-hi);
   border-radius: 5px;
   font-size: 11px;
+  justify-self: end;
+  white-space: nowrap;
 }
-.subagent-session-status { margin-left: auto; font-size: 11px; color: var(--fg-muted); }
+.subagent-session-status { justify-self: end; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
 .subagent-session-status.is-live { color: var(--fg-default); }
 .subagent-session-status.is-failed { color: var(--err); }
 .subagent-session-status-dot {

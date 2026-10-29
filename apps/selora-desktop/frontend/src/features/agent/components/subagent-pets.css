@@ -114,39 +114,68 @@
   width: 14px;
   height: 14px;
   fill: currentColor;
-  color: var(--moonlight-400);
+  color: var(--world-color, var(--moonlight-400));
   overflow: visible;
   transform-origin: center;
 }
 
-.art-sun {
-  color: var(--moonlight-200);
-  --world-glow: color-mix(in srgb, var(--moonlight-200) 24%, transparent);
+.world-sun {
+  --world-color: #fbbf24;
+  --world-glow: color-mix(in srgb, #fbbf24 24%, transparent);
 }
 
-.art-moon {
-  color: var(--moonlight-400);
+.world-moon {
+  --world-color: #c4e5f5;
   --world-glow: color-mix(in srgb, var(--moonlight-400) 18%, transparent);
 }
 
-.art-star {
-  color: var(--moonlight-300);
+.world-star {
+  --world-color: var(--moonlight-300);
   --world-glow: color-mix(in srgb, var(--moonlight-300) 20%, transparent);
 }
 
-.art-comet {
-  color: var(--moonlight-600);
+.world-comet {
+  --world-color: var(--moonlight-600);
   --world-glow: color-mix(in srgb, var(--moonlight-600) 20%, transparent);
 }
 
-.art-nebula {
-  color: var(--moonlight-700);
+.world-nebula {
+  --world-color: var(--moonlight-700);
   --world-glow: color-mix(in srgb, var(--moonlight-700) 22%, transparent);
 }
 
-.art-orbit {
-  color: var(--moonlight-500);
+.world-orbit {
+  --world-color: var(--moonlight-500);
   --world-glow: color-mix(in srgb, var(--moonlight-500) 18%, transparent);
+}
+
+.world-earth {
+  --world-color: #38bdf8;
+  --world-glow: color-mix(in srgb, #38bdf8 26%, transparent);
+}
+
+.world-mars {
+  --world-color: #fb7185;
+  --world-glow: color-mix(in srgb, #fb7185 24%, transparent);
+}
+
+.world-jupiter {
+  --world-color: #fb923c;
+  --world-glow: color-mix(in srgb, #fb923c 22%, transparent);
+}
+
+.world-saturn {
+  --world-color: #facc15;
+  --world-glow: color-mix(in srgb, #facc15 22%, transparent);
+}
+
+.subagent-pet.is-companion {
+  border-color: var(--hairline-faint);
+}
+
+.subagent-pet.is-companion:hover {
+  border-color: var(--world-color);
+  box-shadow: 0 0 10px var(--world-glow);
 }
 
 .pet-sun-rays,

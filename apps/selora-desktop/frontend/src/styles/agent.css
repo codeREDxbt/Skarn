@@ -656,6 +656,7 @@
 .agent-execution-feed {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -1612,24 +1613,42 @@
 
 /* ZCode In-Feed Progress Bar */
 .zcode-infeed-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 34px;
+  max-height: min(214px, 45%);
   margin: var(--space-2) var(--space-3) 0 var(--space-3);
-  background: var(--c-141418);
-  border: 1px solid var(--c-rgba-255-255-255-0p08);
-  border-radius: 8px;
+  background: var(--surface-panel, var(--c-141418));
+  border: 1px solid var(--border-subtle, var(--c-rgba-255-255-255-0p08));
+  border-radius: var(--radius-pill, 9999px);
   overflow: hidden;
   flex-shrink: 0;
-  box-shadow: 0 4px 12px var(--c-rgba-0-0-0-0p4);
+  box-shadow: 0 2px 8px var(--c-rgba-0-0-0-0p4);
+  transition: border-radius 150ms ease;
+}
+
+.zcode-infeed-progress-wrap.is-expanded {
+  border-radius: var(--radius-2, 8px);
+  /* Reserve a readable transcript budget before task details; the body
+     scrolls inside whatever remains instead of squeezing chat. */
+  max-height: min(214px, calc(100% - 130px));
 }
 
 .zcode-infeed-progress-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  width: 100%;
+  border: none;
   cursor: pointer;
   user-select: none;
   background: var(--c-rgba-255-255-255-0p02);
   transition: background 150ms ease;
+  font-family: inherit;
+  color: inherit;
 }
 
 .zcode-infeed-progress-toggle:hover {
@@ -1640,12 +1659,30 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .infeed-label {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  color: var(--c-e4e4e7);
+  color: var(--fg-default, var(--c-e4e4e7));
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.infeed-bullet {
+  font-size: 11px;
+  color: var(--fg-muted, var(--c-71717a));
+  flex-shrink: 0;
+}
+
+.infeed-current-task {
+  font-size: 11px;
+  color: var(--fg-muted, var(--c-71717a));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .infeed-pill {
@@ -1661,15 +1698,50 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--c-71717a);
+  color: var(--fg-muted, var(--c-71717a));
   font-size: 11px;
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 
 .zcode-infeed-expanded-body {
-  border-top: 1px solid var(--c-rgba-255-255-255-0p06);
-  padding: 8px;
-  max-height: 280px;
+  border-top: 1px solid var(--border-subtle, var(--c-rgba-255-255-255-0p06));
+  max-height: 180px;
+  min-height: 0;
+  flex: 0 1 auto;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-rgba-255-255-255-0p15) transparent;
+}
+
+.zcode-infeed-expanded-body > .agent-plan-spine {
+  padding: 4px;
+}
+
+/* In-feed details prioritize tasks; the full Plan tab keeps Git/progress facts. */
+.agent-plan-spine.is-compact-infeed .zcode-git-section,
+.agent-plan-spine.is-compact-infeed .zcode-card-divider,
+.agent-plan-spine.is-compact-infeed .zcode-progress-header,
+.agent-plan-spine.is-compact-infeed .plan-live-progress-container {
+  display: none;
+}
+
+.agent-plan-spine.is-compact-infeed .zcode-progress-section {
+  padding: 4px 8px;
+  gap: 6px;
+}
+
+.zcode-infeed-expanded-body::-webkit-scrollbar {
+  width: 5px;
+}
+
+.zcode-infeed-expanded-body::-webkit-scrollbar-thumb {
+  background: var(--c-rgba-255-255-255-0p15);
+  border-radius: 4px;
+}
+
+.zcode-infeed-expanded-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .zcode-todo-sub {
@@ -4428,6 +4500,16 @@
   flex-direction: column;
   overflow: hidden;
   position: relative;
+}
+
+/* Bound tasks against transcript space without counting the composer. */
+.agent-chat-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .agent-plan-scroll {

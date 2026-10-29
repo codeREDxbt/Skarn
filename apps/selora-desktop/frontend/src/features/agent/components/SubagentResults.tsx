@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Clock, X } from '../../../components/icons';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { ChevronDown } from '../../../components/icons';
 import type { SubagentInfo } from '../types';
+import { PET_WORLD_LABEL, PetWorldBadge, petWorldFor } from './SubagentPets';
 import './subagent-results.css';
 
 type SubagentResultsProps = {
@@ -40,21 +41,46 @@ export function SubagentResults({
   onOpenSession,
 }: SubagentResultsProps) {
   const children = subagents.filter((child) => child.parentSessionId === sessionId);
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+  const hasReveal = children.some((child) => child.id === revealedChildId);
+  const runningCount = children.filter((child) => child.status === 'working' || child.status === 'idle').length;
+  const unreadCount = children.filter((child) => child.unread).length;
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (hasReveal) setExpanded(true);
+  }, [sessionId, revealedChildId, hasReveal]);
+
   if (children.length === 0) return null;
 
   return (
-    <section className="subagent-results" aria-label="Subagent sessions">
-      <div className="subagent-results-heading">
-        <strong>Subagent sessions</strong>
-        <span>{children.length}</span>
-      </div>
-      <p className="subagent-results-note">Running and finished children. Open one to read its live transcript.</p>
-      <div className="subagent-results-list">
+    <section className={`subagent-results${expanded ? ' is-expanded' : ''}`} aria-label="Subagent sessions">
+      <button type="button" className="subagent-results-heading"
+        aria-label={`Subagent sessions (${children.length})`}
+        aria-describedby={`${listId}-counts`}
+        aria-expanded={expanded} aria-controls={listId}
+        onClick={() => {
+          setExpanded(!expanded);
+          if (expanded && revealedChildId) onClearReveal();
+        }}>
+        <strong>Subagents ({children.length})</strong>
+        <span id={`${listId}-counts`} className="subagent-results-counts">
+          {runningCount} running · {children.length - runningCount} finished
+          {unreadCount > 0 ? ` · ${unreadCount} unread` : ''}
+        </span>
+        <span className="subagent-results-action">{expanded ? 'Hide children' : 'Show children'}</span>
+        <ChevronDown size={12} aria-hidden="true" className={expanded ? 'is-expanded' : ''} />
+      </button>
+      {expanded && <div id={listId} className="subagent-results-list" role="group" aria-label="Child session list">
         {children.map((child) => (
           <SubagentResult key={child.id} child={child} revealed={revealedChildId === child.id}
             onRead={onRead} onClearReveal={onClearReveal} onOpenSession={onOpenSession} />
         ))}
-      </div>
+      </div>}
     </section>
   );
 }
@@ -75,6 +101,7 @@ function SubagentResult({ child, revealed, onRead, onClearReveal, onOpenSession 
   const detail = liveDetail(child);
   const bodyId = `subagent-result-body-${child.id}`;
   const displayName = child.name?.trim() || child.id;
+  const world = petWorldFor(child.id);
 
   useEffect(() => {
     if (!revealed) return;
@@ -88,29 +115,29 @@ function SubagentResult({ child, revealed, onRead, onClearReveal, onOpenSession 
       className={`subagent-result-card${failed ? ' is-failed' : cancelled ? ' is-cancelled' : running ? ' is-running' : ''}`}
       data-testid={expanded ? 'subagent-result' : undefined}
     >
-      <button ref={toggle} type="button" className="subagent-result-toggle"
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} result for ${displayName}`}
-        aria-describedby={`${bodyId}-summary`}
-        aria-expanded={expanded} aria-controls={bodyId}
-        onClick={() => {
-          setExpanded(!expanded);
-          if (!expanded) onRead(child.id);
-          if (revealed) onClearReveal();
-        }}>
-        {failed || cancelled ? <X size={14} aria-hidden="true" /> : running
-          ? <Clock size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
-        <span className="subagent-result-name">{displayName}</span>
-        <code className="subagent-result-id">{child.id}</code>
+      <div className="subagent-result-row">
+        <button ref={toggle} type="button" className="subagent-result-toggle"
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} result for ${displayName}`}
+          aria-describedby={`${bodyId}-summary`}
+          aria-expanded={expanded} aria-controls={bodyId}
+          onClick={() => {
+            setExpanded(!expanded);
+            if (!expanded) onRead(child.id);
+            if (revealed) onClearReveal();
+          }}>
+          <span className="subagent-result-world" data-world={world}>
+            <PetWorldBadge world={world} />
+            <span>{PET_WORLD_LABEL[world]}</span>
+          </span>
+          <span className="subagent-result-name" title={displayName}>{displayName}</span>
+          <span className={`subagent-result-status${running ? ' is-running' : ''}`}>{status}</span>
+          {child.unread && <span className="subagent-result-unread" aria-label="Unread result" />}
+          <ChevronDown size={13} aria-hidden="true" className={expanded ? 'is-expanded' : ''} />
+        </button>
+        <span id={`${bodyId}-summary`} className="visually-hidden">
+          {status}.{detail ? ` ${detail}.` : ''} Policy: {child.policy ?? 'unknown'}.{child.unread ? ' Unread result.' : ''}
+        </span>
         <span className="subagent-result-policy">{child.policy ?? 'Policy unknown'}</span>
-        <span className={`subagent-result-status${running ? ' is-running' : ''}`}>{status}</span>
-        {child.unread && <span className="subagent-result-unread" aria-label="Unread result" />}
-        <ChevronDown size={13} aria-hidden="true" className={expanded ? 'is-expanded' : ''} />
-      </button>
-      <span id={`${bodyId}-summary`} className="visually-hidden">
-        {status}.{detail ? ` ${detail}.` : ''} Policy: {child.policy ?? 'unknown'}.{child.unread ? ' Unread result.' : ''}
-      </span>
-      <div className="subagent-result-actions">
-        {detail && <span className="subagent-result-detail">{detail}</span>}
         <button type="button" className="subagent-result-open"
           onClick={() => onOpenSession(child.id)}>
           Open session
@@ -118,6 +145,7 @@ function SubagentResult({ child, revealed, onRead, onClearReveal, onOpenSession 
       </div>
       {expanded && (
         <div id={bodyId} className="subagent-result-content">
+          <code className="subagent-result-id" title={child.id}>{child.id}</code>
           {detail && <p className="subagent-result-live" role="status">{detail}</p>}
           {failed && <p className="subagent-result-error">{child.error || 'Subagent failed without a message.'}</p>}
           {cancelled && <p className="subagent-result-live">Subagent was cancelled.</p>}

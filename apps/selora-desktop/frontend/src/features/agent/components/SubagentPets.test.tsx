@@ -7,6 +7,7 @@ import { agentStore } from '../agent-store';
 import type { SubagentInfo } from '../types';
 import {
   PET_WORLDS,
+  PET_WORLD_LABEL,
   SubagentPets,
   petLabel,
   petWorldFor,
@@ -87,10 +88,50 @@ describe('pet derivation', () => {
 });
 
 describe('pet strip wiring', () => {
-  it('renders no pet until a matching child event exists', () => {
+  it('shows a companion without inventing a running child', () => {
     const { container } = render(<PetsFromStore sessionId={PARENT} />);
-    expect(container.firstChild).toBeNull();
+    const companion = screen.getByRole('button', { name: /Celestial companion Earth/ });
+    expect(companion.getAttribute('data-world')).toBe('earth');
+    expect(companion.getAttribute('data-status')).toBeNull();
+    expect(companion.title).toContain('not a running subagent');
+    expect(container.querySelector('svg.art-earth .pet-earth')).not.toBeNull();
+    expect(agentStore.getSnapshot().subagents).toEqual([]);
     expect(screen.queryByRole('group', { name: 'Subagent pets' })).toBeNull();
+  });
+
+  it('opens Agent view from the companion without selecting a fake session', () => {
+    const onSelectViewMode = vi.fn();
+    render(<SubagentPets subagents={[]} activeSessionId={PARENT} onSelectViewMode={onSelectViewMode} />);
+    fireEvent.click(screen.getByRole('button', { name: /Celestial companion Earth/ }));
+    expect(onSelectViewMode).toHaveBeenCalledWith('agent');
+    expect(agentStore.getSnapshot().activeSubagentId).toBeNull();
+    expect(agentStore.getSnapshot().activeSessionId).toBe(PARENT);
+  });
+
+  it('does not turn a companion press into a title-bar drag', () => {
+    const onPointerDown = vi.fn();
+    render(
+      <div onPointerDown={onPointerDown}>
+        <SubagentPets subagents={[]} activeSessionId={PARENT} />
+      </div>,
+    );
+    fireEvent.pointerDown(screen.getByRole('button', { name: /Celestial companion Earth/ }));
+    expect(onPointerDown).not.toHaveBeenCalled();
+  });
+
+  it.each(PET_WORLDS)('renders distinct %s art for real children', (world) => {
+    const id = Array.from({ length: 1000 }, (_, index) => `world-child-${index}`)
+      .find((candidate) => petWorldFor(candidate) === world)!;
+    expect(id).toBeDefined();
+    const child: SubagentInfo = {
+      id, name: `${world} task`, model: 'Auto', status: 'working', parentSessionId: PARENT,
+    };
+    render(<SubagentPets subagents={[child]} activeSessionId={PARENT} />);
+    const pet = screen.getByRole('button', { name: new RegExp(PET_WORLD_LABEL[world]) });
+    expect(pet.classList.contains(`world-${world}`)).toBe(true);
+    expect(pet.querySelector(`svg.art-${world}`)?.childElementCount).toBeGreaterThan(0);
+    expect(pet.getAttribute('data-status')).toBe('working');
+    expect(screen.queryByRole('group', { name: 'Celestial Companion' })).toBeNull();
   });
 
   it('shows a pet for the started child and ignores another parent child', () => {
@@ -143,6 +184,16 @@ describe('pet strip wiring', () => {
     expect(onSelectViewMode).toHaveBeenCalledWith('agent');
   });
 
+  it.each(['Enter', ' '])('opens the actual child once with the %s key', (key) => {
+    startChild('child-1', PARENT, 'Parser audit');
+    const onSelectViewMode = vi.fn();
+    render(<SubagentPets subagents={agentStore.getSnapshot().subagents} activeSessionId={PARENT} onSelectViewMode={onSelectViewMode} />);
+    fireEvent.keyDown(screen.getByRole('button', { name: /Parser audit/ }), { key });
+    expect(onSelectViewMode).toHaveBeenCalledTimes(1);
+    expect(agentStore.getSnapshot().activeSubagentId).toBe('child-1');
+    expect(agentStore.getSnapshot().activeSessionId).toBe(PARENT);
+  });
+
   it('marks a cancelled child and keeps its pet', () => {
     startChild('child-1', PARENT, 'Parser audit');
     agentStore.handleSubagentCancelled({ child_id: 'child-1', parent_session_id: PARENT });
@@ -192,7 +243,9 @@ describe('pet strip wiring', () => {
     agentStore.deleteSession(PARENT);
     render(<PetsFromStore sessionId={PARENT} />);
 
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Parser audit/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /Celestial companion Earth/ })).toBeDefined();
+    expect(agentStore.getSnapshot().subagents).toEqual([]);
   });
 
   it('renders store children inside the title bar and forwards the view switch', () => {
