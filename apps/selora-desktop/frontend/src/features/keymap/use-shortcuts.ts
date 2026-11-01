@@ -7,11 +7,12 @@
 // focus or the palette is open.
 import { useEffect } from 'react';
 import { keybindMatches, normalizeEventKey, type Keybind } from './keybind';
-import { resolveKeymap, type CommandId } from './commands';
+import { resolveKeymap, type CommandId, type CommandScope } from './commands';
 import { toastStore } from '../toasts/toast-store';
 import type { SettingsView } from '../../bridge/bridge';
 
 export type ShortcutOptions = {
+  scope?: CommandScope;
   settings: SettingsView | null;
   enabled: boolean;
   paletteOpen: boolean;
@@ -26,10 +27,10 @@ function isTextEntry(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
-export function useShortcuts({ settings, enabled, paletteOpen, onCommand, onClosePalette }: ShortcutOptions): void {
+export function useShortcuts({ settings, enabled, paletteOpen, onCommand, onClosePalette, scope = 'editor' }: ShortcutOptions): void {
   useEffect(() => {
     if (!enabled) return;
-    const keymap = resolveKeymap(settings);
+    const keymap = resolveKeymap(settings, scope);
     const ordered: Array<[CommandId, Keybind]> = [...keymap.entries()];
 
     const handler = (event: KeyboardEvent) => {
@@ -54,6 +55,19 @@ export function useShortcuts({ settings, enabled, paletteOpen, onCommand, onClos
       }
       // Everything else is inert while a modal is open or a text input has focus.
       if (paletteOpen) return;
+      const agentsBinding = keymap.get('selora.openAgentsWindow');
+      if (agentsBinding && keybindMatches(agentsBinding, event)) {
+        event.preventDefault();
+        onCommand('selora.openAgentsWindow');
+        return;
+      }
+      // Agents session creation remains available from its composer.
+      const newSessionBinding = keymap.get('selora.agentsNewSession');
+      if (newSessionBinding && keybindMatches(newSessionBinding, event)) {
+        event.preventDefault();
+        onCommand('selora.agentsNewSession');
+        return;
+      }
       // Closing the editor stays live inside the CodeMirror surface: its
       // contenteditable would otherwise swallow Ctrl+F4, and the tab-menu hint
       // promises it works from the editor.
@@ -76,5 +90,5 @@ export function useShortcuts({ settings, enabled, paletteOpen, onCommand, onClos
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [enabled, paletteOpen, settings, onCommand, onClosePalette]);
+  }, [enabled, paletteOpen, settings, onCommand, onClosePalette, scope]);
 }

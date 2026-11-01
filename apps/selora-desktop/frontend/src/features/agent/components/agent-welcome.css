@@ -63,4 +63,86 @@
     min-height: calc(var(--space-6) * 6); /* 192px */
     padding: var(--space-4) var(--space-2);
   }
+
+  .agent-welcome-brand-mark {
+    width: calc(var(--space-6) * 1.6);
+    height: calc(var(--space-6) * 1.6);
+  }
+
+  .agent-welcome-brand-ambient {
+    width: calc(var(--space-6) * 3);
+    height: calc(var(--space-6) * 3);
+  }
+}
+
+/* --- 3D Cosmic Brand Mark Stage (Empty State Hero) ------------------------ */
+
+.agent-welcome-brand {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: var(--space-3);
+  pointer-events: none;
+  user-select: none;
+  perspective: 600px;
+}
+
+.agent-welcome-brand-ambient {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--space-6) * 4.5);
+  height: calc(var(--space-6) * 4.5);
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.18) 0%, rgba(34, 197, 94, 0.08) 45%, transparent 72%);
+  filter: blur(24px);
+  pointer-events: none;
+  animation: float-subtle 4.5s ease-in-out infinite;
+}
+
+.agent-welcome-brand-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-style: preserve-3d;
+  animation: float-subtle 3.5s ease-in-out infinite;
+}
+
+.agent-welcome-pulse-ring {
+  position: absolute;
+  inset: -14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  animation: ripple-ring 2.8s cubic-bezier(0.2, 0.8, 0.4, 1) infinite;
+  pointer-events: none;
+}
+
+.agent-welcome-brand-mark {
+  width: calc(var(--space-6) * 2.3); /* ~73.6px optical hero size */
+  height: calc(var(--space-6) * 2.3);
+  transform-style: preserve-3d;
+}
+
+/* Reduced-motion compliance */
+@media (prefers-reduced-motion: reduce) {
+  .agent-welcome-brand-ambient,
+  .agent-welcome-brand-stage,
+  .agent-welcome-pulse-ring,
+  .agent-welcome-brand-mark .onboarding-ring-equator,
+  .agent-welcome-brand-mark .onboarding-ring-polar,
+  .agent-welcome-brand-mark .onboarding-brand-satellite {
+    animation: none !important;
+  }
+}
+
+:root[data-reduced-motion="true"] .agent-welcome-brand-ambient,
+:root[data-reduced-motion="true"] .agent-welcome-brand-stage,
+:root[data-reduced-motion="true"] .agent-welcome-pulse-ring,
+:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-ring-equator,
+:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-ring-polar,
+:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-brand-satellite {
+  animation: none !important;
 }

@@ -480,6 +480,86 @@ export type ChatCompletedPayload = {
   cost_usd: number;
 };
 
+export type AgentRequestDto = {
+  session_id: Id;
+  prompt: string;
+  model_id: string | null;
+  mode: AgentMode;
+  reasoning_effort?: 'quick' | 'standard' | 'max';
+  system_instructions?: string;
+  temperature?: number;
+  editor_context?: EditorContextDto;
+};
+
+export type AgentQueueItemDto = {
+  request_id: Id;
+  request: AgentRequestDto;
+  created_at: number;
+  status: 'queued' | 'starting' | 'failed';
+  error: ProtocolError | null;
+};
+
+export type AgentTimelineEntryDto = {
+  sequence: number;
+  event:
+    | { kind: 'message'; payload: Extract<FrontendEvent, { type: 'chat_delta' }>['payload'] }
+    | { kind: 'tool_call_started'; payload: ToolCallStartedPayload }
+    | { kind: 'tool_result'; payload: ToolResultPayload }
+    | { kind: 'chat_completed'; payload: ChatCompletedPayload }
+    | { kind: 'chat_failed'; payload: Extract<FrontendEvent, { type: 'chat_failed' }>['payload'] }
+    | { kind: 'agent_turn_done'; payload: AgentTurnDonePayload };
+};
+
+export type SubagentSnapshotDto = {
+  started: Extract<SubagentActivityPayload, { kind: 'started' }>;
+  state: SubagentActivityState;
+  tool_name: string | null;
+  timeline: SubagentActivityPayload[];
+  completed: SubagentCompletedPayload | null;
+  cancelled: boolean;
+};
+
+export type AgentSessionLiveDto = {
+  session_id: Id;
+  title: string;
+  created_at: number | null;
+  updated_at: number | null;
+  model_id: string | null;
+  mode: AgentMode;
+  durable: boolean;
+  active_request_id: Id | null;
+  active_turn_id: Id | null;
+  state: AgentPhase | null;
+  messages: ChatMessage[];
+  timeline: AgentTimelineEntryDto[];
+  approvals: ApprovalNeededPayload[];
+  plan_phase: PlanPhase;
+  plan: PlanApproval | null;
+  todos: TodoDto[];
+  queue: AgentQueueItemDto[];
+  subagents: SubagentSnapshotDto[];
+};
+
+export type AgentsSnapshotDto = {
+  protocol_version: number;
+  core_instance_id: Id;
+  workspace_id: Id;
+  snapshot_sequence: number;
+  selected_session_id: Id | null;
+  sessions: AgentSessionLiveDto[];
+};
+
+export type AgentPreferences = {
+  revision: number;
+  temperature: number;
+  systemInstructions: string;
+  customModelId: string;
+  selectedModel: string;
+  reasoningEffort: 'quick' | 'standard' | 'max';
+};
+export type AgentPreferencesPatch = Partial<Omit<AgentPreferences, 'revision'>>;
+export type AgentPreferencesDto = AgentPreferences;
+
 // --- Terminal slice (PTY wire) ----------------------------------------------
 //
 // The exact terminal wire contract. Commands:
@@ -628,6 +708,13 @@ export type FrontendCommand =
   | { type: 'switch_session'; payload: { session_id: Id } }
   | { type: 'delete_session'; payload: { session_id: Id } }
   | { type: 'new_session' }
+  | { type: 'rename_session'; payload: { session_id: Id; title: string } }
+  | { type: 'queue_agent'; payload: { request_id: Id; request: AgentRequestDto } }
+  | { type: 'update_queued_agent'; payload: { session_id: Id; request_id: Id; request: AgentRequestDto } }
+  | { type: 'remove_queued_agent'; payload: { session_id: Id; request_id: Id } }
+  | { type: 'reorder_agent_queue'; payload: { session_id: Id; request_ids: Id[] } }
+  | { type: 'clear_agent_queue'; payload: { session_id: Id } }
+  | { type: 'resume_agent_queue'; payload: { session_id: Id } }
   | { type: 'set_active_buffer'; payload: { buffer_id: Id } }
   | { type: 'list_agent_sessions' }
   | { type: 'set_agent_auto_approve'; payload: { session_id: Id; enabled: boolean } }
@@ -715,6 +802,8 @@ export type FrontendEvent =
   | { type: 'agent_state_changed'; payload: AgentStateChangedPayload }
   | { type: 'agent_turn_done'; payload: AgentTurnDonePayload }
   | { type: 'agent_compaction_failed'; payload: AgentCompactionFailedPayload }
+  | { type: 'agent_queue_changed'; payload: { session_id: Id; queue: AgentQueueItemDto[] } }
+  | { type: 'agent_session_renamed'; payload: { session_id: Id; title: string; updated_at: number } }
   | { type: 'subagent_completed'; payload: SubagentCompletedPayload }
   | { type: 'subagent_cancelled'; payload: { child_id: string; parent_session_id: string } }
   | { type: 'subagent_activity'; payload: SubagentActivityPayload }
@@ -853,6 +942,17 @@ function envelopeFor(payload: FrontendCommand, ctx: EnvelopeContext): RequestEnv
 export const getBootstrapState = (): Promise<BootstrapState> =>
   invoke('get_bootstrap_state', { protocolVersion: PROTOCOL_VERSION });
 
+export const getAgentsSnapshot = (): Promise<AgentsSnapshotDto> =>
+  invoke<AgentsSnapshotDto>('get_agents_snapshot', { protocolVersion: PROTOCOL_VERSION });
+
+export const getAgentPreferences = (): Promise<AgentPreferences> => invoke<AgentPreferences>('get_agent_preferences');
+
+export const updateAgentPreferences = (patch: AgentPreferencesPatch): Promise<AgentPreferences> =>
+  invoke<AgentPreferences>('update_agent_preferences', { patch });
+
+export const subscribeAgentPreferences = (handler: (preferences: AgentPreferences) => void): Promise<UnlistenFn> =>
+  listen<AgentPreferences>('selora://agent-preferences', ({ payload }) => handler(payload));
+
 /**
  * One-shot boot-trace marker. The Rust side appends a timestamped line to
  * `%TEMP%\selora_boot.log`; the performance harness uses it as the
@@ -888,6 +988,68 @@ export const updateSettings = (patch: SettingsPatch, ctx: EnvelopeContext): Prom
 
 /** Native folder picker (a plain Tauri command, not a protocol command). */
 export const pickFolder = (): Promise<string | null> => invoke<string | null>('pick_folder');
+
+/** Window navigation is targeted and never consumes shared runtime sequence positions. */
+export type AgentsNavigationTarget = {
+  workspace_id: Id | null;
+  session_id?: Id | null;
+  child_id?: Id | null;
+};
+
+export const openAgentsWindow = (target: {
+  sessionId?: Id | null;
+  childId?: Id | null;
+  workspaceId?: Id | null;
+} = {}): Promise<void> => invoke<void>('open_agents_window', {
+  sessionId: target.sessionId ?? null,
+  childId: target.childId ?? null,
+  workspaceId: target.workspaceId ?? null,
+});
+
+export const focusEditorWindow = (): Promise<void> => invoke<void>('focus_editor_window');
+
+export const agentsWindowReady = (): Promise<AgentsNavigationTarget | null> =>
+  invoke<AgentsNavigationTarget | null>('agents_window_ready');
+
+export const subscribeAgentsNavigation = (
+  handler: (target: AgentsNavigationTarget) => void,
+): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('selora://agents-navigate', ({ payload }) => handler(payload));
+
+export const subscribeMainSessionNavigation = (
+  handler: (target: AgentsNavigationTarget) => void,
+): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('selora://main-session-navigate', ({ payload }) => handler(payload));
+
+export const showSessionInMainWindow = (sessionId: Id, ctx: EnvelopeContext): Promise<void> =>
+  invoke<void>('show_session_in_main_window', { sessionId, workspaceId: ctx.workspace_id });
+
+export type AgentsFilePreviewDto = {
+  workspace_id: Id;
+  path: string;
+  text: string | null;
+  source: 'buffer' | 'disk';
+  dirty: boolean;
+  version: number | null;
+  byte_length: number;
+  truncated: boolean;
+  binary: boolean;
+};
+
+export const agentsReadFilePreview = (workspaceId: Id, path: string): Promise<AgentsFilePreviewDto> =>
+  invoke<AgentsFilePreviewDto>('agents_read_file_preview', { workspaceId, path });
+
+export type AgentsGitDiffDto = {
+  workspace_id: Id;
+  path: string;
+  baseline: 'index' | 'working_tree';
+  unified_diff: string;
+  truncated: boolean;
+};
+
+export const agentsReadGitDiff = (
+  workspaceId: Id,
+  path: string,
+  baseline: 'index' | 'working_tree',
+): Promise<AgentsGitDiffDto> => invoke<AgentsGitDiffDto>('agents_read_git_diff', { workspaceId, path, baseline });
 
 export const openFolderAt = (root: string, ctx: EnvelopeContext): Promise<unknown> =>
   dispatchZ2Command({ type: 'open_folder_at', payload: { root } }, ctx);
@@ -1180,6 +1342,37 @@ export const deleteSession = (sessionId: Id, ctx: EnvelopeContext): Promise<unkn
 
 export const newSession = (ctx: EnvelopeContext): Promise<unknown> =>
   dispatchZ2Command({ type: 'new_session' }, ctx);
+
+export const renameAgentSession = (sessionId: Id, title: string, ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'rename_session', payload: { session_id: sessionId, title } }, { ...ctx, session_id: sessionId });
+
+export const queueAgentPrompt = (
+  request: AgentRequestDto,
+  ctx: EnvelopeContext,
+  requestId: Id = newRequestId(),
+): Promise<unknown> => dispatchZ2Command(
+  { type: 'queue_agent', payload: { request_id: requestId, request } },
+  { ...ctx, session_id: request.session_id },
+);
+
+export const updateQueuedAgentPrompt = (
+  sessionId: Id, requestId: Id, request: AgentRequestDto, ctx: EnvelopeContext,
+): Promise<unknown> => dispatchZ2Command(
+  { type: 'update_queued_agent', payload: { session_id: sessionId, request_id: requestId, request } },
+  { ...ctx, session_id: sessionId },
+);
+
+export const removeQueuedAgentPrompt = (sessionId: Id, requestId: Id, ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'remove_queued_agent', payload: { session_id: sessionId, request_id: requestId } }, { ...ctx, session_id: sessionId });
+
+export const reorderAgentPromptQueue = (sessionId: Id, requestIds: Id[], ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'reorder_agent_queue', payload: { session_id: sessionId, request_ids: requestIds } }, { ...ctx, session_id: sessionId });
+
+export const clearAgentPromptQueue = (sessionId: Id, ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'clear_agent_queue', payload: { session_id: sessionId } }, { ...ctx, session_id: sessionId });
+
+export const resumeAgentPromptQueue = (sessionId: Id, ctx: EnvelopeContext): Promise<unknown> =>
+  dispatchZ2Command({ type: 'resume_agent_queue', payload: { session_id: sessionId } }, { ...ctx, session_id: sessionId });
 
 /** Phase 9d: refresh the resume picker (the bootstrap carries the list). */
 export const listAgentSessions = (ctx: EnvelopeContext): Promise<unknown> =>

@@ -180,6 +180,25 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
     }
   };
 
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dialogRef.current) return;
+    const rect = dialogRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const normX = (x / rect.width - 0.5) * 2;
+    const normY = (y / rect.height - 0.5) * 2;
+    const tiltX = (normX * 4.5).toFixed(2);
+    const tiltY = (normY * -4.5).toFixed(2);
+    dialogRef.current.style.setProperty('--tilt-x', `${tiltX}deg`);
+    dialogRef.current.style.setProperty('--tilt-y', `${tiltY}deg`);
+  };
+
+  const handlePointerLeave = () => {
+    if (!dialogRef.current) return;
+    dialogRef.current.style.setProperty('--tilt-x', '0deg');
+    dialogRef.current.style.setProperty('--tilt-y', '0deg');
+  };
+
   return (
     <div className="about-backdrop" data-testid="about-backdrop" onPointerDown={onClose}>
       <div
@@ -190,6 +209,8 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
         aria-labelledby="about-title"
         onPointerDown={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
       >
         <MetalBrand size="about" />
         <h2 id="about-title" className="about-title">

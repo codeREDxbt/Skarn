@@ -464,20 +464,28 @@
   background: var(--ink-canvas);
 }
 
+.wf-graph-node[data-status="running"]:not(:last-child)::after {
+  background: linear-gradient(180deg, var(--ok) 0%, rgba(34, 197, 94, 0.4) 50%, var(--ink-hi) 100%);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
 .wf-graph-node[data-status="running"] .wf-graph-dot {
-  border-color: var(--fg-default);
-  background: var(--fg-default);
+  border-color: var(--ok);
+  background: var(--ok);
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.65), 0 0 20px rgba(34, 197, 94, 0.3);
   animation: wf-pulse var(--dur-loop) var(--ease-orbital) infinite;
 }
 
 .wf-graph-node[data-status="completed"] .wf-graph-dot {
   border-color: var(--ok);
   background: var(--ok);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
 }
 
 .wf-graph-node[data-status="failed"] .wf-graph-dot {
   border-color: var(--err);
   background: var(--err);
+  box-shadow: 0 0 6px rgba(220, 38, 38, 0.4);
 }
 
 .wf-graph-node[data-status="skipped"] .wf-graph-dot {
@@ -495,11 +503,13 @@
   background: var(--ink-low);
   border: 1px solid var(--ink-hi);
   border-radius: var(--radius-1);
+  transition: all var(--dur-instant) var(--ease-calm);
 }
 
 .wf-graph-node[aria-current="step"] .wf-graph-card {
-  border-color: var(--hairline-active);
-  background: var(--ink-mid);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 100%), var(--ink-mid);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
 .wf-graph-title-row {

@@ -296,7 +296,7 @@ pub struct AgentSettings {
     #[serde(default)]
     pub workspace_trusted: bool,
 
-    /// Max tool iterations per turn (§17.3: default 25).
+    /// Maximum individual tool calls per turn (default 100).
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: u32,
 
@@ -470,7 +470,7 @@ fn default_primary_sidebar_open() -> bool {
 }
 
 fn default_agent_max_iterations() -> u32 {
-    25
+    100
 }
 
 fn default_agent_max_turn_secs() -> u64 {
@@ -857,7 +857,7 @@ pub(crate) mod tests {
         assert_eq!(loaded.keybinds.command_palette, "F2");
         assert_eq!(loaded.keybinds.toggle_chat, "Alt+L");
         // Unrelated sections survive the whole-file rewrite.
-        assert_eq!(loaded.agent.max_iterations, 25);
+        assert_eq!(loaded.agent.max_iterations, 100);
         assert_eq!(loaded.layout, LayoutSettings::default());
 
         let text = std::fs::read_to_string(&path).expect("read");
@@ -1284,7 +1284,7 @@ pub(crate) mod tests {
 
         let settings = Settings::load_from(&path).expect("load");
         assert_eq!(settings.editor.font_size, 15);
-        assert_eq!(settings.agent.max_iterations, 25);
+        assert_eq!(settings.agent.max_iterations, 100);
         assert_eq!(settings.agent.max_turn_secs, 600);
         assert!((settings.agent.max_cost_usd - 1.0).abs() < f64::EPSILON);
         assert_eq!(settings.agent.shell, "powershell");

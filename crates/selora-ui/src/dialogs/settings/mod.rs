@@ -457,7 +457,7 @@ impl SettingsDialog {
     /// auto-approve allowlist, and the Brave key (OS keyring — never in
     /// settings.json).
     fn pane_agent(&mut self, ui: &mut egui::Ui) {
-        label_style(ui, "Max Iterations");
+        label_style(ui, "Max Tool Calls per Turn");
         let resp =
             ui.add(egui::DragValue::new(&mut self.settings.agent.max_iterations).range(1..=100));
         self.commit_drag(&resp);

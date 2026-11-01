@@ -578,6 +578,33 @@ pub enum FrontendCommand {
         session_id: SessionId,
     },
     NewSession,
+    RenameSession {
+        session_id: SessionId,
+        title: String,
+    },
+    QueueAgent {
+        request_id: RequestId,
+        request: AgentRequestDto,
+    },
+    UpdateQueuedAgent {
+        session_id: SessionId,
+        request_id: RequestId,
+        request: AgentRequestDto,
+    },
+    RemoveQueuedAgent {
+        session_id: SessionId,
+        request_id: RequestId,
+    },
+    ReorderAgentQueue {
+        session_id: SessionId,
+        request_ids: Vec<RequestId>,
+    },
+    ClearAgentQueue {
+        session_id: SessionId,
+    },
+    ResumeAgentQueue {
+        session_id: SessionId,
+    },
     /// Phase 9d: refresh the resume picker. The answer is a full bootstrap
     /// whose `agent_sessions` is freshly scanned from disk.
     ListAgentSessions,
@@ -937,6 +964,102 @@ pub struct ChatStateDto {
     /// todos rather than failing. Per-session copies ride [`SessionDto`].
     #[serde(default)]
     pub todos: Vec<TodoDto>,
+}
+
+/// Complete process-live Agents state, independent of the replay retention ring.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentsSnapshotDto {
+    pub protocol_version: u32,
+    pub core_instance_id: CoreInstanceId,
+    pub workspace_id: String,
+    pub snapshot_sequence: u64,
+    pub selected_session_id: Option<SessionId>,
+    pub sessions: Vec<AgentSessionLiveDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentSessionLiveDto {
+    pub session_id: SessionId,
+    pub title: String,
+    pub created_at: Option<u64>,
+    pub updated_at: Option<u64>,
+    pub model_id: Option<String>,
+    pub mode: AgentModeDto,
+    pub durable: bool,
+    pub active_request_id: Option<RequestId>,
+    pub active_turn_id: Option<TurnId>,
+    pub state: Option<AgentStateDto>,
+    pub messages: Vec<MessageDto>,
+    pub timeline: Vec<AgentTimelineEntryDto>,
+    pub approvals: Vec<ApprovalNeededDto>,
+    pub plan_phase: PlanPhaseDto,
+    pub plan: Option<PlanApprovalDto>,
+    pub todos: Vec<TodoDto>,
+    pub queue: Vec<AgentQueueItemDto>,
+    pub subagents: Vec<SubagentSnapshotDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentTimelineEntryDto {
+    pub sequence: u64,
+    pub event: AgentTimelineEventDto,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum AgentTimelineEventDto {
+    /// Full accumulated text, not an incremental delta. Sequence is the last delta ordinal.
+    Message(ChatDeltaDto),
+    ToolCallStarted(ToolCallStartedDto),
+    ToolResult(ToolResultDto),
+    ChatCompleted(ChatCompletedDto),
+    ChatFailed(ChatFailedDto),
+    AgentTurnDone(AgentTurnDoneDto),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentSnapshotDto {
+    pub started: SubagentActivityDto,
+    pub state: SubagentRunState,
+    pub tool_name: Option<String>,
+    pub timeline: Vec<SubagentActivityDto>,
+    pub completed: Option<SubagentCompletedDto>,
+    pub cancelled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentQueueItemDto {
+    pub request_id: RequestId,
+    pub request: AgentRequestDto,
+    pub created_at: u64,
+    pub status: AgentQueueStatusDto,
+    pub error: Option<ProtocolErrorDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentQueueStatusDto {
+    Queued,
+    Starting,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentQueueChangedDto {
+    pub session_id: SessionId,
+    pub queue: Vec<AgentQueueItemDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentSessionRenamedDto {
+    pub session_id: SessionId,
+    pub title: String,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewSessionResultDto {
+    pub session_id: SessionId,
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,6 +1503,7 @@ pub struct BootstrapState {
 pub enum CommandResultDto {
     Snapshot(Box<BootstrapState>),
     Ack(CommandAckDto),
+    NewSession(NewSessionResultDto),
     /// A read-only daily git command's typed data (`git_branches`,
     /// `git_log`, `git_show_commit`, `git_stash_list`). Serialized as one
     /// object whose key names the list (`branches` / `commits` / `stashes`) or
@@ -2130,6 +2254,8 @@ pub struct TerminalExitedDto {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum FrontendEvent {
     BootstrapState(Box<BootstrapState>),
+    AgentQueueChanged(AgentQueueChangedDto),
+    AgentSessionRenamed(AgentSessionRenamedDto),
     ChatDelta(ChatDeltaDto),
     ChatCompleted(ChatCompletedDto),
     ChatFailed(ChatFailedDto),

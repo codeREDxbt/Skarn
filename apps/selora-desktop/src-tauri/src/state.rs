@@ -1171,6 +1171,7 @@ pub(crate) struct EventLog {
     /// while this guard is held and the event is emitted before it is
     /// released, so two producers can never deliver n+1 before n.
     emit_lock: Mutex<()>,
+    agents: Mutex<crate::events::AgentsProjection>,
     /// Test-only capture of emission order (the monotonic-delivery test).
     #[cfg(test)]
     emitted: Mutex<Vec<u64>>,
@@ -1183,6 +1184,7 @@ impl EventLog {
             sequence: Mutex::new(0),
             events: Mutex::new(Vec::new()),
             emit_lock: Mutex::new(()),
+            agents: Mutex::new(crate::events::AgentsProjection::default()),
             #[cfg(test)]
             emitted: Mutex::new(Vec::new()),
         }
@@ -1190,6 +1192,36 @@ impl EventLog {
 
     pub(crate) fn core_instance_id(&self) -> CoreInstanceId {
         self.core_instance_id.clone()
+    }
+
+    pub(crate) fn agents_snapshot(
+        &self,
+        engine: &SessionEngine,
+        workspace_id: String,
+    ) -> selora_protocol::AgentsSnapshotDto {
+        let _order = self.emit_lock.lock().expect("emit lock");
+        let mut sessions = engine.live_sessions();
+        self.agents
+            .lock()
+            .expect("agents projection lock")
+            .hydrate(&mut sessions);
+        engine.redact_live_sessions(&mut sessions);
+        selora_protocol::AgentsSnapshotDto {
+            protocol_version: PROTOCOL_VERSION,
+            core_instance_id: self.core_instance_id(),
+            workspace_id,
+            snapshot_sequence: self.snapshot_sequence(),
+            selected_session_id: engine.active_session_id(),
+            sessions,
+        }
+    }
+
+    pub(crate) fn consume_agent_approval(&self, approval_id: &ApprovalId) {
+        let _order = self.emit_lock.lock().expect("emit lock");
+        self.agents
+            .lock()
+            .expect("agents projection lock")
+            .consume_approval(approval_id);
     }
 
     /// The bootstrap's `snapshot_sequence`: every event recorded so far.
@@ -1272,6 +1304,10 @@ impl EventLog {
             session_id,
             payload,
         };
+        self.agents
+            .lock()
+            .expect("agents projection lock")
+            .apply(&event);
         events.push(event.clone());
         if events.len() > EVENT_RETENTION_CAP {
             // Keep the most recent 1024; the sequences keep counting.
@@ -3140,6 +3176,8 @@ impl DesktopState {
         }
         if let Some(trusted) = patch.workspace_trusted {
             settings.agent.workspace_trusted = trusted;
+            self.sessions
+                .set_queue_allowed(trusted == self.engine_workspace_trusted);
         }
         if let Some(disabled) = disabled_providers {
             settings.selora.disabled_providers = disabled;
@@ -3305,6 +3343,13 @@ impl DesktopState {
             },
         }
     }
+    pub(crate) fn agents_snapshot(&self) -> selora_protocol::AgentsSnapshotDto {
+        let workspace_id = self
+            .current_workspace_id()
+            .map(|id| id.as_str().to_owned())
+            .unwrap_or_else(|| "no-workspace".into());
+        self.log.agents_snapshot(&self.sessions, workspace_id)
+    }
     /// The Z1-era envelope validation (Ã‚Â§2.3 steps 1Ã¢â‚¬â€œ3), unchanged, then the
     /// Z2 layout arms and the Z3 session arms. The typed reply is a
     /// [`CommandResultDto`]: reads/folder opens keep the full bootstrap
@@ -3312,6 +3357,62 @@ impl DesktopState {
     /// doc comment for the additive contract. [`Self::dispatch`] keeps the
     /// pre-existing `BootstrapState` signature for internal callers/tests.
     pub fn dispatch_result<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        envelope: RequestEnvelope<FrontendCommand>,
+    ) -> Result<CommandResultDto, ProtocolErrorDto> {
+        let action = matches!(
+            &envelope.payload,
+            FrontendCommand::SendChat { .. }
+                | FrontendCommand::SendAgent { .. }
+                | FrontendCommand::StopChat { .. }
+                | FrontendCommand::AgentDecision { .. }
+                | FrontendCommand::NewSession
+                | FrontendCommand::SwitchSession { .. }
+                | FrontendCommand::DeleteSession { .. }
+                | FrontendCommand::RetryMessage { .. }
+                | FrontendCommand::RenameSession { .. }
+                | FrontendCommand::QueueAgent { .. }
+                | FrontendCommand::UpdateQueuedAgent { .. }
+                | FrontendCommand::RemoveQueuedAgent { .. }
+                | FrontendCommand::ReorderAgentQueue { .. }
+                | FrontendCommand::ClearAgentQueue { .. }
+                | FrontendCommand::ResumeAgentQueue { .. }
+                | FrontendCommand::SetAgentAutoApprove { .. }
+        );
+        if !action {
+            return self.dispatch_result_once(app, envelope);
+        }
+        let _operation = self
+            .sessions
+            .action_operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let identity = serde_json::to_value(&envelope).expect("serializable request");
+        if let Some((previous, result)) = self
+            .sessions
+            .action_results
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&envelope.request_id)
+        {
+            return if previous == &identity {
+                Ok(result.clone())
+            } else {
+                Err(crate::sessions::idempotency_conflict())
+            };
+        }
+        let request_id = envelope.request_id.clone();
+        let result = self.dispatch_result_once(app, envelope)?;
+        self.sessions
+            .action_results
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(request_id, (identity, result.clone()));
+        Ok(result)
+    }
+
+    fn dispatch_result_once<R: tauri::Runtime>(
         &self,
         app: &tauri::AppHandle<R>,
         envelope: RequestEnvelope<FrontendCommand>,
@@ -3346,6 +3447,13 @@ impl DesktopState {
                 | FrontendCommand::NewSession
                 | FrontendCommand::ListAgentSessions
                 | FrontendCommand::SetAgentAutoApprove { .. }
+                | FrontendCommand::RenameSession { .. }
+                | FrontendCommand::QueueAgent { .. }
+                | FrontendCommand::UpdateQueuedAgent { .. }
+                | FrontendCommand::RemoveQueuedAgent { .. }
+                | FrontendCommand::ReorderAgentQueue { .. }
+                | FrontendCommand::ClearAgentQueue { .. }
+                | FrontendCommand::ResumeAgentQueue { .. }
         );
         // Ã‚Â§2.3: a command may name the workspace it was composed against Ã¢â‚¬â€
         // "no-workspace" before one is open, or the live id after. An
@@ -3370,6 +3478,30 @@ impl DesktopState {
             });
         }
         let request_id = envelope.request_id.clone();
+        let target = match &envelope.payload {
+            FrontendCommand::SwitchSession { session_id }
+            | FrontendCommand::DeleteSession { session_id }
+            | FrontendCommand::RenameSession { session_id, .. }
+            | FrontendCommand::SetAgentAutoApprove { session_id, .. }
+            | FrontendCommand::UpdateQueuedAgent { session_id, .. }
+            | FrontendCommand::RemoveQueuedAgent { session_id, .. }
+            | FrontendCommand::ReorderAgentQueue { session_id, .. }
+            | FrontendCommand::ClearAgentQueue { session_id }
+            | FrontendCommand::ResumeAgentQueue { session_id } => Some(session_id),
+            _ => None,
+        };
+        if target.is_some_and(|target| {
+            envelope
+                .session_id
+                .as_ref()
+                .is_some_and(|owner| owner != target)
+        }) {
+            return Err(ProtocolErrorDto {
+                code: "stale_session".into(),
+                message: "The command and envelope must target the same session.".into(),
+                retryable: false,
+            });
+        }
         match envelope.payload {
             FrontendCommand::GetBootstrapState => {
                 Ok(CommandResultDto::Snapshot(Box::new(self.bootstrap())))
@@ -3432,14 +3564,99 @@ impl DesktopState {
                     envelope.session_id,
                     resolution,
                 )?;
+                self.log.consume_agent_approval(&approval_id);
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             // Phase 9 session slice: real sessions owned by the engine. Each
             // accepted transition publishes the same full bootstrap snapshot
             // the boot path hydrates from, then answers the small ack.
             FrontendCommand::NewSession => {
-                self.sessions.new_session()?;
+                let session_id = self.sessions.new_session()?;
                 self.publish_chat_bootstrap(app, Some(request_id));
+                Ok(CommandResultDto::NewSession(
+                    selora_protocol::NewSessionResultDto { session_id },
+                ))
+            }
+            FrontendCommand::RenameSession { session_id, title } => {
+                let renamed = self.sessions.rename_session(&session_id, title)?;
+                self.log.record_session(
+                    app,
+                    FrontendEvent::AgentSessionRenamed(renamed),
+                    Some(request_id),
+                    session_id,
+                );
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::QueueAgent {
+                request_id: queued_id,
+                request,
+            } => {
+                self.ensure_agent_trust_current()?;
+                self.sessions.queue_agent(
+                    self.event_log(),
+                    app.clone(),
+                    envelope.session_id,
+                    queued_id,
+                    request,
+                )?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::UpdateQueuedAgent {
+                session_id,
+                request_id,
+                request,
+            } => {
+                self.sessions.mutate_queue(
+                    &self.log,
+                    app,
+                    &session_id,
+                    crate::sessions::QueueMutation::Update(request_id, Box::new(request)),
+                )?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::RemoveQueuedAgent {
+                session_id,
+                request_id,
+            } => {
+                self.sessions.mutate_queue(
+                    &self.log,
+                    app,
+                    &session_id,
+                    crate::sessions::QueueMutation::Remove(request_id),
+                )?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::ReorderAgentQueue {
+                session_id,
+                request_ids,
+            } => {
+                self.sessions.mutate_queue(
+                    &self.log,
+                    app,
+                    &session_id,
+                    crate::sessions::QueueMutation::Reorder(request_ids),
+                )?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::ClearAgentQueue { session_id } => {
+                self.sessions.mutate_queue(
+                    &self.log,
+                    app,
+                    &session_id,
+                    crate::sessions::QueueMutation::Clear,
+                )?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::ResumeAgentQueue { session_id } => {
+                self.ensure_agent_trust_current()?;
+                self.sessions.mutate_queue(
+                    &self.log,
+                    app,
+                    &session_id,
+                    crate::sessions::QueueMutation::Resume,
+                )?;
+                self.sessions
+                    .kick_queue(self.event_log(), app.clone(), &session_id);
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::SwitchSession { session_id } => {
@@ -4189,7 +4406,9 @@ impl DesktopState {
             CommandResultDto::Snapshot(snapshot) => Ok(*snapshot),
             // A typed git reply is data for the IPC caller; the in-process
             // helper still materializes the state the same way an ack does.
-            CommandResultDto::Ack(_) | CommandResultDto::Git(_) => Ok(self.bootstrap()),
+            CommandResultDto::Ack(_)
+            | CommandResultDto::Git(_)
+            | CommandResultDto::NewSession(_) => Ok(self.bootstrap()),
         }
     }
 
@@ -5266,7 +5485,7 @@ mod tests {
         assert_eq!(persisted.keybinds.save, "Ctrl+Alt+S");
         // A save preserves the unrelated sections.
         assert_eq!(persisted.ui.theme, "selora-dark");
-        assert_eq!(persisted.agent.max_iterations, 25);
+        assert_eq!(persisted.agent.max_iterations, 100);
 
         // A fresh state over the same file boots with the saved values.
         let reopened = DesktopState::from_settings_path(path.clone());
@@ -6557,6 +6776,7 @@ mod tests {
             }
             CommandResultDto::Snapshot(_) => panic!("a toggle answers the small ack"),
             CommandResultDto::Git(_) => panic!("a toggle answers no git data"),
+            CommandResultDto::NewSession(_) => panic!("a toggle does not create a session"),
         }
 
         // The read path still answers the full bootstrap shape unchanged.
@@ -6602,6 +6822,7 @@ mod tests {
             CommandResultDto::Ack(ack) => assert!(ack.acknowledged),
             CommandResultDto::Snapshot(_) => panic!("an edit answers the small ack"),
             CommandResultDto::Git(_) => panic!("an edit answers no git data"),
+            CommandResultDto::NewSession(_) => panic!("an edit does not create a session"),
         }
 
         let selection = state

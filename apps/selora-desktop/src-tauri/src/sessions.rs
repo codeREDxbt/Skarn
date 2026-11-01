@@ -39,7 +39,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use selora_ai::{
     AgentSessionMode, AgentSessionState, AgentSessionStore, AgentSummary, AgentTurnState,
@@ -63,6 +66,34 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::state::EventLog;
+use selora_protocol::{
+    AgentQueueChangedDto, AgentQueueItemDto, AgentQueueStatusDto, AgentSessionLiveDto,
+    AgentSessionRenamedDto,
+};
+
+pub(crate) enum QueueMutation {
+    Update(RequestId, Box<selora_protocol::AgentRequestDto>),
+    Remove(RequestId),
+    Reorder(Vec<RequestId>),
+    Clear,
+    Resume,
+}
+
+pub(crate) fn idempotency_conflict() -> ProtocolErrorDto {
+    ProtocolErrorDto {
+        code: "idempotency_conflict".into(),
+        message: "This request identity was already accepted with different content.".into(),
+        retryable: false,
+    }
+}
+
+fn invalid_queue(message: &str) -> ProtocolErrorDto {
+    ProtocolErrorDto {
+        code: "invalid_agent_queue".into(),
+        message: message.into(),
+        retryable: false,
+    }
+}
 
 /// The read-only half of the §17.1 manifest — `explore` mode arms exactly
 /// these (the model cannot request a side effect). Phase 9b's todo tools
@@ -82,10 +113,7 @@ const EXPLORE_TOOLS: [&str; 12] = [
     "exit_plan_mode",
 ];
 
-/// Transcript bound (the egui panel's 100-entry cap, R3) on the web shell's
-/// in-memory model.
-const MAX_SESSION_MESSAGES: usize = 100;
-
+/// Full presentation history is retained; request prompts remain independently bounded.
 /// How many trailing transcript messages ride each request (the egui
 /// restore's 20-turn precedent keeps prompts bounded without a settings
 /// field).
@@ -285,6 +313,8 @@ struct ChatSession {
     durable: bool,
     /// The last successful compaction cursor (full transcript stays on disk).
     compaction: selora_ai::CompactionCursor,
+    queue: Vec<AgentQueueItemDto>,
+    queue_paused: bool,
 }
 
 impl ChatSession {
@@ -307,6 +337,8 @@ impl ChatSession {
             durable_entries: 0,
             durable: false,
             compaction: selora_ai::CompactionCursor::default(),
+            queue: Vec::new(),
+            queue_paused: false,
         }
     }
 }
@@ -341,6 +373,15 @@ struct EngineInner {
 /// `finish_*`/`set_*` seams between awaits).
 pub(crate) struct SessionEngine {
     inner: Mutex<EngineInner>,
+    /// Serializes dispatch, queue claims, and decisions without holding the model lock over I/O.
+    operations: Mutex<()>,
+    accepted_sends: Mutex<BTreeMap<RequestId, serde_json::Value>>,
+    accepted_decisions: Mutex<BTreeMap<ApprovalId, serde_json::Value>>,
+    metadata_io: Mutex<()>,
+    queue_allowed: AtomicBool,
+    pub(crate) action_operations: Mutex<()>,
+    pub(crate) action_results:
+        Mutex<BTreeMap<RequestId, (serde_json::Value, selora_protocol::CommandResultDto)>>,
     config: EngineConfig,
     /// Phase 9e: the session-scoped background subagent runtime. It
     /// outlives individual turns, so a child started by one turn can finish
@@ -395,6 +436,13 @@ impl SessionEngine {
         let (tx, rx) = mpsc::channel(256);
         runtime.set_event_sink(tx);
         Self {
+            operations: Mutex::new(()),
+            accepted_sends: Mutex::new(BTreeMap::new()),
+            accepted_decisions: Mutex::new(BTreeMap::new()),
+            metadata_io: Mutex::new(()),
+            queue_allowed: AtomicBool::new(true),
+            action_operations: Mutex::new(()),
+            action_results: Mutex::new(BTreeMap::new()),
             inner: Mutex::new(EngineInner {
                 base_url: config.base_url.clone(),
                 active_model: initial_active_model,
@@ -416,10 +464,32 @@ impl SessionEngine {
     }
 
     pub(crate) fn set_workspace_root(&self, root: Option<PathBuf>) {
-        *self
+        let mut current = self
             .workspace_root
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = root;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current != root {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            for active in inner.active.values() {
+                match active {
+                    ActiveRequest::Chat { cancel, .. } => {
+                        let _ = cancel.send(true);
+                    }
+                    ActiveRequest::Agent { decisions, .. } => {
+                        let _ = decisions.send((Uuid::nil(), selora_ai::AgentDecision::Stop));
+                        self.subagents.cancel_parent(active.session_id().as_str());
+                    }
+                }
+            }
+            inner.sessions.clear();
+            inner.active.clear();
+            inner.active_session = None;
+        }
+        *current = root;
+    }
+
+    pub(crate) fn set_queue_allowed(&self, allowed: bool) {
+        self.queue_allowed.store(allowed, Ordering::SeqCst);
     }
 
     // -----------------------------------------------------------------
@@ -555,6 +625,7 @@ impl SessionEngine {
     /// state/todos files are atomic replacements. A failed append leaves the
     /// durable counter unchanged so the next flush retries it.
     fn flush_session(&self, session_id: &SessionId) {
+        let _metadata = self.metadata_io.lock().unwrap_or_else(|p| p.into_inner());
         let Some(store) = self.store() else {
             return;
         };
@@ -669,11 +740,11 @@ impl SessionEngine {
             let loaded = self.load_session_from_disk(session_id)?;
             inner.sessions.insert(session_id.clone(), loaded);
         }
-        inner.activity_counter += 1;
-        let activity = inner.activity_counter;
         for session in inner.sessions.values_mut() {
             session.auto_approve = false;
         }
+        inner.activity_counter += 1;
+        let activity = inner.activity_counter;
         if let Some(session) = inner.sessions.get_mut(session_id) {
             session.last_activity = activity;
         }
@@ -705,11 +776,11 @@ impl SessionEngine {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for session in inner.sessions.values_mut() {
+            session.auto_approve = false;
+        }
         inner.activity_counter += 1;
         session.last_activity = inner.activity_counter;
-        for open in inner.sessions.values_mut() {
-            open.auto_approve = false;
-        }
         inner.sessions.insert(session_id.clone(), session);
         inner.active_session = Some(session_id.clone());
         Ok(session_id)
@@ -1148,6 +1219,158 @@ impl SessionEngine {
         })
     }
 
+    pub(crate) fn live_sessions(&self) -> Vec<AgentSessionLiveDto> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner
+            .sessions
+            .iter()
+            .map(|(session_id, session)| {
+                let plan = selora_ai::plan::snapshot(&session.plan_store);
+                let active = session
+                    .active_request
+                    .as_ref()
+                    .and_then(|id| inner.active.get(id));
+                let approvals = session
+                    .pending_approval
+                    .as_ref()
+                    .map(|approval| {
+                        let (path_or_command, diff_or_input, workflow) = session
+                            .pending_card
+                            .as_ref()
+                            .map(approval_body)
+                            .unwrap_or_else(|| (approval.summary.clone(), None, None));
+                        ApprovalNeededDto {
+                            request_id: approval.request_id.clone(),
+                            session_id: session_id.clone(),
+                            turn_id: approval.turn_id.clone(),
+                            approval_id: approval.approval_id.clone(),
+                            tool_name: session.pending_tool_name.clone().unwrap_or_default(),
+                            path_or_command,
+                            diff_or_input,
+                            workflow,
+                            plan: approval.plan.clone(),
+                            prompt: approval.decision_prompt.clone(),
+                            subagent_id: None,
+                        }
+                    })
+                    .into_iter()
+                    .collect();
+                AgentSessionLiveDto {
+                    session_id: session_id.clone(),
+                    title: session.title.clone(),
+                    created_at: (session.created_at != 0).then_some(session.created_at),
+                    updated_at: (session.updated_at != 0).then_some(session.updated_at),
+                    model_id: session.model.clone(),
+                    mode: session.mode,
+                    durable: session.durable,
+                    active_request_id: session.active_request.clone(),
+                    active_turn_id: active.map(|request| request.turn_id().clone()),
+                    state: None,
+                    messages: session
+                        .messages
+                        .iter()
+                        .map(|message| MessageDto {
+                            message_id: message.message_id.clone(),
+                            session_id: session_id.clone(),
+                            role: message.role,
+                            text: message.text.clone(),
+                        })
+                        .collect(),
+                    timeline: Vec::new(),
+                    approvals,
+                    plan_phase: plan_phase_dto(plan.phase),
+                    plan: plan.plan.as_ref().map(|draft| plan_approval_dto(draft, "")),
+                    todos: plan.todos.iter().map(todo_dto).collect(),
+                    queue: session.queue.clone(),
+                    subagents: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn redact_live_sessions(&self, sessions: &mut Vec<AgentSessionLiveDto>) {
+        if self.config.key_source.get().is_err() {
+            for session in sessions {
+                session.title = "[REDACTED]".into();
+                session.messages.clear();
+                session.timeline.clear();
+                session.approvals.clear();
+                session.plan = None;
+                session.todos.clear();
+                session.queue.clear();
+                session.subagents.clear();
+            }
+            return;
+        }
+        let keys = self
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        *sessions = scrub_serializable(sessions.clone(), &keys);
+    }
+
+    pub(crate) fn rename_session(
+        &self,
+        session_id: &SessionId,
+        title: String,
+    ) -> Result<AgentSessionRenamedDto, ProtocolErrorDto> {
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let _metadata = self.metadata_io.lock().unwrap_or_else(|p| p.into_inner());
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 200 || title.chars().any(char::is_control) {
+            return Err(ProtocolErrorDto {
+                code: "invalid_session_title".into(),
+                message:
+                    "A session title must contain 1 to 200 characters without control characters."
+                        .into(),
+                retryable: false,
+            });
+        }
+        let store = self.store_with_keys().map_err(|_| ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "Credential store unavailable.".into(),
+            retryable: true,
+        })?;
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = selora_ai::now_millis();
+        let durable = inner
+            .sessions
+            .get(session_id)
+            .is_none_or(|session| session.durable);
+        if durable {
+            let store = store.ok_or_else(no_workspace)?;
+            let mut state = if let Some(session) = inner.sessions.get(session_id) {
+                session_state(session_id, session)
+            } else {
+                store
+                    .load_state(session_id.as_str())
+                    .map_err(|e| session_persistence_error(&e))?
+                    .ok_or_else(|| unknown_session(session_id))?
+            };
+            state.title = title.to_owned();
+            state.updated_at = now;
+            store
+                .save_state(&state)
+                .map_err(|e| session_persistence_error(&e))?;
+        } else if !inner.sessions.contains_key(session_id) {
+            return Err(unknown_session(session_id));
+        }
+        if let Some(session) = inner.sessions.get_mut(session_id) {
+            session.title = title.to_owned();
+            session.updated_at = now;
+        }
+        let keys = self
+            .subagent_redaction_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        Ok(AgentSessionRenamedDto {
+            session_id: session_id.clone(),
+            title: redact_with_keys(title, &keys),
+            updated_at: now,
+        })
+    }
+
     // -----------------------------------------------------------------
     // NewSession / SwitchSession
     // -----------------------------------------------------------------
@@ -1275,7 +1498,30 @@ impl SessionEngine {
         request_id: RequestId,
         payload: ChatRequestDto,
     ) -> Result<(), ProtocolErrorDto> {
-        self.send_chat_inner(log, app, envelope_session, request_id, payload, None)
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        if envelope_session
+            .as_ref()
+            .is_some_and(|id| id != &payload.session_id)
+        {
+            return Err(stale_session());
+        }
+        let identity = serde_json::json!({ "kind": "chat", "request": &payload });
+        if self.send_duplicate(&request_id, &identity)? {
+            return Ok(());
+        }
+        self.send_chat_inner(
+            log,
+            app,
+            envelope_session,
+            request_id.clone(),
+            payload,
+            None,
+        )?;
+        self.accepted_sends
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(request_id, identity);
+        Ok(())
     }
 
     fn send_chat_inner<R: tauri::Runtime>(
@@ -1314,6 +1560,7 @@ impl SessionEngine {
             &payload.message,
             Some(spec),
         )?;
+        session.model = Some(model_id.clone());
         // One turn, one streaming assistant message. The conversation is
         // the transcript's tail — `begin_turn` already landed the user's
         // message on it.
@@ -1360,7 +1607,275 @@ impl SessionEngine {
         request_id: RequestId,
         payload: selora_protocol::AgentRequestDto,
     ) -> Result<(), ProtocolErrorDto> {
-        self.send_agent_inner(log, app, envelope_session, request_id, payload, None)
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        if envelope_session
+            .as_ref()
+            .is_some_and(|id| id != &payload.session_id)
+        {
+            return Err(stale_session());
+        }
+        {
+            let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if inner
+                .sessions
+                .get(&payload.session_id)
+                .is_some_and(|session| !session.queue.is_empty())
+            {
+                return Err(session_busy());
+            }
+        }
+        let identity = serde_json::json!({ "kind": "agent", "request": &payload });
+        if self.send_duplicate(&request_id, &identity)? {
+            return Ok(());
+        }
+        self.send_agent_inner(
+            log,
+            app,
+            envelope_session,
+            request_id.clone(),
+            payload,
+            None,
+        )?;
+        self.accepted_sends
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(request_id, identity);
+        Ok(())
+    }
+
+    fn send_duplicate(
+        &self,
+        request_id: &RequestId,
+        identity: &serde_json::Value,
+    ) -> Result<bool, ProtocolErrorDto> {
+        let accepted = self
+            .accepted_sends
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match accepted.get(request_id) {
+            Some(previous) if previous == identity => Ok(true),
+            Some(_) => Err(idempotency_conflict()),
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn queue_agent<R: tauri::Runtime>(
+        self: &Arc<Self>,
+        log: Arc<EventLog>,
+        app: tauri::AppHandle<R>,
+        envelope_session: Option<SessionId>,
+        request_id: RequestId,
+        request: selora_protocol::AgentRequestDto,
+    ) -> Result<(), ProtocolErrorDto> {
+        {
+            let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+            if envelope_session
+                .as_ref()
+                .is_some_and(|id| id != &request.session_id)
+            {
+                return Err(stale_session());
+            }
+            if request.prompt.trim().is_empty() {
+                return Err(invalid_queue("A queued prompt cannot be empty."));
+            }
+            let identity = serde_json::json!({ "kind": "agent", "request": &request });
+            if self.send_duplicate(&request_id, &identity)? {
+                return Ok(());
+            }
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let session = inner
+                .sessions
+                .get_mut(&request.session_id)
+                .ok_or_else(|| unknown_session(&request.session_id))?;
+            session.queue.push(AgentQueueItemDto {
+                request_id: request_id.clone(),
+                request: request.clone(),
+                created_at: selora_ai::now_millis(),
+                status: AgentQueueStatusDto::Queued,
+                error: None,
+            });
+            self.accepted_sends
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(request_id, identity);
+        }
+        self.publish_queue(&log, &app, &request.session_id);
+        self.kick_queue(log, app, &request.session_id);
+        Ok(())
+    }
+
+    pub(crate) fn mutate_queue<R: tauri::Runtime>(
+        &self,
+        log: &EventLog,
+        app: &tauri::AppHandle<R>,
+        session_id: &SessionId,
+        mutation: QueueMutation,
+    ) -> Result<(), ProtocolErrorDto> {
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let session = inner
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| unknown_session(session_id))?;
+        match mutation {
+            QueueMutation::Update(id, request) => {
+                let request = *request;
+                if &request.session_id != session_id || request.prompt.trim().is_empty() {
+                    return Err(invalid_queue(
+                        "The queued prompt must target its existing session and contain text.",
+                    ));
+                }
+                let item = session
+                    .queue
+                    .iter_mut()
+                    .find(|item| item.request_id == id)
+                    .ok_or_else(|| invalid_queue("That queued request does not exist."))?;
+                item.request = request;
+                item.status = AgentQueueStatusDto::Queued;
+                item.error = None;
+                self.accepted_sends
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(
+                        id,
+                        serde_json::json!({ "kind": "agent", "request": &item.request }),
+                    );
+            }
+            QueueMutation::Remove(id) => {
+                if !session.queue.iter().any(|item| item.request_id == id) {
+                    return Err(invalid_queue("That queued request does not exist."));
+                }
+                session.queue.retain(|item| item.request_id != id);
+            }
+            QueueMutation::Reorder(ids) => {
+                let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+                if ids.len() != session.queue.len()
+                    || unique.len() != ids.len()
+                    || ids
+                        .iter()
+                        .any(|id| !session.queue.iter().any(|item| &item.request_id == id))
+                {
+                    return Err(invalid_queue(
+                        "Queue order must be an exact permutation of queued request IDs.",
+                    ));
+                }
+                session.queue.sort_by_key(|item| {
+                    ids.iter()
+                        .position(|id| id == &item.request_id)
+                        .expect("validated queue ID")
+                });
+            }
+            QueueMutation::Clear => session.queue.clear(),
+            QueueMutation::Resume => {
+                session.queue_paused = false;
+                if let Some(item) = session.queue.first_mut() {
+                    item.status = AgentQueueStatusDto::Queued;
+                    item.error = None;
+                }
+            }
+        }
+        drop(inner);
+        self.publish_queue(log, app, session_id);
+        Ok(())
+    }
+
+    fn publish_queue<R: tauri::Runtime>(
+        &self,
+        log: &EventLog,
+        app: &tauri::AppHandle<R>,
+        session_id: &SessionId,
+    ) {
+        let queue = self
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .sessions
+            .get(session_id)
+            .map(|session| session.queue.clone());
+        if let Some(queue) = queue {
+            let keys = self
+                .subagent_redaction_keys
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            log.record_session(
+                app,
+                FrontendEvent::AgentQueueChanged(scrub_serializable(
+                    AgentQueueChangedDto {
+                        session_id: session_id.clone(),
+                        queue,
+                    },
+                    &keys,
+                )),
+                None,
+                session_id.clone(),
+            );
+        }
+    }
+
+    /// Claims and starts at most one head. Terminal relays are the only automatic drain trigger.
+    pub(crate) fn kick_queue<R: tauri::Runtime>(
+        self: &Arc<Self>,
+        log: Arc<EventLog>,
+        app: tauri::AppHandle<R>,
+        session_id: &SessionId,
+    ) {
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let item = {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(session) = inner.sessions.get_mut(session_id) else {
+                return;
+            };
+            if session.active_request.is_some() || session.queue_paused {
+                return;
+            }
+            let Some(item) = session.queue.first_mut() else {
+                return;
+            };
+            if item.status != AgentQueueStatusDto::Queued {
+                return;
+            }
+            item.status = AgentQueueStatusDto::Starting;
+            item.clone()
+        };
+        self.publish_queue(&log, &app, session_id);
+        // Recheck trust at execution, not just enqueue time. Credentials/model are checked by send.
+        let result = if !self.queue_allowed.load(Ordering::SeqCst) {
+            Err(ProtocolErrorDto {
+                code: "workspace_trust_restart_required".into(),
+                message:
+                    "Workspace trust changed. Restart Selora before resuming queued agent work."
+                        .into(),
+                retryable: false,
+            })
+        } else {
+            self.send_agent_inner(
+                Arc::clone(&log),
+                app.clone(),
+                Some(session_id.clone()),
+                item.request_id.clone(),
+                item.request,
+                None,
+            )
+        };
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(session) = inner.sessions.get_mut(session_id) {
+                match result {
+                    Ok(()) => session
+                        .queue
+                        .retain(|queued| queued.request_id != item.request_id),
+                    Err(error) => {
+                        session.queue_paused = true;
+                        if let Some(head) = session.queue.first_mut() {
+                            head.status = AgentQueueStatusDto::Failed;
+                            head.error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+        self.publish_queue(&log, &app, session_id);
     }
 
     fn send_agent_inner<R: tauri::Runtime>(
@@ -1585,10 +2100,26 @@ impl SessionEngine {
         request_id: &RequestId,
         envelope_session: Option<SessionId>,
     ) -> Result<(), ProtocolErrorDto> {
-        let inner = self
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owner = inner
+            .active
+            .get(request_id)
+            .map(|active| active.session_id().clone());
+        if let Some(owner) = owner.as_ref() {
+            if envelope_session
+                .as_ref()
+                .is_some_and(|session| session != owner)
+            {
+                return Err(stale_session());
+            }
+            if let Some(session) = inner.sessions.get_mut(owner) {
+                session.queue_paused = true;
+            }
+        }
         if let Some(active) = inner.active.get(request_id) {
             if envelope_session.is_some_and(|session| session != *active.session_id()) {
                 return Err(stale_session());
@@ -1629,6 +2160,54 @@ impl SessionEngine {
     }
 
     pub(crate) fn agent_decision_with_resolution(
+        &self,
+        request_id: &RequestId,
+        approval_id: &ApprovalId,
+        decision: DecisionDto,
+        envelope_session: Option<SessionId>,
+        resolution: Option<selora_protocol::AgentDecisionResolutionDto>,
+    ) -> Result<(), ProtocolErrorDto> {
+        if decision == DecisionDto::Stop {
+            return self.stop_chat(request_id, envelope_session);
+        }
+        let _operation = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let identity = serde_json::json!({ "request_id": request_id, "session_id": envelope_session, "decision": decision, "resolution": &resolution });
+        if let Some(previous) = self
+            .accepted_decisions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(approval_id)
+        {
+            if previous != &identity {
+                return Err(idempotency_conflict());
+            }
+            let still_running = self
+                .inner
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .active
+                .contains_key(request_id);
+            if still_running {
+                return Ok(());
+            }
+        }
+        let result = self.agent_decision_once(
+            request_id,
+            approval_id,
+            decision,
+            envelope_session,
+            resolution,
+        );
+        if result.is_ok() {
+            self.accepted_decisions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(approval_id.clone(), identity);
+        }
+        result
+    }
+
+    fn agent_decision_once(
         &self,
         request_id: &RequestId,
         approval_id: &ApprovalId,
@@ -2453,7 +3032,7 @@ async fn chat_relay<R: tauri::Runtime>(ctx: ChatRelayCtx<R>) {
                     error,
                 }),
                 Some(request_id),
-                session_id,
+                session_id.clone(),
             );
         }
         // `None`: cancelled — the partial bubble is preserved (an empty
@@ -2482,6 +3061,7 @@ async fn chat_relay<R: tauri::Runtime>(ctx: ChatRelayCtx<R>) {
             );
         }
     }
+    tauri::async_runtime::spawn_blocking(move || engine.kick_queue(log, app, &session_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -2935,9 +3515,10 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 end_message: redact_with_keys(&end_message, &keys),
             }),
             Some(request_id),
-            session_id,
+            session_id.clone(),
         );
     }
+    tauri::async_runtime::spawn_blocking(move || engine.kick_queue(log, app, &session_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -3465,7 +4046,9 @@ fn begin_turn<'a>(
     session.last_activity = activity;
     session.active_request = Some(request_id.clone());
     session.updated_at = now;
-    inner.active_session = Some(session_id.clone());
+    if inner.active_session.is_none() {
+        inner.active_session = Some(session_id.clone());
+    }
     let user_message_id = fresh_message_id();
     push_message(
         session,
@@ -3521,14 +4104,9 @@ fn push_message(
         ok: true,
         timestamp: selora_ai::now_millis(),
     });
-    if session.messages.len() > MAX_SESSION_MESSAGES {
-        let overflow = session.messages.len() - MAX_SESSION_MESSAGES;
-        session.messages.drain(..overflow);
-        // The transcript keeps the full history; the in-memory tail is what
-        // the request needs. Never re-append a message that was already
-        // written.
-        session.durable_entries = session.durable_entries.saturating_sub(overflow);
-    }
+    // The transcript keeps the full history; the in-memory tail is what
+    // the request needs. Never re-append a message that was already
+    // written. Request construction bounds context independently of presentation.
 }
 
 /// The trailing transcript as request messages. Tool-call/tool-result
@@ -4247,11 +4825,14 @@ mod tests {
         state: &DesktopState,
         command: FrontendCommand,
     ) -> RequestEnvelope<FrontendCommand> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let request_id = format!("transport-{}", NEXT_REQUEST.fetch_add(1, Ordering::Relaxed));
         RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             workspace_id: Some(WorkspaceId::new("no-workspace").expect("valid id")),
             core_instance_id: Some(state.core_instance_id()),
-            request_id: RequestId::new("transport-1").expect("valid id"),
+            request_id: RequestId::new(request_id).expect("valid id"),
             session_id: None,
             payload: command,
         }

@@ -10,9 +10,10 @@
 // closed region never ships that CSS in first paint. agent.css stays eager:
 // the sidebar's agent view renders AgentSessionRail, which can be on screen
 // from the first frame.
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './app/App';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isNativeFrontend } from './app/surface';
 import './styles/base.css';
 import './styles/animations.css';
 import './styles/shell.css';
@@ -20,8 +21,17 @@ import './styles/theme-galaxy.css';
 import './styles/agent.css';
 import './styles/editor.css';
 
+const App = lazy(() => import('./app/App').then((module) => ({ default: module.App })));
+const AgentsWindowApp = lazy(() => import('./features/agents-workspace/AgentsWindowApp').then((module) => ({ default: module.AgentsWindowApp })));
+// Native identity is authoritative. Query routing is only for browser previews.
+const agentsSurface = isNativeFrontend()
+  ? getCurrentWindow().label === 'agents'
+  : new URLSearchParams(window.location.search).get('surface') === 'agents';
+
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <Suspense fallback={<main className="boot-screen" aria-live="polite">Loading Selora…</main>}>
+      {agentsSurface ? <AgentsWindowApp /> : <App />}
+    </Suspense>
   </React.StrictMode>,
 );

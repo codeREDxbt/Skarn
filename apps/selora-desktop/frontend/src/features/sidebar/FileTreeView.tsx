@@ -20,11 +20,13 @@ import {
   type BootstrapState,
   type FileTreeNode,
 } from '../../bridge/bridge';
-import { ChevronDown, ChevronRight, FileText, RefreshCw } from '../../components/icons';
+import { ChevronDown, ChevronRight, Edit, FilePlus, FileText, RefreshCw, Trash2 } from '../../components/icons';
 import { editorStore } from '../editor/editor-store';
 import { hasPendingEditorEdits } from '../editor/pending-edits';
 import { explorerCreateEntry, explorerDeleteEntry, explorerRenameEntry } from '../../bridge/explorer';
 import { ExplorerDialog, type ExplorerOperation } from './ExplorerDialog';
+import { ExplorerContextMenu } from './ExplorerContextMenu';
+import { OpenEditors } from './OpenEditors';
 import {
   consumeFileTreeReveal,
   subscribeFileTreeReveal,
@@ -125,6 +127,7 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
   const [isOpening, setIsOpening] = useState(false);
   const [status, setStatus] = useState<{ kind: 'error' | 'info'; text: string } | null>(null);
   const [operation, setOperation] = useState<ExplorerOperation | null>(null);
+  const [menu, setMenu] = useState<{ node: FileTreeNode; depth: number; x: number; y: number } | null>(null);
 
   const activePath = useMemo(() => {
     if (!liveBootstrap?.active_buffer_id) return null;
@@ -256,6 +259,14 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
     const key = pathKey(node.path);
     const index = visibleNodes.findIndex((row) => pathKey(row.node.path) === key);
 
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault();
+      const rect = event.currentTarget.getBoundingClientRect();
+      setSelectedPath(node.path);
+      setMenu({ node, depth: visibleNodes[index]?.depth ?? 0, x: rect.left, y: rect.bottom });
+      return;
+    }
+
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       focusNodeAt(index + 1);
@@ -365,6 +376,13 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
             else rowRefs.current.delete(key);
           }}
           onFocus={() => setFocusPath(key)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setSelectedPath(node.path);
+            setFocusPath(key);
+            setMenu({ node, depth, x: event.clientX, y: event.clientY });
+          }}
           onClick={() => {
             setFocusPath(key);
             activateNode(node);
@@ -406,14 +424,44 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
           ) : null}
           <span className="tree-actions-group" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
             {isDirectory ? (['new-file', 'new-folder'] as const).map((action) => (
-              <button key={action} type="button" className="tree-action-btn" aria-label={`${action === 'new-file' ? 'New file in' : 'New folder in'} ${node.name}`} onClick={() => {
-                if (liveBootstrap?.workspace.id) setOperation({ action, path: depth === 0 ? '' : node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
-              }}>{action === 'new-file' ? '+File' : '+Folder'}</button>
+              <button
+                key={action}
+                type="button"
+                className="tree-action-btn"
+                title={action === 'new-file' ? 'New File' : 'New Folder'}
+                aria-label={`${action === 'new-file' ? 'New file in' : 'New folder in'} ${node.name}`}
+                onClick={() => {
+                  if (liveBootstrap?.workspace.id) setOperation({ action, path: depth === 0 ? '' : node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
+                }}
+              >
+                {action === 'new-file' ? (
+                  <FilePlus size={13} aria-hidden="true" />
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M2 13h12a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7.5L6 2.5H2a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1z" />
+                    <line x1="8" y1="7" x2="8" y2="11" />
+                    <line x1="6" y1="9" x2="10" y2="9" />
+                  </svg>
+                )}
+              </button>
             )) : null}
             {depth > 0 ? (['rename', 'delete'] as const).map((action) => (
-              <button key={action} type="button" className="tree-action-btn" aria-label={`${action === 'rename' ? 'Rename' : 'Delete'} ${node.name}`} onClick={() => {
-                if (liveBootstrap?.workspace.id) setOperation({ action, path: node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
-              }}>{action === 'rename' ? 'Rename' : 'Delete'}</button>
+              <button
+                key={action}
+                type="button"
+                className={`tree-action-btn${action === 'delete' ? ' is-delete' : ''}`}
+                title={action === 'rename' ? 'Rename' : 'Delete'}
+                aria-label={`${action === 'rename' ? 'Rename' : 'Delete'} ${node.name}`}
+                onClick={() => {
+                  if (liveBootstrap?.workspace.id) setOperation({ action, path: node.path, name: node.name, isDirectory, workspaceId: liveBootstrap.workspace.id });
+                }}
+              >
+                {action === 'rename' ? (
+                  <Edit size={12} aria-hidden="true" />
+                ) : (
+                  <Trash2 size={12} aria-hidden="true" />
+                )}
+              </button>
             )) : null}
           </span>
         </div>
@@ -470,6 +518,7 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
 
   return (
     <div className="file-tree-view" data-testid="file-tree-view">
+      {(liveBootstrap?.buffers.length ?? 0) > 0 ? <OpenEditors /> : null}
       <div className="file-tree-action-bar">
         <div className="explorer-title-area">
           <span className="explorer-section-title" title={root.path}>
@@ -510,6 +559,13 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
       <div className="file-tree-list" role="tree" aria-label="Workspace files">
         {renderNode(root, 0)}
       </div>
+      {menu ? <ExplorerContextMenu key={`${menu.node.path}:${menu.x}:${menu.y}`} name={menu.node.name}
+        isDirectory={menu.node.kind === 'directory'} isRoot={menu.depth === 0} x={menu.x} y={menu.y}
+        onClose={() => setMenu(null)} onAction={(action) => {
+          if (!liveBootstrap?.workspace.id) return;
+          setOperation({ action, path: menu.depth === 0 ? '' : menu.node.path, name: menu.node.name,
+            isDirectory: menu.node.kind === 'directory', workspaceId: liveBootstrap.workspace.id });
+        }} /> : null}
       {operation ? <ExplorerDialog operation={operation} onClose={() => setOperation(null)} onSubmit={async (name) => {
         if (operation.action === 'new-file' || operation.action === 'new-folder') {
           await explorerCreateEntry(operation.workspaceId, operation.path, name, operation.action === 'new-file' ? 'file' : 'directory');

@@ -34,6 +34,20 @@ import {
   sendChat,
   setAgentAutoApprove,
   stopChat,
+  getAgentsSnapshot,
+  queueAgentPrompt,
+  updateQueuedAgentPrompt,
+  removeQueuedAgentPrompt,
+  reorderAgentPromptQueue,
+  clearAgentPromptQueue,
+  resumeAgentPromptQueue,
+  getAgentPreferences,
+  updateAgentPreferences,
+  subscribeAgentPreferences,
+  type AgentPreferencesDto,
+  type AgentRequestDto,
+  type AgentQueueItemDto,
+  type AgentsSnapshotDto,
   switchSession as switchSessionCommand,
   type AgentDecisionResolution,
   type AgentMode,
@@ -61,6 +75,7 @@ import {
 } from '../../bridge/bridge';
 import { toastStore } from '../toasts/toast-store';
 import { playCue } from '../sound/sound-store';
+import { getFrontendSurface, isNativeFrontend } from '../../app/surface';
 
 export type ModelSettings = {
   temperature: number;
@@ -878,12 +893,55 @@ export function workflowApprovalFromArgs(
 let context: EnvelopeContext | null = null;
 let activeRequestId: string | null = null;
 type SessionView = Pick<AgentState, 'messages' | 'todos' | 'plan' | 'planPhase' | 'inFlight' |
-  'thinkingState' | 'metrics' | 'promptQueue' | 'streamingActivityLevel'> & { requestId: string | null };
+  'thinkingState' | 'metrics' | 'promptQueue' | 'streamingActivityLevel' | 'permissionMode'> & { requestId: string | null };
 const sessionViews = new Map<string, SessionView>();
 // Explicit Retry invalidates metadata on its old tail. Weak keys disappear
 // with those messages, without granting a replacement turn their old status.
 const retriedMessages = new WeakSet<ChatMessage>();
 let routingSessionEvent = false;
+let hydratingSnapshot = false;
+let preferencesRevision = -1;
+let preferencesStarted = false;
+let selectedWorkspaceId: string | null = null;
+let selectedSessionId = '';
+let refreshProjection: (() => Promise<void>) | null = null;
+
+function applyPreferences(preferences: AgentPreferencesDto): void {
+  if (preferences.revision < preferencesRevision) return;
+  preferencesRevision = preferences.revision;
+  state = { ...state, modelSettings: {
+    temperature: preferences.temperature,
+    systemInstructions: preferences.systemInstructions,
+    customModelId: preferences.customModelId,
+  }, selectedModel: preferences.selectedModel, reasoningEffort: preferences.reasoningEffort };
+  notify();
+}
+
+async function patchPreferences(patch: Partial<Omit<AgentPreferencesDto, 'revision'>>): Promise<void> {
+  if (!isNativeFrontend()) return;
+  await updateAgentPreferences(patch).then(applyPreferences).catch((error: unknown) => {
+    toastStore.pushLocal('error', `Could not save agent preferences: ${decisionErrorMessage(error)}`);
+    throw error;
+  });
+}
+
+function queueFromDto(queue: AgentQueueItemDto[]): QueuedPrompt[] {
+  return queue.map((item) => ({
+    id: item.request_id, text: item.request.prompt, createdAt: item.created_at,
+    mode: item.request.mode === 'auto' ? 'full' : item.request.mode === 'explore' ? 'plan_only' : 'ask_before_change',
+    request: item.request,
+    status: item.status, error: item.error,
+  }));
+}
+
+function capturedRequest(text: string, mode = state.permissionMode, editorContext?: EditorContextDto): AgentRequestDto {
+  return {
+    session_id: state.activeSessionId, prompt: text, model_id: resolveModelId(state),
+    mode: toAgentMode(mode), reasoning_effort: state.reasoningEffort,
+    system_instructions: state.modelSettings.systemInstructions, temperature: state.modelSettings.temperature,
+    ...(editorContext ? { editor_context: editorContext } : {}),
+  };
+}
 
 function selectSessionView(sessionId: string, clearChildSelection = false) {
   const view = sessionViews.get(sessionId);
@@ -903,7 +961,7 @@ function selectSessionView(sessionId: string, clearChildSelection = false) {
     metrics: view?.metrics ?? { totalTokens: 0, costUsd: 0, activeToolsCount: 0, approvedCount: 0, deniedCount: 0, latencyMs: 0 },
     promptQueue: view?.promptQueue ?? [],
     streamingActivityLevel: view?.streamingActivityLevel ?? 0,
-    permissionMode: DEFAULT_PERMISSION_MODE,
+    permissionMode: view?.permissionMode ?? DEFAULT_PERMISSION_MODE,
   };
 }
 
@@ -1152,6 +1210,7 @@ function notify() {
       messages: state.messages, todos: state.todos, plan: state.plan, planPhase: state.planPhase,
       inFlight: state.inFlight, thinkingState: state.thinkingState, metrics: state.metrics,
       promptQueue: state.promptQueue, streamingActivityLevel: state.streamingActivityLevel,
+      permissionMode: state.permissionMode,
       requestId: activeRequestId,
     });
     state = {
@@ -1160,7 +1219,7 @@ function notify() {
       todosBySession: { ...state.todosBySession, [state.activeSessionId]: state.todos },
     };
   }
-  if (routingSessionEvent) return;
+  if (routingSessionEvent || hydratingSnapshot) return;
   for (const listener of listeners) {
     listener();
   }
@@ -1224,6 +1283,207 @@ async function submitPromptDecision(
 }
 
 export const agentStore = {
+  installProjectionRefresh(refresh: () => Promise<void>): void {
+    refreshProjection = refresh;
+  },
+
+  needsRequestHydration(payload: { session_id: string; request_id: string }): boolean {
+    if (terminalRequests.has(payload.request_id)) return false;
+    const request = payload.session_id === state.activeSessionId ? activeRequestId : sessionViews.get(payload.session_id)?.requestId;
+    return request !== payload.request_id;
+  },
+  startPreferences(): void {
+    if (preferencesStarted || !isNativeFrontend()) return;
+    preferencesStarted = true;
+    // Subscribe first; revision checks prevent a late read from replacing a newer event.
+    void subscribeAgentPreferences(applyPreferences).then(() => getAgentPreferences())
+      .then(applyPreferences).catch((error: unknown) => {
+        preferencesStarted = false;
+        toastStore.pushLocal('error', `Could not load agent preferences: ${decisionErrorMessage(error)}`);
+      });
+  },
+
+  /** Replace every agent projection at one backend watermark, without replay side effects. */
+  hydrateAgents(snapshot: AgentsSnapshotDto): void {
+    if (!context || snapshot.core_instance_id !== context.core_instance_id ||
+        snapshot.workspace_id !== context.workspace_id) return;
+    const previousSelection = selectedWorkspaceId === snapshot.workspace_id ? selectedSessionId : '';
+    const oldChildren = new Map(state.subagents.map((child) => [child.id, child]));
+    hydratingSnapshot = true;
+    try {
+      sessionViews.clear();
+      pendingApprovalRequests.clear();
+      childApprovalOwners.clear();
+      workflowConfirmations.clear();
+      completedSubagentIds.clear();
+      terminalRequests.clear();
+      state = { ...state, sessions: snapshot.sessions.map((session) => ({
+        id: session.session_id, title: session.title,
+        createdAt: session.created_at, updatedAt: session.updated_at,
+        tokenCount: 0, costUsd: 0, durable: session.durable, modelId: session.model_id,
+        isRunning: Boolean(session.active_request_id),
+      })), transcripts: {}, todosBySession: {}, subagents: [], activeSubagentId: null };
+      for (const session of snapshot.sessions) {
+        activeRequestId = session.active_request_id;
+        const messages: ChatMessage[] = session.messages.flatMap((message) =>
+          message.role === 'assistant' || message.role === 'user' ? [{
+            id: message.message_id, role: message.role, content: message.text,
+            status: 'complete' as const, timestamp: 0,
+          }] : []);
+        const timeline = [...session.timeline].sort((a, b) => a.sequence - b.sequence);
+        // Completion may assign the durable assistant id after its streaming id.
+        const assistantIds = new Map<string, string>();
+        for (const { event } of timeline) {
+          if (event.kind === 'message' || event.kind === 'chat_completed') {
+            assistantIds.set(event.payload.request_id, event.payload.message_id);
+          }
+        }
+        const assistant = (requestId: string): ChatMessage => {
+          const id = assistantIds.get(requestId) ?? `msg_${requestId}_a`;
+          let message = messages.find((entry) => entry.id === id);
+          if (!message) {
+            message = { id, role: 'assistant', content: '', status: 'streaming', timestamp: 0, toolCalls: [] };
+            messages.push(message);
+          }
+          return message;
+        };
+        let metrics: AgentMetrics = { totalTokens: 0, costUsd: 0, activeToolsCount: 0, approvedCount: 0, deniedCount: 0, latencyMs: 0 };
+        for (const { event } of timeline) {
+          const payload = event.payload;
+          const message = assistant(payload.request_id);
+          switch (event.kind) {
+            case 'message':
+              message.content = event.payload.text;
+              message.status = event.payload.request_id === session.active_request_id ? 'streaming' : 'complete';
+              break;
+            case 'tool_call_started': {
+              const call = event.payload;
+              const { argsSummary, argsRaw } = summarizeToolArgs(call.args_json, call.tool_name);
+              const tool: WorkflowToolCall = {
+                id: call.call_id, toolName: call.tool_name, argsSummary, argsRaw,
+                status: 'running', startedAt: 0,
+                workflow: call.tool_name === 'run_workflow' ? workflowApprovalFromArgs(argsRaw) : undefined,
+                plan: call.tool_name === 'exit_plan_mode' ? planApprovalFromArgs(argsRaw) : undefined,
+              };
+              message.toolCalls = [...(message.toolCalls ?? []).filter((entry) => entry.id !== tool.id), tool];
+              break;
+            }
+            case 'tool_result': {
+              const result = event.payload;
+              message.toolCalls = message.toolCalls?.map((call) => call.id === result.call_id
+                ? { ...call, status: result.is_err ? 'error' : 'completed', resultSummary: result.result_summary } : call);
+              break;
+            }
+            case 'chat_completed':
+              message.content = event.payload.text;
+              message.status = 'complete';
+              terminalRequests.add(event.payload.request_id);
+              break;
+            case 'chat_failed':
+              message.content = message.content ? `${message.content}\n\n[Error: ${event.payload.error.message}]` : `[Error: ${event.payload.error.message}]`;
+              message.status = 'error';
+              terminalRequests.add(event.payload.request_id);
+              break;
+            case 'agent_turn_done': {
+              const done = event.payload;
+              const stopped = isUserStoppedTurn(done.completed, done.end_message);
+              if (!message.content) message.content = done.end_message;
+              message.status = done.completed || stopped ? 'complete' : 'error';
+              if (stopped) (message as CancelledChatMessage).cancelled = true;
+              terminalRequests.add(done.request_id);
+              metrics = { totalTokens: done.total_tokens, costUsd: done.cost_usd, activeToolsCount: done.num_tools,
+                approvedCount: done.approved, deniedCount: done.denied, latencyMs: 0 };
+              break;
+            }
+          }
+        }
+        if (session.active_request_id) {
+          terminalRequests.delete(session.active_request_id);
+          assistant(session.active_request_id);
+        }
+         const visibleMessages = messages.filter((message) =>
+           message.role !== 'assistant' || Boolean(message.content) || Boolean(message.toolCalls?.length));
+        const todos = todosFromSnapshot(session.todos);
+        const plan = session.plan ?? null;
+        const planPhase = session.plan_phase;
+        const inFlight = Boolean(session.active_request_id);
+        const thinkingState = session.state === 'running_tool' ? 'solving'
+          : session.state === 'thinking' ? 'working' : 'breathing';
+        const promptQueue = queueFromDto(session.queue);
+        const permissionMode = session.mode === 'auto' ? 'full' : session.mode === 'explore' ? 'plan_only' : 'ask_before_change';
+        state = { ...state, activeSessionId: session.session_id, messages: visibleMessages,
+          todos, plan, planPhase, inFlight, thinkingState, metrics,
+          streamingActivityLevel: session.active_request_id ? 0.5 : 0, promptQueue,
+          permissionMode };
+        state = {
+          ...state,
+          transcripts: { ...state.transcripts, [session.session_id]: visibleMessages },
+          todosBySession: { ...state.todosBySession, [session.session_id]: todos },
+        };
+        sessionViews.set(session.session_id, {
+          messages: visibleMessages,
+          todos,
+          plan,
+          planPhase,
+          inFlight,
+          thinkingState,
+          metrics,
+          promptQueue,
+          permissionMode,
+          streamingActivityLevel: session.active_request_id ? 0.5 : 0,
+          requestId: session.active_request_id,
+        });
+        for (const child of session.subagents) {
+          this.handleSubagentActivity(child.started);
+          for (const activity of child.timeline) this.handleSubagentActivity(activity);
+          if (child.started.kind === 'started') {
+            const childId = child.started.child_id;
+            this.handleSubagentActivity({ kind: 'state_changed', child_id: childId,
+              parent_session_id: session.session_id, state: child.state, tool_name: child.tool_name ?? undefined });
+            if (child.completed) this.handleSubagentCompleted(child.completed);
+            else if (child.cancelled) this.handleSubagentCancelled({ child_id: childId, parent_session_id: session.session_id });
+            state = { ...state, subagents: state.subagents.map((entry) => entry.id === childId
+              ? { ...entry, unread: oldChildren.get(childId)?.unread ?? false } : entry) };
+          }
+        }
+        for (const approval of session.approvals) this.handleApprovalNeeded(approval, true);
+        notify();
+      }
+      const selection = snapshot.sessions.some((session) => session.session_id === previousSelection)
+        ? previousSelection : snapshot.selected_session_id ?? snapshot.sessions[0]?.session_id ?? '';
+      selectedWorkspaceId = snapshot.workspace_id;
+      selectedSessionId = selection;
+      selectSessionView(selection, true);
+      state = { ...state, unreadSubagentCount: countUnreadSubagents(state.subagents) };
+    } finally {
+      hydratingSnapshot = false;
+      notify();
+    }
+  },
+
+  async refreshAgents(): Promise<void> {
+    // Navigation and mutation callers need a projection refresh, not a full
+    // bootstrap. Full bootstrap from the Agents rail re-enters this effect and
+    // leaves the native window on the connecting screen.
+    this.hydrateAgents(await getAgentsSnapshot());
+  },
+
+  handleQueueChanged(payload: { session_id: string; queue: AgentQueueItemDto[] }): void {
+    const promptQueue = queueFromDto(payload.queue);
+    const view = sessionViews.get(payload.session_id);
+    if (view) sessionViews.set(payload.session_id, { ...view, promptQueue });
+    if (state.activeSessionId === payload.session_id) state = { ...state, promptQueue };
+    notify();
+  },
+
+  handleSessionRenamed(payload: { session_id: string; title: string; updated_at: number }): void {
+    state = { ...state, sessions: state.sessions.map((session) => session.id === payload.session_id
+      ? { ...session, title: payload.title, updatedAt: payload.updated_at } : session),
+      resumableSessions: state.resumableSessions.map((session) => session.id === payload.session_id
+        ? { ...session, title: payload.title, updatedAt: payload.updated_at } : session) };
+    notify();
+  },
+
   /** Apply a background turn's event to its own projection, not the selected tab. */
   routeSessionEvent(payload: { session_id?: string | null; request_id?: string | null }, apply: () => void): boolean {
     const sessionId = payload.session_id;
@@ -1304,11 +1564,15 @@ export const agentStore = {
       isRunning: session.active,
     }));
 
-const activeSessionId =
+    const backendSessionId =
       bootstrap.chat.active_session_id ??
       bootstrap.chat.sessions.find((session) => session.active)?.session_id ??
       sessions[0]?.id ??
       '';
+    const activeSessionId = isNativeFrontend() && selectedWorkspaceId === bootstrap.workspace.id &&
+      sessions.some((session) => session.id === selectedSessionId) ? selectedSessionId : backendSessionId;
+    selectedWorkspaceId = bootstrap.workspace.id;
+    selectedSessionId = activeSessionId;
 
     // Keep each backend session's transcript separate: switching a tab must
     // show that session's messages, not the flattened union of every session.
@@ -1360,7 +1624,7 @@ const activeSessionId =
       const previousView = sessionViews.get(session.id);
       const previous = previousTranscripts[session.id] ?? previousView?.messages ?? [];
       const merged = transcripts[session.id] ?? [];
-      const snapshotRequest = session.id === activeSessionId ? bootstrap.chat.active_request_id : null;
+      const snapshotRequest = session.id === backendSessionId ? bootstrap.chat.active_request_id : null;
       const snapshotEnded = Boolean(snapshotRequest && terminalRequests.has(snapshotRequest));
       const remoteRequest = snapshotEnded ? null : snapshotRequest;
       const backendLive = !snapshotEnded && Boolean(session.isRunning || remoteRequest);
@@ -1486,6 +1750,7 @@ const activeSessionId =
         thinkingState: liveSessions.has(session.session_id) ? previous?.thinkingState ?? 'breathing' : 'breathing',
         metrics: previous?.metrics ?? { totalTokens: 0, costUsd: 0, activeToolsCount: 0, approvedCount: 0, deniedCount: 0, latencyMs: 0 },
         promptQueue: previous?.promptQueue ?? [],
+        permissionMode: previous?.permissionMode ?? DEFAULT_PERMISSION_MODE,
         streamingActivityLevel: liveSessions.has(session.session_id) ? previous?.streamingActivityLevel ?? 0 : 0,
         requestId: hydratedRequests.get(session.session_id) ?? null,
       });
@@ -1585,7 +1850,7 @@ const activeSessionId =
     state = {
       ...state,
       availableModels: models,
-      selectedModel: modelToSelect,
+      selectedModel: isNativeFrontend() && preferencesRevision >= 0 ? state.selectedModel : modelToSelect,
       workspace,
       sessions,
       transcripts,
@@ -1636,6 +1901,8 @@ const activeSessionId =
   reset() {
     sessionViews.clear();
     context = null;
+    selectedWorkspaceId = null;
+    selectedSessionId = '';
     activeRequestId = null;
     pendingApprovalRequests.clear();
     childApprovalOwners.clear();
@@ -1683,7 +1950,9 @@ const activeSessionId =
       return false;
     }
     try {
-      await requestNewSessionCommand({ ...context, session_id: null });
+      const result = await requestNewSessionCommand({ ...context, session_id: null }) as { session_id: string };
+      if (isNativeFrontend()) await this.refreshAgents();
+      if (result?.session_id) this.selectSessionLocally(result.session_id);
       return true;
     } catch (error) {
       toastStore.pushLocal('error', sessionCommandError('create', error));
@@ -1693,16 +1962,7 @@ const activeSessionId =
 
   /** Select an existing backend session (unknown ids are refused by Rust). */
   async switchSession(sessionId: string): Promise<boolean> {
-    if (!state.sessions.some((session) => session.id === sessionId)) return false;
-    if (!context) return false;
-    if (sessionId === state.activeSessionId) return true;
-    try {
-      await switchSessionCommand(sessionId, { ...context, session_id: null });
-      return true;
-    } catch (error) {
-      toastStore.pushLocal('error', sessionCommandError('switch', error));
-      return false;
-    }
+    return this.requestSwitchSession(sessionId);
   },
 
   /** Retry a user turn: Rust truncates the failed tail and dispatches once. */
@@ -1819,7 +2079,9 @@ const activeSessionId =
     state = { ...state, sessionBusy: true, sessionError: null };
     notify();
     try {
-      await requestNewSessionCommand(ctx);
+      const result = await requestNewSessionCommand(ctx) as { session_id: string };
+      if (isNativeFrontend()) await this.refreshAgents();
+      if (result?.session_id) this.selectSessionLocally(result.session_id);
       state = { ...state, permissionMode: DEFAULT_PERMISSION_MODE };
       return true;
     } catch (error) {
@@ -1836,6 +2098,8 @@ const activeSessionId =
    * use it, because session tabs dispatch the real `SwitchSession`.
    */
   selectSessionLocally(sessionId: string) {
+    selectedWorkspaceId = context?.workspace_id ?? null;
+    selectedSessionId = sessionId;
     if (state.activeSessionId === sessionId) return;
     selectSessionView(sessionId, true);
     notify();
@@ -1867,10 +2131,17 @@ const activeSessionId =
       return false;
     }
     if (state.sessionBusy) return false;
+    if (state.sessions.some((session) => session.id === sessionId)) {
+      this.selectSessionLocally(sessionId);
+      return true;
+    }
     state = { ...state, sessionBusy: true, sessionError: null };
     notify();
     try {
       await switchSessionCommand(sessionId, ctx);
+      if (isNativeFrontend()) await this.refreshAgents();
+      selectedWorkspaceId = ctx.workspace_id;
+      selectedSessionId = sessionId;
       selectSessionView(sessionId, true);
       state = {
         ...state,
@@ -2301,7 +2572,8 @@ const activeSessionId =
   },
 
   toggleSessionPinned(sessionId: string) {
-    if (!state.sessions.some((session) => session.id === sessionId)) return;
+    if (!state.sessions.some((session) => session.id === sessionId) &&
+        !state.resumableSessions.some((session) => session.id === sessionId)) return;
     const pinnedSessionIds = state.pinnedSessionIds.includes(sessionId)
       ? state.pinnedSessionIds.filter((id) => id !== sessionId)
       : [...state.pinnedSessionIds, sessionId];
@@ -2369,17 +2641,20 @@ const activeSessionId =
     notify();
   },
 
-  setReasoningEffort(effort: ReasoningEffort) {
+  async setReasoningEffort(effort: ReasoningEffort): Promise<void> {
+    if (isNativeFrontend()) return patchPreferences({ reasoningEffort: effort });
     state = { ...state, reasoningEffort: effort };
     notify();
   },
 
-  setSelectedModel(model: string) {
+  async setSelectedModel(model: string): Promise<void> {
+    if (isNativeFrontend()) return patchPreferences({ selectedModel: model });
     state = { ...state, selectedModel: model };
     notify();
   },
 
-  updateModelSettings(settings: Partial<ModelSettings>) {
+  async updateModelSettings(settings: Partial<ModelSettings>): Promise<void> {
+    if (isNativeFrontend()) return patchPreferences(settings);
     const updated = {
       ...state.modelSettings,
       ...settings,
@@ -2463,7 +2738,7 @@ const activeSessionId =
       thinkingState: 'working',
       streamingActivityLevel: isSteer ? 0.9 : 0.7,
     };
-    playCue('send');
+    if (getFrontendSurface().kind === 'main') playCue('send');
     notify();
 
     const promptToSend = isSteer
@@ -2627,88 +2902,61 @@ const activeSessionId =
     this.sendUserMessage(trimmed);
   },
 
-  queuePrompt(text: string, mode?: PermissionMode): string {
+  async queuePrompt(text: string, mode?: PermissionMode, editorContext?: EditorContextDto): Promise<string> {
     const trimmed = text.trim();
     if (!trimmed) return '';
-    if (!state.inFlight) {
-      this.sendUserMessage(trimmed);
-      return '';
-    }
-    const id = `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const queuedItem: QueuedPrompt = {
-      id,
-      text: trimmed,
-      createdAt: Date.now(),
-      mode: mode || state.permissionMode,
-    };
-    state = {
-      ...state,
-      promptQueue: [...state.promptQueue, queuedItem],
-    };
-    notify();
+    const ctx = sessionEnvelopeContext();
+    if (!ctx || !getComposerGate(state).ready) return '';
+    const id = crypto.randomUUID();
+    await queueAgentPrompt(capturedRequest(trimmed, mode, editorContext), ctx, id);
     return id;
   },
 
-  removeQueuedPrompt(id: string) {
-    state = {
-      ...state,
-      promptQueue: state.promptQueue.filter((q) => q.id !== id),
-    };
-    notify();
+  async removeQueuedPrompt(id: string): Promise<void> {
+    const ctx = sessionEnvelopeContext();
+    if (ctx?.session_id) await removeQueuedAgentPrompt(ctx.session_id, id, ctx);
   },
 
-  updateQueuedPrompt(id: string, newText: string) {
+  async updateQueuedPrompt(id: string, newText: string): Promise<void> {
     const trimmed = newText.trim();
     if (!trimmed) return;
-    state = {
-      ...state,
-      promptQueue: state.promptQueue.map((q) =>
-        q.id === id ? { ...q, text: trimmed } : q
-      ),
-    };
-    notify();
+    const ctx = sessionEnvelopeContext();
+    const item = state.promptQueue.find((entry) => entry.id === id);
+    if (ctx?.session_id && item?.request) {
+      await updateQueuedAgentPrompt(ctx.session_id, id, { ...item.request, prompt: trimmed }, ctx);
+    }
   },
 
-  clearPromptQueue() {
-    state = {
-      ...state,
-      promptQueue: [],
-    };
-    notify();
+  async clearPromptQueue(): Promise<void> {
+    const ctx = sessionEnvelopeContext();
+    if (ctx?.session_id) await clearAgentPromptQueue(ctx.session_id, ctx);
   },
 
-  promoteQueuedPrompt(id: string) {
+  async promoteQueuedPrompt(id: string): Promise<void> {
     const item = state.promptQueue.find((q) => q.id === id);
     if (!item) return;
     const remaining = state.promptQueue.filter((q) => q.id !== id);
-    state = {
-      ...state,
-      promptQueue: [item, ...remaining],
-    };
-    notify();
+    const ctx = sessionEnvelopeContext();
+    if (ctx?.session_id) await reorderAgentPromptQueue(ctx.session_id, [item, ...remaining].map((entry) => entry.id), ctx);
   },
 
-  reorderPromptQueue(fromIndex: number, toIndex: number) {
+  async reorderPromptQueue(fromIndex: number, toIndex: number): Promise<void> {
     if (fromIndex < 0 || fromIndex >= state.promptQueue.length) return;
     if (toIndex < 0 || toIndex >= state.promptQueue.length) return;
     const q = [...state.promptQueue];
     const [moved] = q.splice(fromIndex, 1);
     q.splice(toIndex, 0, moved);
-    state = { ...state, promptQueue: q };
-    notify();
+    const ctx = sessionEnvelopeContext();
+    if (ctx?.session_id) await reorderAgentPromptQueue(ctx.session_id, q.map((entry) => entry.id), ctx);
   },
 
   checkAndExecuteNextQueued() {
-    if (state.inFlight || state.promptQueue.length === 0) return;
-    const nextItem = state.promptQueue[0];
-    state = {
-      ...state,
-      promptQueue: state.promptQueue.slice(1),
-    };
-    notify();
-    setTimeout(() => {
-      this.sendUserMessage(nextItem.text);
-    }, 80);
+    // Rust alone starts queued turns. Replay and background webviews never dispatch them.
+  },
+
+  async resumePromptQueue(): Promise<void> {
+    const ctx = sessionEnvelopeContext();
+    if (ctx?.session_id) await resumeAgentPromptQueue(ctx.session_id, ctx);
   },
 
   appendAssistantDelta(delta: string) {
@@ -3210,7 +3458,9 @@ const activeSessionId =
     if (!isActiveEvent(payload)) return;
     terminalRequests.add(payload.request_id);
     const stoppedByUser = isUserStoppedTurn(payload.completed, payload.end_message);
-    playCue(payload.completed ? 'complete' : stoppedByUser ? 'notify' : 'error');
+    if (!hydratingSnapshot && getFrontendSurface().kind === 'main') {
+      playCue(payload.completed ? 'complete' : stoppedByUser ? 'notify' : 'error');
+    }
     const lastMsgIndex = state.messages.length - 1;
     if (lastMsgIndex >= 0 && state.messages[lastMsgIndex]?.role === 'assistant') {
       const lastMsg = state.messages[lastMsgIndex]!;

@@ -27,6 +27,15 @@ fn main() {
         tauri_build::Attributes::new()
             .windows_attributes(windows)
             .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "get_agent_preferences",
+                "update_agent_preferences",
+                "agents_read_file_preview",
+                "agents_read_git_diff",
+                "get_agents_snapshot",
+                "open_agents_window",
+                "agents_window_ready",
+                "focus_editor_window",
+                "show_session_in_main_window",
                 "get_bootstrap_state",
                 "dispatch_command",
                 "frontend_ready",

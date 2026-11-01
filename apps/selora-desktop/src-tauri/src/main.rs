@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adapter;
+mod agents_preferences;
+mod agents_preview;
+mod agents_window;
 mod commands;
 mod crash_log;
 mod events;
@@ -119,6 +122,8 @@ fn main() {
                 .build(),
         )
         .manage(state)
+        .manage(agents_preferences::AgentPreferencesState::default())
+        .manage(agents_window::AgentsWindowState::default())
         // §3.3 (docs/ui/PHASE_Z2_ARCHITECTURE.md): the close path runs in Rust
         // on `CloseRequested` — an IPC command cannot be guaranteed to flush
         // during webview teardown (WebView2 `beforeunload` is unreliable), so
@@ -127,7 +132,16 @@ fn main() {
         // `prevent_close`, so edits are never silently lost. The layout save
         // stays best-effort after the close is allowed.
         .on_window_event(|window, event| {
+            agents_window::on_window_event(window, event);
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let lifecycle = window.state::<agents_window::AgentsWindowState>();
+                if !lifecycle.begin_main_close() {
+                    api.prevent_close();
+                    return;
+                }
                 let app_state = window.app_handle().state::<state::DesktopState>();
                 match app_state.handle_close_request(prompt_close_choice) {
                     state::CloseOutcome::Close { .. } => {
@@ -137,9 +151,15 @@ fn main() {
                         // its process tree now rather than leaving them to the
                         // OS handle close.
                         app_state.shutdown_terminals();
+                        agents_window::close_for_main_shutdown(window.app_handle());
+                        window.app_handle().exit(0);
                     }
-                    state::CloseOutcome::Stay => api.prevent_close(),
+                    state::CloseOutcome::Stay => {
+                        lifecycle.cancel_main_close();
+                        api.prevent_close();
+                    }
                     state::CloseOutcome::SaveFailed { saved, message } => {
+                        lifecycle.cancel_main_close();
                         api.prevent_close();
                         let _ = rfd::MessageDialog::new()
                             .set_title("Could not save")
@@ -211,6 +231,15 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agents_preferences::get_agent_preferences,
+            agents_preferences::update_agent_preferences,
+            agents_preview::agents_read_file_preview,
+            agents_preview::agents_read_git_diff,
+            commands::get_agents_snapshot,
+            agents_window::open_agents_window,
+            agents_window::agents_window_ready,
+            agents_window::focus_editor_window,
+            agents_window::show_session_in_main_window,
             explorer::explorer_create_entry,
             explorer::explorer_rename_entry,
             explorer::explorer_delete_entry,

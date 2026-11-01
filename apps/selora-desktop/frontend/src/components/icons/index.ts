@@ -36,6 +36,17 @@ import {
   Trash,
   ArrowDown2,
   ArrowRight2,
+  ArrowLeft2,
+  HambergerMenu,
+  SidebarLeft,
+  SidebarRight,
+  More,
+  MoreSquare,
+  Messages1,
+  Setting2,
+  FolderOpen,
+  Folder,
+  Filter,
   RowVertical,
   Hierarchy,
   CpuSetting,
@@ -54,6 +65,7 @@ export type IconProps = IconsaxIconProps;
 // --- 1. Actions & Controls ---
 export const Plus: FC<IconProps> = Add;
 export const AddIcon: FC<IconProps> = Add;
+export { Add };
 
 export const ArrowUpIcon: FC<IconProps> = ArrowUp;
 export { ArrowUp };
@@ -168,4 +180,26 @@ export const Timer: FC<IconProps> = IconsaxTimer;
 export const TimerIcon: FC<IconProps> = IconsaxTimer;
 
 export const ArchiveIcon: FC<IconProps> = Archive;
+
+// --- 8. Workspace & Agents Navigation ---
+export const ChevronLeft: FC<IconProps> = ArrowLeft2;
+export { ArrowLeft2, ArrowRight2 };
+export const SidebarLeftIcon: FC<IconProps> = SidebarLeft;
+export { SidebarLeft };
+export const SidebarRightIcon: FC<IconProps> = SidebarRight;
+export { SidebarRight };
+export const MenuIcon: FC<IconProps> = HambergerMenu;
+export { HambergerMenu };
+export const MoreIcon: FC<IconProps> = More;
+export { More, MoreSquare };
+export const MessagesIcon: FC<IconProps> = Messages1;
+export { Messages1 };
+export const Setting2Icon: FC<IconProps> = Setting2;
+export { Setting2 };
+export const FolderOpenIcon: FC<IconProps> = FolderOpen;
+export { FolderOpen };
+export const FolderIcon: FC<IconProps> = Folder;
+export { Folder };
+export const FilterIcon: FC<IconProps> = Filter;
+export { Filter };
 

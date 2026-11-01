@@ -1,0 +1,156 @@
+/* ==========================================================================
+   Selora IDE — Agents Customizations & Automations Views
+   Scoped strictly to .agents-workspace .agents-customizations / .agents-automations
+   ========================================================================== */
+
+.agents-workspace .agents-customizations,
+.agents-workspace .agents-automations {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 32px 24px;
+  box-sizing: border-box;
+  color: var(--fg-default, #e5e5e5);
+  font-family: var(--font-sans);
+}
+
+.agents-workspace .agents-customizations h1,
+.agents-workspace .agents-automations h1 {
+  margin: 0 0 6px;
+  font-size: var(--type-xl, 18px);
+  font-weight: var(--weight-semibold, 600);
+  letter-spacing: var(--tracking-tight, -0.01em);
+  color: var(--fg-bright, #ffffff);
+}
+
+.agents-workspace .agents-customizations p,
+.agents-workspace .agents-automations > header p {
+  color: var(--fg-muted, #8a8a8a);
+  line-height: 1.6;
+  font-size: var(--type-sm, 12px);
+  margin: 0;
+}
+
+.agents-workspace .agents-customizations-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  margin: 0;
+  padding: 20px 24px;
+  background: var(--agents-surface-card, #121218);
+  border: 1px solid var(--agents-border-card, rgba(255, 255, 255, 0.09));
+  border-radius: var(--agents-radius-card, 12px);
+  box-shadow: var(--agents-shadow-card);
+  transition: border-color var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-customizations-card:hover {
+  border-color: var(--agents-border-hover, rgba(255, 255, 255, 0.18));
+}
+
+.agents-workspace .agents-customizations-card h2 {
+  margin: 0;
+  font-size: var(--type-md, 13px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--fg-bright, #ffffff);
+}
+
+.agents-workspace .agents-customizations-card select,
+.agents-workspace .agents-customizations-card textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  border-radius: var(--agents-radius-md, 6px);
+  background: var(--agents-canvas, #000000);
+  color: var(--fg-default, #e5e5e5);
+  font: inherit;
+  font-size: var(--type-sm, 12px);
+  outline: none;
+  transition: border-color var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-customizations-card select:focus-visible,
+.agents-workspace .agents-customizations-card textarea:focus-visible {
+  border-color: var(--accent, #a78bfa);
+  box-shadow: 0 0 0 2px var(--glow-accent, rgba(167, 139, 250, 0.25));
+}
+
+.agents-workspace .agents-customizations-card textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.6;
+}
+
+.agents-workspace .agents-customizations-card button {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--agents-border-card, rgba(255, 255, 255, 0.09));
+  border-radius: var(--agents-radius-sm, 4px);
+  background: var(--agents-surface-card, #121218);
+  color: var(--fg-bright, #ffffff);
+  font-size: var(--type-xs, 11px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-customizations-card button:hover:not(:disabled) {
+  background: var(--agents-surface-hover, #1d1d27);
+  border-color: var(--agents-border-hover, rgba(255, 255, 255, 0.18));
+}
+
+.agents-workspace .agents-customizations-card button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.agents-workspace .agents-customizations-card button:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 1px;
+}
+
+.agents-workspace .agents-customizations-providers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.agents-workspace .agents-customizations-provider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--agents-canvas, #000000);
+  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  border-radius: var(--agents-radius-md, 6px);
+}
+
+.agents-workspace .agents-customizations-provider label {
+  font-size: var(--type-sm, 12px);
+  font-weight: var(--weight-medium, 500);
+  color: var(--fg-default, #e5e5e5);
+}
+
+.agents-workspace .agents-customizations-provider input[type="checkbox"] {
+  accent-color: var(--accent, #a78bfa);
+  cursor: pointer;
+}
+
+.agents-workspace .agents-customizations .agents-customizations-error {
+  color: var(--agents-deleted-fg, #f87171);
+  font-size: var(--type-xs, 11px);
+}
+
+.agents-workspace .agents-automations .workflows-panel {
+  min-height: 320px;
+}

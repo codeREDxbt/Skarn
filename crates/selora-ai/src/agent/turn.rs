@@ -5,7 +5,7 @@
 //! `ChatRequest` with the manifest armed; on `finish_reason ==
 //! "tool_calls"` run the calls in order via the router (5b); on a card,
 //! park in [`AgentTurnState::AwaitingApproval`] until the user's decision
-//! arrives; repeat until a tool-free answer. Caps (25 tool iterations /
+//! arrives; repeat until a tool-free answer. Caps (100 tool calls /
 //! 10 minutes / $1 / the model's context window minus a 20% reserve —
 //! user-tunable in settings `agent.*`) abort with the partial answer and
 //! a toast-able reason.
@@ -36,8 +36,8 @@ use crate::types::{compute_cost_usd, ChatEvent, ChatMessage, ChatReceipt, ChatRe
 // Caps (§17.3 — defaults; the user tunes them via settings `agent.*`)
 // ---------------------------------------------------------------------------
 
-/// Max tool iterations per turn (§17.3: 25; settings `agent.max_iterations`).
-pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
+/// Default maximum tool calls per turn (settings `agent.max_iterations`).
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 100;
 /// Max wall-clock seconds per turn (§17.3: 600 = 10 min; settings
 /// `agent.max_turn_secs`). `0` disables the time cap.
 pub const DEFAULT_MAX_TURN_SECS: u64 = 600;
@@ -60,7 +60,7 @@ pub const DENIED_MESSAGE: &str = "user denied this action";
 /// context window; the tests prove the mapping.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnCaps {
-    /// Max tool iterations per turn.
+    /// Maximum individual tool calls per turn, including calls in a batch.
     pub max_tool_iterations: u32,
     /// Max wall-clock seconds per turn (`0` = no cap).
     pub max_turn_secs: u64,
@@ -1033,8 +1033,20 @@ where
         conversation.push(assistant);
 
         // --- execute the calls in order (§17.3) --------------------------
-        for call in round.tool_calls {
+        let mut pending = round.tool_calls.into_iter();
+        while let Some(call) = pending.next() {
             if turn.tools_used >= caps.max_tool_iterations {
+                for skipped in std::iter::once(call).chain(pending) {
+                    let result = ToolResult::error(
+                        skipped.id,
+                        format!(
+                            "tool call not executed: tool iteration cap ({}) reached",
+                            caps.max_tool_iterations
+                        ),
+                    );
+                    conversation.push(ChatMessage::tool_result(&result.id, &result.content));
+                    let _ = emit(&events, AgentEvent::ToolResult(result));
+                }
                 end = Some(TurnEnd::IterationCap {
                     limit: caps.max_tool_iterations,
                 });
@@ -1928,6 +1940,68 @@ mod tests {
             count(&events, |event| matches!(event, AgentEvent::TurnDone(_))),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn cap_mid_batch_returns_results_for_every_skipped_call() {
+        let (chat, _) = ScriptedChat::new(vec![tool_round(
+            &[
+                ("one", "read_file", "{}"),
+                ("two", "read_file", "{}"),
+                ("three", "read_file", "{}"),
+            ],
+            "partial findings",
+            0.01,
+        )]);
+        let (runner, state) = MockRunner::new(vec![("one", ready_result("one", "read"))]);
+        let input = TurnInput::new(model(), conversation()).with_caps(TurnCaps {
+            max_tool_iterations: 1,
+            ..caps()
+        });
+        let (report, mut events_rx) = run_turn(chat, runner, input).await;
+
+        assert_eq!(report.end, TurnEnd::IterationCap { limit: 1 });
+        assert_eq!(report.final_message, "partial findings");
+        assert_eq!(report.summary.tools_used, 1);
+        assert_eq!(state.lock().unwrap().routed, vec!["one"]);
+        let messages = &report.conversation[2..];
+        assert_eq!(messages.len(), 3);
+        for (message, id) in messages.iter().zip(["one", "two", "three"]) {
+            assert_eq!(message.role, Role::Tool);
+            assert_eq!(message.tool_call_id.as_deref(), Some(id));
+        }
+        assert!(messages[1].content.contains("not executed"));
+        assert!(messages[2].content.contains("not executed"));
+        let events = drain_remaining(&mut events_rx);
+        assert_eq!(
+            count(
+                &events,
+                |event| matches!(event, AgentEvent::ToolResult(result) if !result.ok)
+            ),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn final_answer_after_exact_call_limit_completes() {
+        let mut rounds = Vec::new();
+        let mut script = Vec::new();
+        for n in 0..25 {
+            let id = format!("call_{n}");
+            rounds.push(tool_round(&[(&id, "read_file", "{}")], "", 0.001));
+            script.push((id.clone(), ready_result(&id, "read")));
+        }
+        rounds.push(answer_round("done", 0.001));
+        let (chat, _) = ScriptedChat::new(rounds);
+        let (runner, _) = MockRunner::new(script);
+        let input = TurnInput::new(model(), conversation()).with_caps(TurnCaps {
+            max_tool_iterations: 25,
+            ..caps()
+        });
+        let (report, _) = run_turn(chat, runner, input).await;
+        assert_eq!(report.end, TurnEnd::Completed);
+        assert_eq!(report.summary.tools_used, 25);
+        assert_eq!(report.final_message, "done");
     }
 
     // -----------------------------------------------------------------------
@@ -3191,7 +3265,7 @@ mod tests {
 
         // The §17.3 spec defaults, verbatim.
         let defaults = TurnCaps::spec_defaults(128_000);
-        assert_eq!(defaults.max_tool_iterations, 25);
+        assert_eq!(defaults.max_tool_iterations, 100);
         assert_eq!(defaults.max_turn_secs, 600);
         assert!((defaults.max_cost_usd - 1.0).abs() < 1e-12);
         assert!((defaults.context_reserve - 0.20).abs() < 1e-12);

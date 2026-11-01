@@ -1,6 +1,9 @@
 ﻿# Build output
 /target
 
+# Node dependencies
+node_modules/
+
 # Rust backup files
 **/*.rs.bk
 .claude/worktrees/

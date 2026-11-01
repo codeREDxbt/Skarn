@@ -8,8 +8,16 @@
 import { canonicalKeybind, parseKeybind, type Keybind } from './keybind';
 import type { Layout, SettingsView, SurfaceId } from '../../bridge/bridge';
 import type { EditorCommand } from '../editor/editor-commands';
+import { toastStore } from '../toasts/toast-store';
+
+export type CommandScope = 'editor' | 'agents';
+export type AgentsCommand = 'toggle-navigation' | 'toggle-context' | 'show-files' | 'show-changes' | 'return-editor' | 'new-session';
 
 export type CommandId =
+  | 'selora.openAgentsWindow'
+  | 'selora.agentsToggleNavigation' | 'selora.agentsToggleContext'
+  | 'selora.agentsShowFiles' | 'selora.agentsShowChanges'
+  | 'selora.agentsReturnEditor' | 'selora.agentsNewSession'
   | 'selora.togglePrimarySidebar'
   | 'selora.toggleAgentDock'
   | 'selora.toggleBottomDock'
@@ -35,6 +43,8 @@ export type CommandId =
   | 'selora.helpDocumentation';
 
 export type CommandAction =
+  | { kind: 'open-agents-window' }
+  | { kind: 'agents-command'; command: AgentsCommand }
   | { kind: 'toggle-surface'; surface: SurfaceId }
   /** Ctrl+B: ToggleSurface{surface: current activity_view} (ARCHITECTURE §7.1). */
   | { kind: 'toggle-activity-view' }
@@ -77,6 +87,7 @@ const DEFAULT_FUZZY_FIND = 'Ctrl+P';
 const DEFAULT_SAVE = 'Ctrl+S';
 
 type CommandEntry = {
+  scope?: CommandScope;
   id: CommandId;
   title: string;
   action: CommandAction;
@@ -86,6 +97,13 @@ type CommandEntry = {
 };
 
 const COMMANDS: CommandEntry[] = [
+  { id: 'selora.openAgentsWindow', title: 'Open Agents Window', action: { kind: 'open-agents-window' }, fixedBinding: 'Ctrl+Shift+Alt+A', rebindable: null },
+  { id: 'selora.agentsToggleNavigation', title: 'Agents: Toggle Navigation', action: { kind: 'agents-command', command: 'toggle-navigation' }, fixedBinding: 'Ctrl+B', rebindable: null, scope: 'agents' },
+  { id: 'selora.agentsToggleContext', title: 'Agents: Toggle Context', action: { kind: 'agents-command', command: 'toggle-context' }, fixedBinding: 'Ctrl+Alt+B', rebindable: null, scope: 'agents' },
+  { id: 'selora.agentsShowFiles', title: 'Agents: Show Files', action: { kind: 'agents-command', command: 'show-files' }, fixedBinding: null, rebindable: null, scope: 'agents' },
+  { id: 'selora.agentsShowChanges', title: 'Agents: Show Changes', action: { kind: 'agents-command', command: 'show-changes' }, fixedBinding: null, rebindable: null, scope: 'agents' },
+  { id: 'selora.agentsReturnEditor', title: 'Return to Editor', action: { kind: 'agents-command', command: 'return-editor' }, fixedBinding: null, rebindable: null, scope: 'agents' },
+  { id: 'selora.agentsNewSession', title: 'Agents: New Session', action: { kind: 'agents-command', command: 'new-session' }, fixedBinding: 'Ctrl+N', rebindable: null, scope: 'agents' },
   { id: 'selora.togglePrimarySidebar', title: 'Toggle Primary Sidebar', action: { kind: 'toggle-activity-view' }, fixedBinding: 'Ctrl+B', rebindable: null },
   { id: 'selora.toggleAgentDock', title: 'Toggle Agent Dock', action: { kind: 'toggle-surface', surface: 'agent' }, fixedBinding: null, rebindable: 'toggle_chat' },
   { id: 'selora.toggleBottomDock', title: 'Toggle Bottom Dock', action: { kind: 'toggle-bottom-view' }, fixedBinding: 'Ctrl+J', rebindable: null },
@@ -156,6 +174,13 @@ export const COMMAND_CATEGORY_ORDER: CommandCategory[] = [
 ];
 
 const COMMAND_CATEGORIES: Record<CommandId, CommandCategory> = {
+  'selora.openAgentsWindow': 'Agent Tools',
+  'selora.agentsToggleNavigation': 'View & Layout',
+  'selora.agentsToggleContext': 'View & Layout',
+  'selora.agentsShowFiles': 'Agent Tools',
+  'selora.agentsShowChanges': 'Agent Tools',
+  'selora.agentsReturnEditor': 'View & Layout',
+  'selora.agentsNewSession': 'Agent Tools',
   'selora.togglePrimarySidebar': 'View & Layout',
   'selora.toggleAgentDock': 'Agent Tools',
   'selora.toggleBottomDock': 'View & Layout',
@@ -211,7 +236,7 @@ function rebindableKeybind(stored: string, fallback: string, label: string): Key
  * first registry entry at dispatch time (the fixed table wins — §7.1's
  * no-conflict rule preserved).
  */
-export function resolveKeymap(settings: SettingsView | null): Map<CommandId, Keybind> {
+export function resolveKeymap(settings: SettingsView | null, scope: CommandScope = 'editor'): Map<CommandId, Keybind> {
   const map = new Map<CommandId, Keybind>();
   const palette = rebindableKeybind(
     settings?.keybind_command_palette ?? DEFAULT_COMMAND_PALETTE,
@@ -234,6 +259,7 @@ export function resolveKeymap(settings: SettingsView | null): Map<CommandId, Key
     'save',
   );
   for (const entry of COMMANDS) {
+    if (!commandInScope(entry, scope)) continue;
     let keybind: Keybind | null = null;
     if (entry.rebindable === 'command_palette') {
       keybind = palette;
@@ -255,9 +281,9 @@ export function resolveKeymap(settings: SettingsView | null): Map<CommandId, Key
  * Build the display list with shortcut labels — the rebindable pair
  * canonicalized so "ctrl + l" displays as "Ctrl+L".
  */
-export function buildCommandList(settings: SettingsView | null): CommandSpec[] {
-  const keymap = resolveKeymap(settings);
-  return COMMANDS.map((entry) => ({
+export function buildCommandList(settings: SettingsView | null, scope: CommandScope = 'editor'): CommandSpec[] {
+  const keymap = resolveKeymap(settings, scope);
+  return COMMANDS.filter((entry) => commandInScope(entry, scope)).map((entry) => ({
     id: entry.id,
     title: entry.title,
     shortcut: keymap.has(entry.id) ? canonicalKeybind(keymap.get(entry.id)!) : null,
@@ -295,6 +321,8 @@ export function filterCommands(commands: CommandSpec[], query: string): CommandS
 // --- Execution ---------------------------------------------------------------
 
 export type CommandDeps = {
+  openAgentsWindow?: () => void;
+  agentsCommand?: (command: AgentsCommand) => void;
   layout: () => Layout | null;
   toggle: (surface: SurfaceId) => void;
   saveLayout: () => void;
@@ -323,6 +351,13 @@ export function runCommandAction(id: CommandId, deps: CommandDeps): void {
   if (!entry) return;
   const action = entry.action;
   switch (action.kind) {
+    case 'open-agents-window':
+      if (deps.openAgentsWindow) deps.openAgentsWindow();
+      else void openActiveAgentsWindow();
+      return;
+    case 'agents-command':
+      deps.agentsCommand?.(action.command);
+      return;
     case 'open-palette':
       deps.openPalette();
       return;
@@ -370,6 +405,30 @@ export function runCommandAction(id: CommandId, deps: CommandDeps): void {
       deps.toggle(layout.bottom_view);
       return;
     }
+  }
+}
+
+function commandInScope(entry: CommandEntry, scope: CommandScope): boolean {
+  if (entry.scope) return entry.scope === scope;
+  if (scope === 'editor') return true;
+  return ['selora.openAgentsWindow', 'selora.openCommandPalette', 'selora.editCommandPalette',
+    'selora.fileOpenFolder', 'selora.fileCloseWindow', 'selora.helpDocumentation'].includes(entry.id);
+}
+
+/** Open the current parent/child selection without changing the editor sidebar. */
+export async function openActiveAgentsWindow(): Promise<void> {
+  try {
+    const [{ openAgentsWindow }, { agentStore }, { getAppSnapshot }] = await Promise.all([
+      import('../../bridge/bridge'), import('../agent/agent-store'), import('../../app/app-store'),
+    ]);
+    const agent = agentStore.getSnapshot();
+    await openAgentsWindow({
+      sessionId: agent.activeSessionId || undefined,
+      childId: agent.activeSubagentId ?? undefined,
+      workspaceId: getAppSnapshot().bootstrap?.workspace.id,
+    });
+  } catch (error) {
+    toastStore.pushLocal('error', `Could not open Agents window: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

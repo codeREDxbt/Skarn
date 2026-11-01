@@ -203,6 +203,73 @@
   }
 }
 
+/* 1.14 Aurora Flow: undulating cosmic starlight wave for thinking states */
+@keyframes aurora-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* 1.15 Pipeline Flow: directional packet pulse travelling down connectors */
+@keyframes pipeline-flow {
+  0% {
+    background-position: 0% -100%;
+  }
+  100% {
+    background-position: 0% 200%;
+  }
+}
+
+/* 1.16 3D Gyroscope Equatorial & Polar Orbit Keyframes */
+@keyframes gyro-orbit-equator {
+  0% {
+    transform: rotateX(68deg) rotateY(18deg) rotateZ(0deg);
+  }
+  100% {
+    transform: rotateX(68deg) rotateY(18deg) rotateZ(360deg);
+  }
+}
+
+@keyframes gyro-orbit-polar {
+  0% {
+    transform: rotateX(46deg) rotateY(-42deg) rotateZ(360deg);
+  }
+  100% {
+    transform: rotateX(46deg) rotateY(-42deg) rotateZ(0deg);
+  }
+}
+
+/* 1.17 Satellite Pulse & Starlight Twinkle */
+@keyframes satellite-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 6px 1px var(--fg-bright);
+    opacity: 0.95;
+  }
+  50% {
+    transform: scale(1.35);
+    box-shadow: 0 0 12px 3px var(--glow-green);
+    opacity: 1;
+  }
+}
+
+@keyframes tab-glow-pulse {
+  0%, 100% {
+    opacity: 0.75;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.4), 0 0 16px rgba(255, 255, 255, 0.15);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 14px rgba(255, 255, 255, 0.65), 0 0 24px rgba(56, 189, 248, 0.3);
+  }
+}
+
 /* --- 2. Animation Utility Classes ----------------------------------------- */
 
 .animate-pulse-glow {
@@ -211,6 +278,20 @@
 
 .animate-pulse-subtle {
   animation: pulse-glow var(--dur-long, 1800ms) var(--ease-calm, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
+}
+
+.animate-aurora-flow {
+  background-size: 200% 200%;
+  animation: aurora-flow 5s var(--ease-calm) infinite;
+}
+
+.animate-pipeline-flow {
+  background-size: 100% 200%;
+  animation: pipeline-flow 2s linear infinite;
+}
+
+.animate-tab-glow {
+  animation: tab-glow-pulse 2.4s ease-in-out infinite;
 }
 
 .animate-shimmer {
@@ -256,19 +337,19 @@
 }
 
 .animate-fade-slide-up {
-  animation: fade-slide-up var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 0, 1)) forwards;
+  animation: fade-slide-up var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
 }
 
 .animate-fade-slide-down {
-  animation: fade-slide-down var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 0, 1)) forwards;
+  animation: fade-slide-down var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
 }
 
 .animate-fade-slide-left {
-  animation: fade-slide-left var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 0, 1)) forwards;
+  animation: fade-slide-left var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
 }
 
 .animate-fade-slide-right {
-  animation: fade-slide-right var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 0, 1)) forwards;
+  animation: fade-slide-right var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
 }
 
 .animate-spin-smooth {
@@ -288,6 +369,9 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-pulse-glow,
   .animate-pulse-subtle,
+  .animate-aurora-flow,
+  .animate-pipeline-flow,
+  .animate-tab-glow,
   .animate-shimmer,
   .animate-border-travel,
   .animate-float-subtle,
@@ -310,6 +394,9 @@
 
 :root[data-reduced-motion="true"] .animate-pulse-glow,
 :root[data-reduced-motion="true"] .animate-pulse-subtle,
+:root[data-reduced-motion="true"] .animate-aurora-flow,
+:root[data-reduced-motion="true"] .animate-pipeline-flow,
+:root[data-reduced-motion="true"] .animate-tab-glow,
 :root[data-reduced-motion="true"] .animate-shimmer,
 :root[data-reduced-motion="true"] .animate-border-travel,
 :root[data-reduced-motion="true"] .animate-float-subtle,

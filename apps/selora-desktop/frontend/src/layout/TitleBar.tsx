@@ -133,27 +133,29 @@ function TitleBarMenu({
   );
 }
 
-function WindowControls() {
+export function WindowControls() {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     withCurrentWindow((win) => {
       const update = () => {
         void win
           .isMaximized()
-          .then(setMaximized)
+          .then((value) => { if (!disposed) setMaximized(value); })
           .catch(() => undefined);
       };
       update();
       void win
-        .onResized(update)
-        .then((stop) => {
-          unlisten = stop;
+          .onResized(update)
+          .then((stop) => {
+          if (disposed) stop();
+          else unlisten = stop;
         })
         .catch(() => undefined);
     });
-    return () => unlisten?.();
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   return (
@@ -228,7 +230,7 @@ export function TitleBar({
     bootstrap?.workspace?.display_name && bootstrap.workspace.display_name !== 'No workspace open'
       ? bootstrap.workspace.display_name
       : 'Agent Workspace';
-  const gitBranch = bootstrap?.git?.branch || 'main';
+  const gitBranch = bootstrap?.git?.branch ?? null;
 
   return (
     <header className="titlebar" data-tauri-drag-region="">
@@ -270,10 +272,10 @@ export function TitleBar({
         </div>
 
         {/* Git branch pill */}
-        <div className="titlebar-git-pill" title={`Current git branch: ${gitBranch}`}>
+        {gitBranch ? <div className="titlebar-git-pill" title={`Current git branch: ${gitBranch}`}>
           <GitBranch size={12} className="git-icon" aria-hidden="true" />
           <span className="git-branch-text">{gitBranch}</span>
-        </div>
+        </div> : null}
 
         {/* Subagent pet worlds: one badge per child of the active session */}
         <SubagentPets
@@ -324,6 +326,16 @@ export function TitleBar({
       </div>
 
       <div className="titlebar-right">
+        <button
+          type="button"
+          className="titlebar-menu-button"
+          title="Open Agents Window (Ctrl+Shift+Alt+A)"
+          aria-label="Open Agents Window"
+          onClick={() => onRunCommand('selora.openAgentsWindow')}
+        >
+          <Bot size={15} aria-hidden="true" />
+          <span>Agents</span>
+        </button>
         <NotificationCenter />
         <WindowControls />
       </div>

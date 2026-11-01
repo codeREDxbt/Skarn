@@ -111,6 +111,10 @@ export type QueuedPrompt = {
   text: string;
   createdAt: number;
   mode?: PermissionMode;
+  /** Full captured request; editing a queue item must preserve its send settings. */
+  request?: import('../../bridge/bridge').AgentRequestDto;
+  status?: 'queued' | 'starting' | 'failed';
+  error?: import('../../bridge/bridge').ProtocolError | null;
 };
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -177,14 +181,16 @@ export type ArtifactItem = {
 export type AgentSession = {
   id: string;
   title: string;
-  createdAt: number;
-  updatedAt: number;
+  createdAt: number | null;
+  updatedAt: number | null;
   tokenCount: number;
   costUsd: number;
   branchName?: string;
   isCompacted?: boolean;
   /** True while the backend reports an active request for this session. */
   isRunning?: boolean;
+  durable?: boolean;
+  modelId?: string | null;
 };
 
 /**

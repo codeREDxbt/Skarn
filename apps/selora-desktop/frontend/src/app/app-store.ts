@@ -10,6 +10,7 @@
 import {
   getBootstrapState,
   getEventsAfter,
+  getAgentsSnapshot,
   listenProtocolEvent,
   markFrontendReady,
   validateEvent,
@@ -31,6 +32,7 @@ import {
 } from '../features/workflows/workflows-bridge';
 import { applyAppearance, watchSystemTheme } from '../features/theme/theme';
 import { terminalStore } from '../features/dock/terminal-store';
+import { getFrontendSurface, isNativeFrontend } from './surface';
 
 export type AppPhase = 'connecting' | 'ready' | 'error';
 
@@ -96,6 +98,13 @@ let draining = false;
 let replaying = false;
 /** One boot-trace mark per process; rebootstrap after a gap must not repeat it. */
 let readyMarked = false;
+let agentsSnapshotSequence: number | null = null;
+const agentEventTypes = new Set([
+  'chat_delta', 'chat_completed', 'chat_failed', 'tool_call_started', 'tool_result',
+  'approval_needed', 'agent_state_changed', 'agent_turn_done', 'plan_state_changed', 'todos_changed',
+  'subagent_activity', 'subagent_completed', 'subagent_cancelled', 'agent_event',
+  'agent_queue_changed', 'agent_session_renamed', 'agent_compaction_failed',
+]);
 
 function markReadyOnce(): void {
   if (readyMarked) return;
@@ -171,7 +180,7 @@ export function currentSessionEnvelopeContext(
   if (!context) return null;
   return {
     ...context,
-    session_id: sessionId ?? snapshot.bootstrap?.chat.active_session_id ?? null,
+    session_id: sessionId ?? (agentStore.getSnapshot().activeSessionId || null),
   };
 }
 
@@ -183,6 +192,8 @@ export function startApp(): Promise<void> {
   // ride the non-session envelope context and need no bootstrap payload, so
   // they are registered once here (StrictMode-safe via `started`).
   installWorkflowHandlers();
+  agentStore.installProjectionRefresh(runBootstrapFlow);
+  agentStore.startPreferences();
   return runBootstrapFlow();
 }
 
@@ -193,6 +204,10 @@ export async function retryBootstrap(): Promise<void> {
 
 /** Refresh the bootstrap snapshot (e.g. after API key connect/disconnect). */
 export async function refreshBootstrap(): Promise<BootstrapState | null> {
+  if (isNativeFrontend()) {
+    await runBootstrapFlow();
+    return state.bootstrap;
+  }
   try {
     const bootstrap = await getBootstrapState();
     state = { ...state, bootstrap, phase: 'ready' };
@@ -214,6 +229,7 @@ async function runBootstrapFlow(): Promise<void> {
   // is seeded null so the boot toast still replays.
   state = emptyState();
   lastSequence = null;
+  agentsSnapshotSequence = null;
   replaying = true;
   liveBuffer.length = 0;
   notify();
@@ -225,7 +241,37 @@ async function runBootstrapFlow(): Promise<void> {
     state = { ...state, phase: 'ready', bootstrap, error: null };
     applyBootstrapAppearance(bootstrap);
     layoutStore.hydrate(bootstrap);
+    // Publish bootstrap before rebuilding large agent projections. Native
+    // WebView must paint its workspace before session history hydration runs.
+    notify();
+    if (typeof process === 'undefined' || process.env.NODE_ENV !== 'test') {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
     agentStore.hydrate(bootstrap);
+    if (isNativeFrontend()) {
+      const agents = await getAgentsSnapshot();
+      if (gen !== generation) return;
+      if (agents.core_instance_id !== bootstrap.core_instance_id || agents.workspace_id !== bootstrap.workspace.id) {
+        // A workspace can change while auxiliary window is booting. Do not
+        // recurse forever and leave window on Connecting; bootstrap remains a
+        // valid renderable fallback until next authoritative refresh.
+        agentsSnapshotSequence = null;
+      } else {
+        // Snapshot projection can contain full timelines and child ledgers.
+        // Yield once so native WebView paints workspace before heavy hydration.
+        const hydrateSnapshot = () => {
+          if (gen !== generation) return;
+          agentStore.hydrateAgents(agents);
+          agentsSnapshotSequence = agents.snapshot_sequence;
+          notify();
+        };
+        if (typeof process !== 'undefined' && process.env.NODE_ENV === 'test') {
+          hydrateSnapshot();
+        } else {
+          setTimeout(hydrateSnapshot, 0);
+        }
+      }
+    }
     workflowsStore.hydratePersisted(bootstrap.workflows ?? []);
     notify();
 
@@ -313,12 +359,26 @@ function applyEvent(event: EventEnvelope, gen: number): void {
 
 function reduceEvent(event: EventEnvelope): void {
   const payload = event.payload;
+  // Keep replay's original gate and boot toast, but do not replay agent state already in the snapshot.
+  if (agentsSnapshotSequence !== null && event.sequence <= agentsSnapshotSequence && agentEventTypes.has(payload.type)) return;
+  if (isNativeFrontend() && (payload.type === 'chat_delta' || payload.type === 'agent_state_changed') &&
+      agentStore.needsRequestHydration(payload.payload)) {
+    // Another webview or the backend queue started this request. Fetch its user row and request identity together.
+    void runBootstrapFlow();
+    return;
+  }
   if (['chat_delta', 'chat_completed', 'chat_failed', 'tool_call_started', 'tool_result',
-    'approval_needed', 'agent_state_changed', 'agent_turn_done', 'plan_state_changed', 'todos_changed'].includes(payload.type) &&
+  'approval_needed', 'agent_state_changed', 'agent_turn_done', 'plan_state_changed', 'todos_changed'].includes(payload.type) &&
     'payload' in payload && 'session_id' in payload.payload &&
     agentStore.routeSessionEvent(payload.payload, () => reduceEvent(event))) return;
   switch (payload.type) {
     case 'bootstrap_state': {
+      if (isNativeFrontend()) {
+        // An earlier bootstrap cannot overwrite projections from a later agents snapshot.
+        if (agentsSnapshotSequence !== null && event.sequence <= agentsSnapshotSequence) return;
+        void runBootstrapFlow();
+        return;
+      }
       // Z4 — a workspace opened: the id, buffers and tree all move at once.
       // A new workspace id invalidates every in-memory conflict marker; a
       // same-workspace rebootstrap keeps its still-live banners.
@@ -342,10 +402,10 @@ function reduceEvent(event: EventEnvelope): void {
       layoutStore.applyLayoutEvent(payload.payload);
       return;
     case 'toast':
-      toastStore.pushProtocol(event.sequence, payload.payload);
+      if (getFrontendSurface().kind === 'main') toastStore.pushProtocol(event.sequence, payload.payload);
       return;
     case 'error':
-      toastStore.pushProtocolError(event.sequence, payload.payload);
+      if (getFrontendSurface().kind === 'main') toastStore.pushProtocolError(event.sequence, payload.payload);
       return;
     case 'chat_delta':
       agentStore.handleChatDelta(payload.payload);
@@ -378,6 +438,7 @@ case 'plan_state_changed':
       agentStore.handleTodosChanged(payload.payload);
       return;
     case 'agent_compaction_failed': {
+      if (getFrontendSurface().kind !== 'main') return;
       const failure = payload.payload;
       const partial = failure.partial_summary
         ? ` A partial summary (${failure.partial_summary.length} chars) was kept.`
@@ -399,6 +460,7 @@ case 'plan_state_changed':
       // success; a cancelled child never reaches this arm at all.
       const completion = payload.payload;
       if (!agentStore.handleSubagentCompleted(completion)) return;
+      if (getFrontendSurface().kind !== 'main') return;
       toastStore.pushSubagentCompletion(event.sequence, {
         childId: completion.child_id,
         sessionId: completion.parent_session_id,
@@ -417,6 +479,12 @@ case 'plan_state_changed':
     case 'agent_event':
       agentStore.handleAgentEvent(payload.payload);
       return;
+    case 'agent_queue_changed':
+      agentStore.handleQueueChanged(payload.payload);
+      return;
+    case 'agent_session_renamed':
+      agentStore.handleSessionRenamed(payload.payload);
+      return;
     case 'selora_status_changed':
       if (state.bootstrap) {
         state.bootstrap = {
@@ -425,7 +493,7 @@ case 'plan_state_changed':
           active_model_id: payload.payload.active_model_id ?? state.bootstrap.active_model_id,
         };
         if (payload.payload.active_model_id) {
-          agentStore.setSelectedModel(payload.payload.active_model_id);
+          if (!isNativeFrontend()) agentStore.setSelectedModel(payload.payload.active_model_id);
         }
         notify();
       }
@@ -438,7 +506,7 @@ case 'plan_state_changed':
           active_model_id: payload.payload.active_model_id ?? state.bootstrap.active_model_id,
         };
         if (payload.payload.active_model_id) {
-          agentStore.setSelectedModel(payload.payload.active_model_id);
+          if (!isNativeFrontend()) agentStore.setSelectedModel(payload.payload.active_model_id);
         }
         agentStore.setAvailableModels(payload.payload.models);
         notify();

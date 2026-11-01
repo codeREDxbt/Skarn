@@ -334,9 +334,9 @@ impl SeloraClient {
     /// sent on the channel and returned. On any failure the same error is
     /// sent as [`ChatEvent::Error`] before being returned.
     ///
-    /// Retries (§6.5) cover request establishment only. A failure *mid-stream*
-    /// is never retried: replaying the request would duplicate the deltas the
-    /// UI already displayed. The caller re-sends if the user wants to.
+    /// A broken stream may be retried before any content or tool-call fragment
+    /// is emitted. Once output is visible, replay would duplicate it and is
+    /// never attempted.
     pub async fn stream_chat(
         &self,
         req: ChatRequest,
@@ -347,181 +347,210 @@ impl SeloraClient {
         let url = self.chat_completions_url();
         let body = req.clone().with_stream(true);
 
-        let response = match self
-            .send_with_retry("chat stream", self.stream_response_timeout, || {
-                let mut http_req = self.http.post(&url);
-                if !self.api_key.trim().is_empty() {
-                    http_req = http_req.bearer_auth(&self.api_key);
-                }
-                http_req
-                    .header("HTTP-Referer", "https://selora.ide")
-                    .header("X-Title", "Selora IDE")
-                    .header("User-Agent", "Selora-IDE/0.1.0")
-                    .json(&body)
-            })
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&err)));
-                return Err(err);
-            }
-        };
-
-        // Receipt inputs: the last `usage` the gateway sent, and the raw
-        // character counts for the chars/4 fallback (RISKS.md §3).
-        let prompt_chars: usize = req.messages.iter().map(|m| m.content.chars().count()).sum();
-        let mut usage: Option<Usage> = None;
-        let mut completion_chars: usize = 0;
-        let mut in_reasoning = false;
-
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(bytes) => bytes,
+        let mut stream_retries = 0;
+        'attempt: loop {
+            let response = match self
+                .send_with_retry("chat stream", self.stream_response_timeout, || {
+                    let mut http_req = self.http.post(&url);
+                    if !self.api_key.trim().is_empty() {
+                        http_req = http_req.bearer_auth(&self.api_key);
+                    }
+                    http_req
+                        .header("HTTP-Referer", "https://selora.ide")
+                        .header("X-Title", "Selora IDE")
+                        .header("User-Agent", "Selora-IDE/0.1.0")
+                        .json(&body)
+                })
+                .await
+            {
+                Ok(response) => response,
                 Err(err) => {
-                    let error = SeloraError::Net(format!("stream read failed: {err}"));
-                    let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
-                    return Err(error);
+                    let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&err)));
+                    return Err(err);
                 }
             };
-            buffer.extend_from_slice(&chunk);
 
-            loop {
-                match crate::sse::parse_sse_event(&buffer) {
+            // Receipt inputs: the last `usage` the gateway sent, and the raw
+            // character counts for the chars/4 fallback (RISKS.md §3).
+            let prompt_chars: usize = req.messages.iter().map(|m| m.content.chars().count()).sum();
+            let mut usage: Option<Usage> = None;
+            let mut completion_chars: usize = 0;
+            let mut in_reasoning = false;
+            let mut emitted = false;
+
+            let mut buffer: Vec<u8> = Vec::new();
+            let mut stream = response.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
                     Err(err) => {
-                        let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&err)));
-                        return Err(err);
+                        if !emitted && !tx.is_closed() && stream_retries < self.max_net_retries {
+                            let delay =
+                                with_jitter(retry_delay(self.net_retry_delay, stream_retries));
+                            stream_retries += 1;
+                            tokio::time::sleep(delay).await;
+                            continue 'attempt;
+                        }
+                        let error = if err.is_timeout() {
+                            timeout_error("chat stream read", READ_TIMEOUT)
+                        } else {
+                            SeloraError::Net("stream read failed: connection interrupted".into())
+                        };
+                        let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
+                        return Err(error);
                     }
-                    Ok(None) => break, // incomplete event: wait for more bytes
-                    Ok(Some((event, consumed))) => {
-                        buffer.drain(..consumed);
-                        let Some(data) = event.data else {
-                            continue; // fieldless/comment-only event
-                        };
-                        if data == DONE_SENTINEL {
-                            if in_reasoning {
-                                let _ =
-                                    send_event(&tx, ChatEvent::Delta("</think>\n\n".to_owned()));
-                            }
-                            let receipt = build_receipt(
-                                &req,
-                                request_id,
-                                started,
-                                usage,
-                                prompt_chars,
-                                completion_chars,
-                            );
-                            send_event(&tx, ChatEvent::Done(receipt.clone()))?;
-                            return Ok(receipt);
+                };
+                buffer.extend_from_slice(&chunk);
+
+                loop {
+                    match crate::sse::parse_sse_event(&buffer) {
+                        Err(err) => {
+                            let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&err)));
+                            return Err(err);
                         }
-                        let chunk: ChatChunk = match serde_json::from_str(&data) {
-                            Ok(chunk) => chunk,
-                            Err(err) => {
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
-                                    if let Some(msg) = val
-                                        .get("error")
-                                        .and_then(|e| e.get("message"))
-                                        .and_then(|m| m.as_str())
+                        Ok(None) => break, // incomplete event: wait for more bytes
+                        Ok(Some((event, consumed))) => {
+                            buffer.drain(..consumed);
+                            let Some(data) = event.data else {
+                                continue; // fieldless/comment-only event
+                            };
+                            if data == DONE_SENTINEL {
+                                if in_reasoning {
+                                    let _ = send_event(
+                                        &tx,
+                                        ChatEvent::Delta("</think>\n\n".to_owned()),
+                                    );
+                                }
+                                let receipt = build_receipt(
+                                    &req,
+                                    request_id,
+                                    started,
+                                    usage,
+                                    prompt_chars,
+                                    completion_chars,
+                                );
+                                send_event(&tx, ChatEvent::Done(receipt.clone()))?;
+                                return Ok(receipt);
+                            }
+                            let chunk: ChatChunk = match serde_json::from_str(&data) {
+                                Ok(chunk) => chunk,
+                                Err(err) => {
+                                    if let Ok(val) =
+                                        serde_json::from_str::<serde_json::Value>(&data)
                                     {
-                                        let error =
-                                            SeloraError::Ai(format!("gateway error: {msg}"));
-                                        let _ = send_event(
-                                            &tx,
-                                            ChatEvent::Error(duplicate_error(&error)),
-                                        );
-                                        return Err(error);
+                                        if let Some(msg) = val
+                                            .get("error")
+                                            .and_then(|e| e.get("message"))
+                                            .and_then(|m| m.as_str())
+                                        {
+                                            let error =
+                                                SeloraError::Ai(format!("gateway error: {msg}"));
+                                            let _ = send_event(
+                                                &tx,
+                                                ChatEvent::Error(duplicate_error(&error)),
+                                            );
+                                            return Err(error);
+                                        }
                                     }
+                                    let error =
+                                        SeloraError::Ai(format!("malformed stream chunk: {err}"));
+                                    let _ =
+                                        send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
+                                    return Err(error);
                                 }
-                                let error =
-                                    SeloraError::Ai(format!("malformed stream chunk: {err}"));
-                                let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
-                                return Err(error);
+                            };
+                            if let Some(chunk_usage) = chunk.usage {
+                                usage = Some(chunk_usage);
                             }
-                        };
-                        if let Some(chunk_usage) = chunk.usage {
-                            usage = Some(chunk_usage);
-                        }
-                        let first_choice = chunk.choices.first();
-                        let delta = first_choice.and_then(|choice| choice.delta.as_ref());
+                            let first_choice = chunk.choices.first();
+                            let delta = first_choice.and_then(|choice| choice.delta.as_ref());
 
-                        let reasoning_opt = delta
-                            .and_then(|d| d.reasoning_content.as_deref())
-                            .or_else(|| delta.and_then(|d| d.reasoning.as_deref()))
-                            .or_else(|| delta.and_then(|d| d.thought.as_deref()))
-                            .filter(|s| !s.is_empty());
+                            let reasoning_opt = delta
+                                .and_then(|d| d.reasoning_content.as_deref())
+                                .or_else(|| delta.and_then(|d| d.reasoning.as_deref()))
+                                .or_else(|| delta.and_then(|d| d.thought.as_deref()))
+                                .filter(|s| !s.is_empty());
 
-                        let content_opt = delta
-                            .and_then(|d| d.content.as_deref())
-                            .or_else(|| delta.and_then(|d| d.text.as_deref()))
-                            .or_else(|| first_choice.and_then(|c| c.text.as_deref()))
-                            .or_else(|| {
-                                first_choice.and_then(|c| {
-                                    c.message.as_ref().and_then(|m| m.content.as_deref())
+                            let content_opt = delta
+                                .and_then(|d| d.content.as_deref())
+                                .or_else(|| delta.and_then(|d| d.text.as_deref()))
+                                .or_else(|| first_choice.and_then(|c| c.text.as_deref()))
+                                .or_else(|| {
+                                    first_choice.and_then(|c| {
+                                        c.message.as_ref().and_then(|m| m.content.as_deref())
+                                    })
                                 })
-                            })
-                            .filter(|s| !s.is_empty());
+                                .filter(|s| !s.is_empty());
 
-                        if let Some(reasoning) = reasoning_opt {
-                            if !in_reasoning {
-                                in_reasoning = true;
-                                send_event(&tx, ChatEvent::Delta("<think>".to_owned()))?;
-                            }
-                            completion_chars += reasoning.chars().count();
-                            send_event(&tx, ChatEvent::Delta(reasoning.to_owned()))?;
-                        }
-
-                        if let Some(content) = content_opt {
-                            if in_reasoning {
-                                in_reasoning = false;
-                                send_event(&tx, ChatEvent::Delta("</think>\n\n".to_owned()))?;
-                            }
-                            completion_chars += content.chars().count();
-                            send_event(&tx, ChatEvent::Delta(content.to_owned()))?;
-                        }
-
-                        let Some(delta) = delta else {
-                            continue;
-                        };
-                        if let Some(fragments) = delta.tool_calls.as_deref() {
-                            for fragment in fragments {
-                                let function = fragment.function.as_ref();
-                                let arguments = function
-                                    .and_then(|function| function.arguments.as_deref())
-                                    .unwrap_or_default();
-                                let name = function.and_then(|function| function.name.clone());
-                                let meaningful =
-                                    fragment.id.as_deref().is_some_and(|id| !id.is_empty())
-                                        || name.as_deref().is_some_and(|name| !name.is_empty())
-                                        || !arguments.is_empty();
-                                if !meaningful {
-                                    continue; // empty trailing fragment
+                            if let Some(reasoning) = reasoning_opt {
+                                emitted = true;
+                                if !in_reasoning {
+                                    in_reasoning = true;
+                                    send_event(&tx, ChatEvent::Delta("<think>".to_owned()))?;
                                 }
-                                send_event(
-                                    &tx,
-                                    ChatEvent::ToolCallDelta {
-                                        // Gateways that omit `index` (single-call
-                                        // responses) land in slot 0.
-                                        index: fragment.index.unwrap_or(0),
-                                        id: fragment.id.clone(),
-                                        name,
-                                        arguments: arguments.to_owned(),
-                                    },
-                                )?;
+                                completion_chars += reasoning.chars().count();
+                                send_event(&tx, ChatEvent::Delta(reasoning.to_owned()))?;
+                            }
+
+                            if let Some(content) = content_opt {
+                                emitted = true;
+                                if in_reasoning {
+                                    in_reasoning = false;
+                                    send_event(&tx, ChatEvent::Delta("</think>\n\n".to_owned()))?;
+                                }
+                                completion_chars += content.chars().count();
+                                send_event(&tx, ChatEvent::Delta(content.to_owned()))?;
+                            }
+
+                            let Some(delta) = delta else {
+                                continue;
+                            };
+                            if let Some(fragments) = delta.tool_calls.as_deref() {
+                                for fragment in fragments {
+                                    let function = fragment.function.as_ref();
+                                    let arguments = function
+                                        .and_then(|function| function.arguments.as_deref())
+                                        .unwrap_or_default();
+                                    let name = function.and_then(|function| function.name.clone());
+                                    let meaningful =
+                                        fragment.id.as_deref().is_some_and(|id| !id.is_empty())
+                                            || name.as_deref().is_some_and(|name| !name.is_empty())
+                                            || !arguments.is_empty();
+                                    if !meaningful {
+                                        continue; // empty trailing fragment
+                                    }
+                                    emitted = true;
+                                    send_event(
+                                        &tx,
+                                        ChatEvent::ToolCallDelta {
+                                            // Gateways that omit `index` (single-call
+                                            // responses) land in slot 0.
+                                            index: fragment.index.unwrap_or(0),
+                                            id: fragment.id.clone(),
+                                            name,
+                                            arguments: arguments.to_owned(),
+                                        },
+                                    )?;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // The body ended without the `[DONE]` sentinel: the reply was
-        // truncated (RISKS.md §3). Never report a receipt we cannot trust.
-        let error = SeloraError::Ai("stream closed before [DONE]".into());
-        let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
-        Err(error)
+            if !emitted && !tx.is_closed() && stream_retries < self.max_net_retries {
+                let delay = with_jitter(retry_delay(self.net_retry_delay, stream_retries));
+                stream_retries += 1;
+                tokio::time::sleep(delay).await;
+                continue 'attempt;
+            }
+            // The body ended without the `[DONE]` sentinel: the reply was
+            // truncated (RISKS.md §3). Never report a receipt we cannot trust.
+            let error = SeloraError::Ai("stream closed before [DONE]".into());
+            let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
+            return Err(error);
+        }
     }
 
     /// `POST {base_url}/v1/chat/completions` with `stream: false` — one
@@ -1050,6 +1079,94 @@ mod tests {
     fn chat_request() -> ChatRequest {
         // "1234" → 4 chars → 1 estimated prompt token.
         ChatRequest::new("test-model", vec![ChatMessage::user("1234")])
+    }
+
+    // A short Content-Length body makes reqwest report a body decoding error.
+    fn interrupted_server(
+        first_body: &'static str,
+        retry: bool,
+    ) -> (String, std::thread::JoinHandle<usize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let count = if retry { 2 } else { 1 };
+            for attempt in 0..count {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let n = socket.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let body = if attempt == 0 {
+                    first_body
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\ndata: [DONE]\n\n"
+                };
+                let length = if attempt == 0 {
+                    body.len() + 100
+                } else {
+                    body.len()
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").unwrap();
+            }
+            count
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn interrupted_stream_before_output_recovers_without_duplicate_events() {
+        let (url, server) = interrupted_server(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            true,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        test_client(&url)
+            .stream_chat(chat_request(), tx)
+            .await
+            .unwrap();
+        let events = drain(&mut rx);
+        assert_eq!(deltas(&events), ["recovered"]);
+        assert!(matches!(events.last(), Some(ChatEvent::Done(_))));
+        assert_eq!(server.join().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn interrupted_stream_after_output_never_replays() {
+        let (url, server) = interrupted_server(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            false,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let error = test_client(&url)
+            .stream_chat(chat_request(), tx)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SeloraError::Net(_)));
+        let events = drain(&mut rx);
+        assert_eq!(deltas(&events), ["partial"]);
+        assert!(matches!(events.last(), Some(ChatEvent::Error(_))));
+        assert_eq!(server.join().unwrap(), 1);
     }
 
     fn drain(rx: &mut mpsc::UnboundedReceiver<ChatEvent>) -> Vec<ChatEvent> {

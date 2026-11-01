@@ -1,0 +1,14 @@
+.open-editors {
+  flex: 0 1 auto;
+  overflow-y: auto;
+  max-height: 35%;
+  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+}
+
+.open-editor-row {
+  width: 100%;
+  padding-left: 24px;
+  border: 0;
+  color: inherit;
+  text-align: left;
+}

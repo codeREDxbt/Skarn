@@ -1122,6 +1122,8 @@ button.problem-row {
   display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   flex-direction: column;
   background: var(--ink-canvas);
 }
@@ -1130,6 +1132,8 @@ button.problem-row {
   display: none;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   flex-direction: column;
   background: var(--ink-canvas);
 }
@@ -1141,6 +1145,8 @@ button.problem-row {
 .terminal-xterm {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   padding: var(--space-2) var(--space-3) 0;
 }
 

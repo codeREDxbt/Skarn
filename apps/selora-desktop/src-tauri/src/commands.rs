@@ -58,6 +58,25 @@ pub async fn get_bootstrap_state(
     offload(move || bootstrap_snapshot(&state, protocol_version)).await
 }
 
+#[tauri::command]
+pub async fn get_agents_snapshot(
+    protocol_version: u32,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<selora_protocol::AgentsSnapshotDto, ProtocolErrorDto> {
+    let state = state.inner().clone();
+    offload(move || {
+        if protocol_version != PROTOCOL_VERSION {
+            return Err(ProtocolErrorDto {
+                code: "protocol_version_mismatch".into(),
+                message: "Unsupported protocol version.".into(),
+                retryable: false,
+            });
+        }
+        Ok(state.agents_snapshot())
+    })
+    .await
+}
+
 /// Phase Z4 — the native folder picker for the Open Folder flow. A plain
 /// Tauri command (not a protocol command): it only chooses a path; the
 /// frontend then sends OpenFolderAt { root }, which is what the typed

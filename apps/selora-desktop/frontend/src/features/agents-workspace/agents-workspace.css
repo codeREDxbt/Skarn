@@ -1,0 +1,454 @@
+/* ==========================================================================
+   Selora IDE — Native Agents Workspace Shell & Header
+   Scoped strictly to .agents-workspace (zero impact on main editor window)
+   ========================================================================== */
+
+.agents-workspace {
+  /* --- 1. Cosmic Surface Elevations --- */
+  --agents-canvas: var(--space-bg, #000000);
+  --agents-surface-rail: var(--ink-low, #0d0d12);
+  --agents-surface-header: var(--ink-low, #0e0e13);
+  --agents-surface-card: var(--surface-1, #121218);
+  --agents-surface-hover: var(--surface-hover, #1d1d27);
+  --agents-surface-active: var(--surface-3, #181820);
+  --agents-surface-popover: var(--ink-mid, #151129);
+  --agents-code-bg: var(--space-deep, #040405);
+
+  /* --- 2. Hairlines & Glass Borders --- */
+  --agents-border-subtle: var(--hairline-faint, rgba(255, 255, 255, 0.07));
+  --agents-border-card: var(--glass-border, rgba(255, 255, 255, 0.09));
+  --agents-border-hover: var(--glass-border-hover, rgba(255, 255, 255, 0.18));
+  --agents-border-active: var(--hairline-active, rgba(255, 255, 255, 0.22));
+
+  /* --- 3. Semantic Accents (Git, Status, Execution) --- */
+  --agents-staged-fg: var(--ok, #22c55e);
+  --agents-staged-bg: rgba(34, 197, 94, 0.12);
+  --agents-staged-border: rgba(34, 197, 94, 0.25);
+  --agents-diff-add-bg: rgba(34, 197, 94, 0.14);
+  --agents-diff-add-text: #4ade80;
+
+  --agents-modified-fg: var(--warn, #d4a017);
+  --agents-modified-bg: rgba(212, 160, 23, 0.12);
+  --agents-modified-border: rgba(212, 160, 23, 0.25);
+  --agents-diff-mod-bg: rgba(212, 160, 23, 0.12);
+
+  --agents-deleted-fg: var(--err, #dc2626);
+  --agents-deleted-bg: rgba(220, 38, 38, 0.12);
+  --agents-deleted-border: rgba(220, 38, 38, 0.25);
+  --agents-diff-del-bg: rgba(220, 38, 38, 0.14);
+  --agents-diff-del-text: #f87171;
+
+  --agents-conflict-fg: #f97316;
+  --agents-conflict-bg: rgba(249, 115, 22, 0.14);
+  --agents-conflict-border: rgba(249, 115, 22, 0.3);
+
+  --agents-running-fg: #38bdf8;
+  --agents-running-bg: rgba(56, 189, 248, 0.14);
+  --agents-running-glow: rgba(56, 189, 248, 0.35);
+
+  --agents-approval-fg: #fbbf24;
+  --agents-approval-bg: rgba(251, 191, 36, 0.15);
+  --agents-approval-border: rgba(251, 191, 36, 0.3);
+
+  /* --- 4. Geometry & Radii --- */
+  --agents-radius-sm: 4px;
+  --agents-radius-md: 6px;
+  --agents-radius-lg: 10px;
+  --agents-radius-card: 12px;
+  --agents-radius-pill: 999px;
+
+  /* --- 5. Elevations & Shadows --- */
+  --agents-shadow-card: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --agents-shadow-flyout: 0 12px 36px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--agents-border-card);
+  --agents-glass-filter: blur(16px) saturate(130%);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  min-width: 0;
+  color: var(--fg-default);
+  background: var(--agents-canvas);
+  font-family: var(--font-sans);
+}
+
+/* --- Header Toolbar (Frameless Title Bar) --- */
+.agents-workspace .agents-workspace__header {
+  height: 40px;
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--agents-surface-header);
+  border-bottom: 1px solid var(--agents-border-subtle);
+  backdrop-filter: var(--agents-glass-filter);
+  user-select: none;
+  min-width: 0;
+  z-index: 5;
+}
+
+.agents-workspace .agents-workspace__header button:not(.window-control) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--agents-radius-md);
+  padding: 0 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-sm, 12px);
+  font-weight: var(--weight-medium, 500);
+  transition: background var(--dur-instant, 80ms) var(--ease-calm),
+              border-color var(--dur-instant, 80ms) var(--ease-calm),
+              color var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-workspace__header button:hover:not(:disabled) {
+  color: var(--fg-bright);
+  background: var(--agents-surface-hover);
+  border-color: var(--agents-border-subtle);
+}
+
+.agents-workspace .agents-workspace__header button[aria-expanded='true'],
+.agents-workspace .agents-workspace__header button[aria-pressed='true'] {
+  color: var(--fg-bright);
+  background: var(--agents-surface-active);
+  border-color: var(--agents-border-card);
+}
+
+.agents-workspace .agents-workspace__header button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.agents-workspace .agents-workspace__header button:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: -1px;
+}
+
+.agents-workspace .agents-workspace__identity,
+.agents-workspace .agents-workspace__branch,
+.agents-workspace .agents-workspace__history {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.agents-workspace .agents-workspace__identity {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-bright);
+  letter-spacing: -0.01em;
+}
+
+.agents-workspace .agents-workspace__header-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm, 12px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--fg-default);
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: var(--agents-radius-sm);
+  border: 1px solid var(--agents-border-subtle);
+}
+
+.agents-workspace .agents-workspace__workspace {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg-muted);
+}
+.agents-workspace .agents-workspace__workspace:hover {
+  color: var(--fg-bright);
+}
+
+.agents-workspace .agents-workspace__branch {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--agents-radius-pill);
+  background: var(--agents-surface-card);
+  border: 1px solid var(--agents-border-subtle);
+}
+
+.agents-workspace .titlebar-window-controls {
+  align-self: stretch;
+  margin-left: 4px;
+}
+
+/* --- Workspace 3-Column Grid --- */
+.agents-workspace .agents-workspace__grid {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--agents-canvas);
+}
+
+.agents-workspace .agents-workspace__navigation {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--agents-surface-rail);
+}
+
+.agents-workspace .agents-workspace__context {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--agents-surface-rail);
+}
+
+.agents-workspace .agents-workspace__conversation {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--agents-canvas);
+}
+
+.agents-workspace .agents-workspace__conversation > * {
+  min-width: 0;
+}
+
+/* --- Resizing Separator Handles --- */
+.agents-workspace .agents-workspace__resize {
+  position: relative;
+  touch-action: none;
+  cursor: col-resize;
+  outline: none;
+  background: transparent;
+}
+
+.agents-workspace .agents-workspace__resize::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--agents-border-subtle);
+  transition: background var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-workspace__resize:hover::after,
+.agents-workspace .agents-workspace__resize:focus-visible::after {
+  background: var(--accent, #a78bfa);
+  box-shadow: 0 0 6px var(--glow-accent, rgba(167, 139, 250, 0.25));
+}
+
+.agents-workspace [data-resizing] {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.agents-workspace .agents-workspace__empty {
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  height: 100%;
+  padding: 24px;
+  color: var(--fg-muted);
+}
+
+/* --- Drawer & Scrim (Mobile / Narrow Viewports) --- */
+.agents-workspace .agents-workspace__scrim {
+  position: absolute;
+  inset: 40px 0 0;
+  z-index: 10;
+  background: var(--scrim);
+  backdrop-filter: blur(4px);
+  border: 0;
+  cursor: default;
+}
+
+.agents-workspace .agents-workspace__drawer {
+  position: absolute;
+  top: 40px;
+  bottom: 0;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, 90%);
+  min-height: 0;
+  overflow: auto;
+  background: var(--agents-surface-rail);
+  border-inline: 1px solid var(--agents-border-card);
+  box-shadow: var(--agents-shadow-flyout);
+}
+
+.agents-workspace .agents-workspace__drawer--navigation {
+  left: 0;
+  animation: slide-in-left var(--dur-quick, 160ms) var(--ease-precise);
+}
+
+.agents-workspace .agents-workspace__drawer--context {
+  right: 0;
+  animation: slide-in-right var(--dur-quick, 160ms) var(--ease-precise);
+}
+
+.agents-workspace .agents-workspace__drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--agents-border-subtle);
+  background: var(--agents-surface-header);
+}
+
+.agents-workspace .agents-workspace__drawer-header h2 {
+  margin: 0;
+  font-size: var(--type-sm, 12px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--fg-bright);
+}
+
+.agents-workspace .agents-workspace__drawer-close {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--agents-border-card);
+  border-radius: var(--agents-radius-sm);
+  color: var(--fg-default);
+  background: var(--agents-surface-card);
+  cursor: pointer;
+  font-size: var(--type-xs, 11px);
+  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .agents-workspace__drawer-close:hover {
+  background: var(--agents-surface-hover);
+  border-color: var(--agents-border-hover);
+}
+
+.agents-workspace .agents-workspace__drawer-close:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 1px;
+}
+
+/* --- Drawer Animations --- */
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* --- Responsive Media Rules --- */
+@media (max-width: 900px) {
+  .agents-workspace .agents-workspace__branch { display: none; }
+  .agents-workspace .agents-workspace__workspace { max-width: 140px; }
+}
+
+@media (max-width: 620px) {
+  .agents-workspace .agents-workspace__identity span,
+  .agents-workspace .agents-workspace__header-title { display: none; }
+  .agents-workspace .agents-workspace__workspace { flex: 1; max-width: none; }
+  .agents-workspace .agents-workspace__header { gap: 4px; padding-left: 6px; }
+  .agents-workspace .agents-workspace__header > button { padding-inline: 6px; }
+}
+
+/* --- Reduced Motion Compliance --- */
+@media (prefers-reduced-motion: reduce) {
+  .agents-workspace *,
+  .agents-workspace *::before,
+  .agents-workspace *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Center Conversation Surface in Dedicated Agents Window
+   ========================================================================== */
+.agents-workspace .agents-conversation-surface {
+  background: var(--agents-canvas);
+  border-left: none;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.agents-workspace .agents-conversation-surface .agent-workbench-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agents-workspace .agents-conversation-surface .agent-parent-layer {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Optimal reading measure for wide window */
+.agents-workspace .agent-feed-column {
+  max-width: 920px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 0 var(--space-3, 12px);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+}
+
+.agents-workspace .agent-chat-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Elevated Cockpit Composer in Agents Window */
+.agents-workspace .hero-composer-card {
+  max-width: 900px;
+  width: 100%;
+  margin: var(--space-2, 8px) auto var(--space-3, 12px) auto;
+  background: linear-gradient(180deg, rgba(22, 22, 30, 0.92) 0%, rgba(13, 13, 18, 0.96) 100%);
+  border: 1px solid var(--agents-border-card, rgba(255, 255, 255, 0.09));
+  border-radius: var(--agents-radius-card, 12px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 16px 44px -8px rgba(0, 0, 0, 0.75),
+    0 4px 16px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(24px) saturate(140%);
+  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+}
+
+.agents-workspace .hero-composer-card:hover {
+  border-color: var(--agents-border-hover, rgba(255, 255, 255, 0.18));
+  transform: translateY(-0.5px);
+}
+
+.agents-workspace .hero-composer-card.is-focused,
+.agents-workspace .hero-composer-card:focus-within {
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 0 0 1px rgba(167, 139, 250, 0.35),
+    0 0 24px rgba(139, 92, 246, 0.2),
+    0 20px 48px rgba(0, 0, 0, 0.8);
+}

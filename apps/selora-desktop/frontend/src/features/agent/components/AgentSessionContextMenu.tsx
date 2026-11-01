@@ -6,9 +6,11 @@
 // transcript on disk and cannot be undone.
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { AgentSession } from '../types';
+import { currentEnvelopeContext } from '../../../app/app-store';
+import { openAgentsWindow } from '../../../bridge/bridge';
 
 export type AgentSessionContextMenuProps = {
-  session: AgentSession;
+  session: Pick<AgentSession, 'id' | 'title'>;
   /** Viewport coordinates of the right-click. */
   x: number;
   y: number;
@@ -16,8 +18,12 @@ export type AgentSessionContextMenuProps = {
   /** The backend refuses a delete while the session's turn is running. */
   canDelete: boolean;
   onTogglePin: () => void;
-  onDelete: () => void;
+  onDelete: () => void | Promise<void>;
   onClose: () => void;
+  onOpenInAgents?: (sessionId: string) => void | Promise<void>;
+  onRename?: () => void | Promise<void>;
+  onCopy?: () => void | Promise<void>;
+  onShowInMain?: () => void | Promise<void>;
 };
 
 const MENU_MARGIN = 8;
@@ -31,10 +37,29 @@ export function AgentSessionContextMenu({
   onTogglePin,
   onDelete,
   onClose,
+  onOpenInAgents,
+  onRename,
+  onCopy,
+  onShowInMain,
 }: AgentSessionContextMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: y, left: x });
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const openInAgents = async () => {
+    try {
+      if (onOpenInAgents) await onOpenInAgents(session.id);
+      else {
+        const context = currentEnvelopeContext();
+        if (!context) throw new Error('Open a workspace before opening an Agents window.');
+        await openAgentsWindow({ sessionId: session.id, workspaceId: context.workspace_id });
+      }
+      onClose();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
 
   // Measure after paint so the menu never hangs off the viewport edge.
   useLayoutEffect(() => {
@@ -140,8 +165,8 @@ export function AgentSessionContextMenu({
               role="menuitem"
               className="context-menu-item is-danger"
               onClick={() => {
-                onDelete();
-                onClose();
+                void Promise.resolve(onDelete()).then(onClose).catch((failure) =>
+                  setError(failure instanceof Error ? failure.message : String(failure)));
               }}
             >
               Delete
@@ -150,6 +175,20 @@ export function AgentSessionContextMenu({
         </div>
       ) : (
         <>
+          {error && <p role="alert">{error}</p>}
+          <button type="button" role="menuitem" className="context-menu-item"
+            onClick={() => { void openInAgents(); }}>
+            <span>Open in Agents window</span>
+          </button>
+          {onShowInMain && <button type="button" role="menuitem" className="context-menu-item"
+          onClick={() => { void Promise.resolve(onShowInMain()).then(onClose).catch((failure) =>
+            setError(failure instanceof Error ? failure.message : String(failure))); }}>Show in main window</button>}
+          {onRename && <button type="button" role="menuitem" className="context-menu-item"
+            onClick={() => { void Promise.resolve(onRename()).then(onClose).catch((failure) =>
+              setError(failure instanceof Error ? failure.message : String(failure))); }}>Rename session</button>}
+          {onCopy && <button type="button" role="menuitem" className="context-menu-item"
+            onClick={() => { void Promise.resolve(onCopy()).then(onClose).catch((failure) =>
+              setError(failure instanceof Error ? failure.message : String(failure))); }}>Copy session ID</button>}
           <button
             type="button"
             role="menuitem"

@@ -303,7 +303,9 @@ pub fn spawn_child_turn(
             let end = report.end;
             if !end.is_completed() {
                 runtime_for_task.forget_steering(&child_id);
-                return ChildOutcome::failed(end.toast());
+                let mut outcome = ChildOutcome::failed(end.toast());
+                outcome.final_message = report.final_message;
+                return outcome;
             }
             match steer_rx.try_recv() {
                 Ok(text) => conversation.push(ChatMessage::user(text)),
@@ -563,6 +565,28 @@ mod tests {
     #[derive(Default)]
     struct HangingChat;
 
+    #[derive(Default)]
+    struct CappedChat;
+
+    impl ChatStream for CappedChat {
+        fn stream_round(
+            &mut self,
+            _request: ChatRequest,
+            events: mpsc::UnboundedSender<ChatEvent>,
+        ) -> ChatRoundFuture<'_> {
+            Box::pin(async move {
+                let _ = events.send(ChatEvent::Delta("partial findings".into()));
+                let _ = events.send(ChatEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".into()),
+                    name: Some("read_file".into()),
+                    arguments: "{}".into(),
+                });
+                Ok(receipt())
+            })
+        }
+    }
+
     impl ChatStream for HangingChat {
         fn stream_round(
             &mut self,
@@ -710,6 +734,38 @@ mod tests {
         assert!(activities.iter().all(|activity| {
             activity.child_id == "child-1" && activity.parent_session == "parent-1"
         }));
+    }
+
+    #[tokio::test]
+    async fn capped_child_reports_partial_findings_and_failure() {
+        let runtime = SubagentRuntime::new();
+        spawn_child_turn(
+            &runtime,
+            SpawnRequest::new("parent", "child", SubagentPolicy::ReadOnly, "Review"),
+            Arc::new(Backend::<CappedChat> {
+                chat: std::marker::PhantomData,
+            }),
+            model(),
+            TurnCaps {
+                max_tool_iterations: 0,
+                ..TurnCaps::spec_defaults(128000)
+            },
+        )
+        .unwrap();
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            runtime.wait_for_child("child"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!completion.ok);
+        assert!(completion
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("iteration cap (0)"));
+        assert_eq!(completion.final_message, "partial findings");
     }
 
     #[tokio::test]

@@ -89,14 +89,15 @@
 }
 
 .editor-tab:hover {
-  background: var(--ink-faint);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 100%), var(--ink-faint);
   color: var(--fg-default);
 }
 
 .editor-tab.is-active {
   background: var(--ink-canvas);
-  color: var(--fg-default);
+  color: var(--fg-bright, #ffffff);
   font-weight: var(--weight-medium);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 /* Tab active bottom hairline glow */
@@ -106,7 +107,8 @@
   left: 0;
   right: 0;
   height: calc(var(--hairline) * 2);
-  background: var(--fg-default);
+  background: linear-gradient(90deg, transparent, var(--moonlight-200, #f2f5fa) 15%, var(--moonlight-200, #f2f5fa) 85%, transparent);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.45), 0 0 20px rgba(56, 189, 248, 0.2);
   pointer-events: none;
 }
 
@@ -134,6 +136,8 @@
   color: var(--warn);
   margin-right: 2px;
   display: inline-block;
+  filter: drop-shadow(0 0 4px rgba(212, 160, 23, 0.65));
+  animation: pulse-glow 2.5s infinite ease-in-out;
 }
 
 /* "Keep Open": VS Code marks pinned tabs with a dotted title underline. */
@@ -821,16 +825,19 @@
 
 .glowing-selora-mark {
   color: var(--fg-default);
-  filter: drop-shadow(0 0 12px var(--c-rgba-255-255-255-0p12));
-  animation: selora-mark-pulse 4s infinite ease-in-out;
+  filter: drop-shadow(0 0 16px rgba(255, 255, 255, 0.18)) drop-shadow(0 0 32px var(--glow-green, rgba(34, 197, 94, 0.25)));
+  animation: float-subtle 4s ease-in-out infinite, selora-mark-pulse 4s infinite ease-in-out;
+  transform-style: preserve-3d;
 }
 
 @keyframes selora-mark-pulse {
   0%, 100% {
-    filter: drop-shadow(0 0 8px var(--c-rgba-255-255-255-0p08));
+    filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.14)) drop-shadow(0 0 20px var(--glow-green, rgba(34, 197, 94, 0.2)));
+    transform: scale(1);
   }
   50% {
-    filter: drop-shadow(0 0 16px var(--c-rgba-255-255-255-0p22));
+    filter: drop-shadow(0 0 24px rgba(255, 255, 255, 0.35)) drop-shadow(0 0 44px var(--glow-green, rgba(34, 197, 94, 0.4)));
+    transform: scale(1.03);
   }
 }
 
@@ -868,16 +875,23 @@
   background: var(--ink-low);
   border: 1px solid var(--ink-hi);
   border-radius: var(--radius-1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   color: var(--fg-muted);
   font-size: var(--type-xs);
   font-family: var(--font-mono);
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 120ms cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 120ms ease;
 }
 
 .empty-recent-btn:hover {
   background: var(--ink-mid);
   color: var(--fg-default);
-  border-color: var(--fg-faint);
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.empty-recent-btn:active {
+  transform: translateY(1px);
 }
 
 .recent-path {

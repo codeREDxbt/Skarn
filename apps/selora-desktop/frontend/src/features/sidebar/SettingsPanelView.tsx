@@ -334,16 +334,7 @@ const restartServer = (language: string): void => {
                 using it.
               </p>
             ) : null}
-            <ul
-              style={{
-                listStyle: 'none',
-                margin: 0,
-                padding: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
-            >
+            <ul className="settings-provider-list">
               {PROVIDER_PRESETS.map((preset) => {
                 const enabled = !isProviderDisabled(disabledProviders, preset.id);
                 const detected = catalogModels.some(
@@ -351,10 +342,7 @@ const restartServer = (language: string): void => {
                 );
                 const isActive = activeProvider === preset.id;
                 return (
-                  <li
-                    key={preset.id}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                  >
+                  <li key={preset.id} className="settings-provider-item">
                     <div
                       style={{
                         display: 'flex',

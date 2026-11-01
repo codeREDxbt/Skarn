@@ -5,7 +5,7 @@
 // - Tool Execution Cards with glowing status borders & overhauled diffs
 // - Markdown Code Blocks with language badges, copy feedback, & "Apply to Editor"
 // - User message bubble actions: Copy, Rewind, Edit, Retry with sleek tooltips
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState } from 'react';
 import {
   BrainCircuit,
   ChevronDown,
@@ -24,7 +24,6 @@ import { ThinkingOrb } from '../presence/ThinkingOrb';
 import { PromptSuggestions } from './PromptSuggestions';
 import { BotAvatar } from '../presence/BotAvatar';
 import { agentStore } from '../agent-store';
-import { useReducedMotion } from '../../onboarding/motion';
 import './agent-feed-polish.css';
 
 export type AgentExecutionFeedProps = {
@@ -33,6 +32,8 @@ export type AgentExecutionFeedProps = {
   thinkingState: ThinkingState;
   metrics: AgentMetrics;
   promptQueue?: QueuedPrompt[];
+  scrollKey?: string;
+  surface?: 'main' | 'agents';
 };
 
 const SUGGESTIONS = [
@@ -43,6 +44,7 @@ const SUGGESTIONS = [
 
 /** Distance from the bottom (px) that still counts as "following" the stream. */
 const NEAR_BOTTOM_THRESHOLD_PX = 120;
+const scrollPositions = new Map<string, { top: number; following: boolean }>();
 
 export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
   messages,
@@ -50,11 +52,12 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
   thinkingState,
   metrics,
   promptQueue,
+  scrollKey,
+  surface = 'main',
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
-  const reducedMotion = useReducedMotion();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBuffer, setEditBuffer] = useState<string>('');
@@ -66,14 +69,37 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
     if (!list) return;
     nearBottomRef.current =
       list.scrollHeight - list.scrollTop - list.clientHeight <= NEAR_BOTTOM_THRESHOLD_PX;
+    if (scrollKey) {
+      scrollPositions.set(scrollKey, { top: list.scrollTop, following: nearBottomRef.current });
+      if (scrollPositions.size > 100) scrollPositions.delete(scrollPositions.keys().next().value!);
+    }
   };
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const saved = scrollKey ? scrollPositions.get(scrollKey) : undefined;
+    nearBottomRef.current = saved?.following ?? true;
+    if (list) list.scrollTop = saved && !saved.following ? saved.top : list.scrollHeight;
+    setEditingId(null);
+  }, [scrollKey]);
 
   useEffect(() => {
     // Follow new output only while the reader is already at the bottom; a
     // reader who scrolled back into history is never yanked forward.
     if (!nearBottomRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth' });
-  }, [messages, inFlight, activeQueue.length, reducedMotion]);
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [messages, inFlight, activeQueue.length, scrollKey]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (nearBottomRef.current) list.scrollTop = list.scrollHeight;
+    });
+    for (const child of Array.from(list.children)) observer.observe(child);
+    return () => observer.disconnect();
+  }, [messages.length, scrollKey]);
 
   const getStatusText = () => {
     switch (thinkingState) {
@@ -442,7 +468,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                         if (typeof window !== 'undefined') {
                           window.dispatchEvent(
                             new CustomEvent('selora:set-composer-draft', {
-                              detail: { text: item.text },
+                              detail: { text: item.text, surface, sessionId: agentStore.getSnapshot().activeSessionId },
                             })
                           );
                         }

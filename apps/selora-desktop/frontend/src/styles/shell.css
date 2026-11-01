@@ -280,6 +280,7 @@
   background: var(--ink-canvas);
   min-width: 0;
   border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .titlebar-identity {
@@ -418,6 +419,7 @@
   background: var(--c-rgba-255-255-255-0p04);
   border: 1px solid var(--c-rgba-255-255-255-0p09);
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   color: var(--fg-muted);
   font-size: var(--type-xs);
   cursor: pointer;
@@ -426,10 +428,11 @@
 }
 
 .titlebar-search-trigger:hover {
-  background: var(--glow-accent);
-  border-color: var(--glow-accent-strong);
-  color: var(--fg-default);
-  box-shadow: 0 0 10px var(--c-rgba-255-255-255-0p05);
+  background: radial-gradient(circle at top, rgba(255, 255, 255, 0.08), transparent 75%), var(--glow-accent);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--fg-bright);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transform: translateY(-0.5px);
 }
 
 .titlebar-search-icon {
@@ -546,9 +549,10 @@
 }
 
 .view-mode-pill.is-active {
-  background: var(--ink-mid);
-  color: var(--fg-default);
-  box-shadow: 0 1px 2px var(--c-rgba-0-0-0-0p3);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.06) 100%), var(--ink-mid);
+  color: var(--fg-bright);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .titlebar-right {
@@ -861,9 +865,9 @@
 }
 
 .activity-button.is-selected {
-  background: var(--c-rgba-255-255-255-0p1);
-  color: var(--fg-default);
-  box-shadow: 0 0 8px var(--c-rgba-255-255-255-0p04);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.05) 100%), var(--ink-mid);
+  color: var(--fg-bright);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 0 12px rgba(255, 255, 255, 0.06);
 }
 
 /* The 2×16 painted leading edge mark (REVAMP_SPEC §7 bend 3) */
@@ -874,9 +878,9 @@
   top: calc(50% - var(--space-4) / 2);
   width: var(--chrome-edge-mark-w);
   height: var(--space-4);
-  background: var(--fg-default);
+  background: linear-gradient(180deg, var(--moonlight-200, #f2f5fa), var(--moonlight-400, #cdd6e4));
   border-radius: var(--radius-pill);
-  box-shadow: 0 0 6px var(--c-rgba-255-255-255-0p35);
+  box-shadow: 0 0 8px rgba(205, 214, 228, 0.65), 0 0 16px rgba(56, 189, 248, 0.35);
   animation: edge-mark-slide var(--dur-quick) var(--ease-precise);
 }
 
@@ -1077,31 +1081,48 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  background: rgba(14, 14, 20, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 4px 14px rgba(0, 0, 0, 0.3);
+  margin-top: var(--space-3);
 }
 
 .settings-echo-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1.2fr 0.8fr;
   gap: var(--space-2);
-  align-items: baseline;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.settings-echo-row:last-child {
+  border-bottom: none;
 }
 
 .settings-echo-row dt {
-  font-size: var(--type-sm);
-  line-height: var(--type-sm-lh);
+  font-size: var(--type-xs);
+  line-height: var(--type-xs-lh);
   color: var(--fg-muted);
 }
 
 .settings-echo-row dd {
   font-family: var(--font-mono);
-  font-size: var(--type-sm);
-  line-height: var(--type-sm-lh);
-  color: var(--fg-default);
+  font-size: var(--type-xs);
+  line-height: var(--type-xs-lh);
+  color: var(--moonlight-200, var(--fg-default));
+  text-align: right;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .settings-later {
-  font-size: var(--type-sm);
-  line-height: var(--type-sm-lh);
+  font-size: var(--type-xs);
+  line-height: var(--type-xs-lh);
   color: var(--fg-faint);
 }
 
@@ -1289,8 +1310,9 @@
   left: 0;
   right: 0;
   bottom: 0;
-  height: var(--hairline);
-  background: var(--fg-default);
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--moonlight-200, #f2f5fa) 20%, var(--moonlight-200, #f2f5fa) 80%, transparent);
+  box-shadow: 0 -1px 8px rgba(255, 255, 255, 0.45);
 }
 
 .bottom-close {
@@ -1324,6 +1346,7 @@
   padding: 0 var(--space-3);
   background: var(--ink-low);
   border-top: var(--border-hairline);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   min-width: 0;
@@ -1601,14 +1624,25 @@
   padding: 0 var(--space-4);
   background: var(--ink-mid);
   color: var(--fg-default);
+  border: 1px solid var(--ink-hi);
   border-radius: var(--radius-1);
   font-size: var(--type-md);
   line-height: var(--type-md-lh);
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 6px rgba(0, 0, 0, 0.35);
+  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-instant) var(--ease-calm);
 }
 
 .empty-action:hover:not([disabled]) {
   background: var(--ink-hi);
+  color: var(--fg-bright);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+.empty-action:active:not([disabled]) {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.4);
 }
 
 /* The disabled state must be unmistakable, not just fainter text: owner
@@ -1633,11 +1667,21 @@
 .key-chip {
   padding: var(--space-1) var(--space-2);
   background: var(--ink-mid);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-1);
+  box-shadow: 0 2px 0 var(--ink-rule), inset 0 1px 0 rgba(255, 255, 255, 0.12);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
-  color: var(--fg-muted);
+  color: var(--moonlight-400, var(--fg-muted));
+  display: inline-flex;
+  align-items: center;
+  transition: transform var(--dur-instant) var(--ease-precise), box-shadow var(--dur-instant) var(--ease-precise), color var(--dur-instant) var(--ease-calm);
+}
+
+.key-chip:hover {
+  color: var(--fg-bright);
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
 /* --- 11. Command palette (UI_SPEC §5, DESIGN §7.2 — Raycast/Spotlight Elevated) --- */
@@ -1672,10 +1716,16 @@
   align-self: flex-start;
   display: flex;
   flex-direction: column;
-  background: var(--ink-mid);
-  border: var(--border-hairline);
+  background: var(--glass-bg-elevated, var(--ink-mid));
+  backdrop-filter: blur(var(--blur-popover, 20px));
+  -webkit-backdrop-filter: blur(var(--blur-popover, 20px));
+  border: 1px solid var(--glass-border, var(--border-hairline));
   border-radius: var(--radius-2);
   overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 24px 60px -12px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
   animation: bloom var(--dur-base) cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
 }
@@ -1806,8 +1856,9 @@
 }
 
 .palette-option.is-active {
-  background: var(--c-rgba-16-185-129-0p1);
-  border-left-color: var(--c-10b981);
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 185, 129, 0.02) 100%);
+  border-left-color: var(--ok, var(--c-10b981));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .palette-option-left {

@@ -46,9 +46,12 @@ import { activeEditorContext, editorStore } from '../../editor/editor-store';
 import { getAppSnapshot, subscribeApp } from '../../../app/app-store';
 import { providerIdForModel } from '../../auth/provider-visibility';
 import { safeWorkspaceRelativePath } from './chat-safety';
+import { readAgentDraft, writeAgentDraft, clearAgentDraft, type AgentDraft } from '../draft-store';
 import './agent-attachments.css';
 
 export type AgentComposerProps = {
+  surface?: 'main' | 'agents';
+  onPreviewAttachment?: (path: string) => void;
   inFlight: boolean;
   streamingActivityLevel: number;
   permissionMode: PermissionMode;
@@ -227,7 +230,14 @@ function describeModel(model: Model): ModelItem {
   };
 }
 
-export const AgentComposer: React.FC<AgentComposerProps> = ({
+export const AgentComposer: React.FC<AgentComposerProps> = (props) => {
+  const state = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
+  return <SessionAgentComposer key={`${state.workspace?.id ?? ''}:${state.activeSessionId ?? ''}:${props.surface ?? 'main'}`} {...props} />;
+};
+
+const SessionAgentComposer: React.FC<AgentComposerProps> = ({
+  surface = 'main',
+  onPreviewAttachment,
   inFlight,
   streamingActivityLevel,
   permissionMode,
@@ -240,14 +250,40 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   const selectedModelId = storeState.selectedModel;
   const gate = getComposerGate(storeState);
 
-  const [text, setText] = useState('');
+  const workspaceId = storeState.workspace?.id ?? '';
+  const sessionId = storeState.activeSessionId ?? '';
+  const [draft, setDraft] = useState<AgentDraft>(() => {
+    const saved = readAgentDraft(workspaceId, sessionId, surface);
+    return { ...saved, attachments: Array.from(new Set(saved.attachments
+      .map((path) => safeWorkspaceRelativePath(storeState.workspace?.root ?? null, path))
+      .filter((path): path is string => path !== null))).slice(0, MAX_ATTACHMENTS) };
+  });
+  const draftRef = useRef(draft);
+  const updateDraft = useCallback((update: Partial<AgentDraft>) => {
+    const next = { ...draftRef.current, ...update, revision: draftRef.current.revision + 1 };
+    writeAgentDraft(workspaceId, sessionId, surface, next);
+    draftRef.current = readAgentDraft(workspaceId, sessionId, surface);
+    setDraft(draftRef.current);
+  }, [workspaceId, sessionId, surface]);
+  const text = draft.text;
+  const attachments = draft.attachments;
+  const setText = useCallback((value: string) => updateDraft({ text: value }), [updateDraft]);
+  const setAttachments = useCallback((value: string[] | ((current: string[]) => string[])) => {
+    updateDraft({ attachments: typeof value === 'function' ? value(draftRef.current.attachments) : value });
+  }, [updateDraft]);
+  const clearAcceptedDraft = useCallback((revision: number) => {
+    if (draftRef.current.revision !== revision) return;
+    if (!clearAgentDraft(workspaceId, sessionId, surface, revision)) return;
+    const empty = readAgentDraft(workspaceId, sessionId, surface);
+    draftRef.current = empty;
+    setDraft(empty);
+  }, [workspaceId, sessionId, surface]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [savedDraft, setSavedDraft] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [activeMenu, setActiveMenu] = useState<MenuType>(null);
   const [modelSearch, setModelSearch] = useState('');
   const [modelError, setModelError] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<string[]>([]);
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachQuery, setAttachQuery] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -274,7 +310,16 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
     return options;
   }, [editor.tabs, editor.fileTree, workspaceRoot]);
 
-  useEffect(() => setAttachments([]), [workspaceRoot]);
+  useEffect(() => {
+    const attach = (event: Event) => {
+      const detail = (event as CustomEvent<{ path: string; sessionId: string; surface: string; workspaceId: string }>).detail;
+      if (!detail || typeof detail.path !== 'string' || detail.surface !== surface || detail.sessionId !== sessionId || detail.workspaceId !== workspaceId) return;
+      const path = safeWorkspaceRelativePath(workspaceRoot, detail.path);
+      if (path) setAttachments((current) => Array.from(new Set([...current, path])).slice(0, MAX_ATTACHMENTS));
+    };
+    window.addEventListener('selora:attach-agent-file', attach);
+    return () => window.removeEventListener('selora:attach-agent-file', attach);
+  }, [workspaceRoot, workspaceId, sessionId, surface, setAttachments]);
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -303,12 +348,19 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
       if (current.length >= MAX_ATTACHMENTS) return current;
       return [...current, path];
     });
-  }, []);
+  }, [setAttachments]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const saved = draftRef.current;
+    if (saved.selectionStart !== undefined) textareaRef.current?.setSelectionRange(
+      saved.selectionStart, saved.selectionEnd ?? saved.selectionStart,
+    );
+  }, []);
 
   // Auto-resize textarea with smooth height transition
   useEffect(() => {
@@ -350,7 +402,12 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   // Listen for draft restore events (e.g. from Rewind or Queue edit)
   useEffect(() => {
     const handleSetDraft = (e: Event) => {
-      const customEvent = e as CustomEvent<{ text: string }>;
+      const customEvent = e as CustomEvent<{ text: string; surface?: 'main' | 'agents'; sessionId?: string }>;
+      if (customEvent.detail?.surface && customEvent.detail.surface !== surface) return;
+      if (customEvent.detail?.sessionId && customEvent.detail.sessionId !== sessionId) return;
+      if (!customEvent.detail?.surface && (!document.hasFocus() ||
+          !containerRef.current?.closest('[data-presentation]')?.contains(document.activeElement) &&
+          !containerRef.current?.contains(document.activeElement))) return;
       if (customEvent.detail && typeof customEvent.detail.text === 'string') {
         setText(customEvent.detail.text);
         setTimeout(() => {
@@ -366,7 +423,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
     return () => {
       window.removeEventListener('selora:set-composer-draft', handleSetDraft);
     };
-  }, []);
+  }, [surface, sessionId, setText]);
 
   const handleRefreshModels = useCallback(() => {
     setModelError(null);
@@ -376,38 +433,43 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
     });
   }, []);
 
-  const handleQueue = useCallback(() => {
+  const handleQueue = useCallback(async () => {
     if (!gate.ready) return;
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
-    agentStore.queuePrompt(composePrompt(trimmed, attachments), permissionMode);
-    setText('');
+    const revision = draftRef.current.revision;
+    const context = surface === 'main' ? activeEditorContext() ?? undefined : undefined;
+    const queued = await agentStore.queuePrompt(composePrompt(trimmed, attachments), permissionMode, context);
+    if (!queued) return;
+    clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
-    setAttachments([]);
-  }, [gate.ready, text, permissionMode, attachments]);
+  }, [gate.ready, text, permissionMode, attachments, surface, clearAcceptedDraft]);
 
-  const handleSteer = useCallback(() => {
+  const handleSteer = useCallback(async () => {
     if (!gate.ready) return;
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
-    agentStore.steerActiveTurn(composePrompt(trimmed, attachments));
-    setText('');
+    const revision = draftRef.current.revision;
+    const prompt = composePrompt(trimmed, attachments);
+    const previousMessages = agentStore.getSnapshot().messages;
+    await agentStore.steerActiveTurn(prompt);
+    if (!agentStore.getSnapshot().messages.some((message) => message.role === 'user' && message.content === prompt && !previousMessages.includes(message))) return;
+    clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
-    setAttachments([]);
-  }, [gate.ready, text, attachments]);
+  }, [gate.ready, text, attachments, clearAcceptedDraft]);
 
   const handleSubmit = useCallback(() => {
     if (inFlight) {
       if (!gate.ready) return;
       const trimmed = text.trim();
       if (trimmed || attachments.length > 0) {
-        handleQueue();
+        void handleQueue();
       } else {
         agentStore.stopActiveTurn();
       }
@@ -417,16 +479,16 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     const prompt = composePrompt(trimmed, attachments);
-    const context = activeEditorContext();
-    if (context) agentStore.sendUserMessage(prompt, false, context);
-    else agentStore.sendUserMessage(prompt);
-    setText('');
+    const context = surface === 'main' ? activeEditorContext() ?? undefined : undefined;
+    const revision = draftRef.current.revision;
+    const accepted = agentStore.sendUserMessage(prompt, false, context);
+    if (!accepted) return;
+    clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
-    setAttachments([]);
-  }, [inFlight, gate.ready, text, attachments, handleQueue]);
+  }, [inFlight, gate.ready, text, attachments, handleQueue, surface, clearAcceptedDraft]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter') {
@@ -445,7 +507,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
       if (inFlight) {
         if (!gate.ready) return;
         if (text.trim() || attachments.length > 0) {
-          handleQueue();
+          void handleQueue();
         } else {
           agentStore.stopActiveTurn();
         }
@@ -542,6 +604,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   return (
     <div
       ref={containerRef}
+      data-composer-surface={surface}
       className={`agent-composer hero-composer-card ${isFocused ? 'is-focused' : ''} ${
         inFlight ? 'is-in-flight' : ''
       }${isDragOver ? ' is-drag-over' : ''}`}
@@ -556,7 +619,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
       onDrop={handleDrop}
     >
       {/* 1. Border Beam (Animated perimeter aura during in-flight runs) */}
-      <BorderBeam active={inFlight} durationMs={2400} borderRadius={8} colorPreset="emerald" />
+      <BorderBeam active={inFlight} durationMs={2400} borderRadius={12} colorPreset="emerald" />
 
       {/* 2. Composer mode row (Ask / Agent / Plan). Each entry is a real
           session permission policy — not a cosmetic toggle. */}
@@ -584,7 +647,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
           {attachments.map((path) => (
             <span className="agent-attach-chip" role="listitem" key={path} title={path}>
               <FileText size={11} aria-hidden="true" />
-              <span className="agent-attach-chip-name">{baseName(path)}</span>
+              <button type="button" className="agent-attach-chip-name" aria-label={`Preview attachment ${baseName(path)}`}
+                onClick={() => onPreviewAttachment ? onPreviewAttachment(path) : void editorStore.openPath(path, { preview: true })}>{baseName(path)}</button>
               <button
                 type="button"
                 className="agent-attach-chip-remove"
@@ -628,6 +692,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
           onKeyDown={handleKeyDown}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
+          onSelect={(event) => updateDraft({ selectionStart: event.currentTarget.selectionStart, selectionEnd: event.currentTarget.selectionEnd })}
           rows={1}
           aria-label="Composer prompt input"
           placeholder=""

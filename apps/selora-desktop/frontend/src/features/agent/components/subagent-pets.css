@@ -28,14 +28,15 @@
 .subagent-pet {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   flex: 0 0 auto;
   height: 22px;
-  max-width: 116px;
-  padding: 0 6px 0 2px;
-  border: 1px solid transparent;
+  max-width: 120px;
+  padding: 0 7px 0 2px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-pill);
   background: var(--c-rgba-255-255-255-0p04);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   color: var(--fg-muted);
   font-family: inherit;
   font-size: 10px;
@@ -47,13 +48,16 @@
     border-color var(--dur-instant) var(--ease-calm),
     color var(--dur-instant) var(--ease-calm),
     box-shadow var(--dur-instant) var(--ease-calm),
+    transform var(--dur-instant) var(--ease-spring),
     opacity var(--dur-instant) var(--ease-calm);
 }
 
 .subagent-pet:hover {
   background: var(--glow-accent);
-  border-color: var(--glass-border-hover);
-  color: var(--fg-default);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--fg-bright);
+  transform: translateY(-0.5px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .subagent-pet:focus-visible {
@@ -105,9 +109,25 @@
   flex: 0 0 auto;
   border-radius: 50%;
   background:
-    radial-gradient(circle at 32% 28%, var(--world-glow, var(--glow-accent)) 0%, transparent 62%),
-    var(--ink-low);
-  box-shadow: inset 0 0 0 1px var(--hairline-faint);
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.45) 0%, var(--world-color) 42%, rgba(10, 10, 16, 0.85) 85%, #000 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.65),
+    0 0 8px var(--world-glow);
+  transform-style: preserve-3d;
+  transition: transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-instant) var(--ease-calm);
+}
+
+.subagent-pet:hover .subagent-pet-world {
+  transform: scale(1.12) rotate(6deg);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.75),
+    0 0 12px var(--world-color),
+    0 0 20px var(--world-glow);
+}
+
+.subagent-pet.is-working .subagent-pet-world {
+  animation: float-subtle 2.5s ease-in-out infinite;
 }
 
 .subagent-pet-art {

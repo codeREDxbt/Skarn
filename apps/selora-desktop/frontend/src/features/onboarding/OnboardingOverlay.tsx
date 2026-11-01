@@ -86,6 +86,25 @@ export function OnboardingOverlay() {
     }
   };
 
+  const handlePointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    if (reducedMotion || !dialogRef.current) return;
+    const rect = dialogRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const normX = (x / rect.width - 0.5) * 2;
+    const normY = (y / rect.height - 0.5) * 2;
+    const tiltX = (normX * 3.5).toFixed(2);
+    const tiltY = (normY * -3.5).toFixed(2);
+    dialogRef.current.style.setProperty('--tilt-x', `${tiltX}deg`);
+    dialogRef.current.style.setProperty('--tilt-y', `${tiltY}deg`);
+  };
+
+  const handlePointerLeave = () => {
+    if (!dialogRef.current) return;
+    dialogRef.current.style.setProperty('--tilt-x', '0deg');
+    dialogRef.current.style.setProperty('--tilt-y', '0deg');
+  };
+
   return (
     <div className="onboarding-backdrop" data-testid="onboarding-backdrop">
       <section
@@ -98,9 +117,11 @@ export function OnboardingOverlay() {
         data-reduced-motion={reducedMotion ? 'true' : 'false'}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
       >
         <div className="onboarding-visual">
-          <OnboardingHero />
+          <OnboardingHero step={step} />
           <div className="onboarding-visual-meta">
             <span className="onboarding-visual-step">STEP {step + 1} / {STEPS.length}</span>
             <span className="onboarding-visual-rule" aria-hidden="true" />
