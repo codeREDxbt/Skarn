@@ -13,6 +13,7 @@ members = [
     "crates/skarn-app",
     "crates/skarn-protocol",
     "crates/skarn-workflow",
+    "crates/skarn-decision",
     "apps/skarn-desktop/src-tauri",
 ]
 
@@ -69,6 +70,9 @@ skarn-tokens = { path = "crates/skarn-tokens" }
 skarn-ui = { path = "crates/skarn-ui" }
 skarn-app = { path = "crates/skarn-app" }
 skarn-workflow = { path = "crates/skarn-workflow" }
+skarn-decision = { path = "crates/skarn-decision" }
+async-trait = "0.1"
+proptest = "1"
 
 # Release profile per ARCHITECTURE.md §14.
 [profile.release]
