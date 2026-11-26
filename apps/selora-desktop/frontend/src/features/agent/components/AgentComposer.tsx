@@ -12,7 +12,7 @@
 // Honesty rules:
 // - The model list is exactly the backend catalog (bootstrap.models /
 //   models_changed). No fallback catalog, no invented context windows or
-//   latencies. With no catalog we show a "Connect and refresh models" empty
+//   latencies. With no catalog we show a "Choose a provider to start" empty
 //   state and disable send.
 // - No workspace from Rust means the agent cannot read/write; the composer
 //   explains that and disables send instead of inventing a folder.
@@ -556,7 +556,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
   const CurrentModeIcon = currentMode.icon;
 
   const resolvedModels: ModelItem[] = useMemo(() => {
-    // Settings > AI Gateway can disable whole providers. Keep the currently
+    // Settings > Providers can disable whole providers. Keep the currently
     // selected model visible so a live session is never broken implicitly,
     // while hiding retired/unavailable models from active recommendations.
     const disabled = appSnapshot.bootstrap?.settings.disabled_providers ?? [];
@@ -694,7 +694,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
             {gate.reason === 'no_workspace'
               ? 'Open a folder to let the agent read and write…'
               : gate.reason === 'no_model'
-              ? 'Connect and refresh models to start…'
+              ? 'Choose a provider to start…'
               : 'Ask anything…'}
           </p>
         )}
@@ -770,10 +770,10 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
           {availableModels.length === 0 ? (
             <div className="model-no-results" role="status">
               <div className="item-title" style={{ color: 'var(--fg-default, var(--c-e4e4e7))' }}>
-                Connect and refresh models
+                Choose a provider to start
               </div>
               <div className="item-desc" style={{ marginTop: 4 }}>
-                No models were reported by the backend. Connect a provider, then refresh
+                No models were reported by the backend. Choose a provider, then refresh
                 the catalog.
               </div>
               <button

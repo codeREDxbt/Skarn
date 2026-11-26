@@ -546,7 +546,7 @@ fn make_client() -> Option<Client> {
         .redirect(redirect::Policy::none())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
-        .user_agent(concat!("SeloraIDE/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Skarn/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()
 }

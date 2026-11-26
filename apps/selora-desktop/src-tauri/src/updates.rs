@@ -18,6 +18,11 @@ use tauri::Emitter;
 /// Progress event the UpdateDialog listens for.
 pub const UPDATE_PROGRESS_EVENT: &str = "selora:update-progress";
 
+/// Stage 0 kill-switch: mirrors [`selora_ai::updates::UPDATES_ENABLED`] so
+/// `check_for_update` and `install_update` make zero network calls until
+/// `codeREDxbt/Skarn` has live signed releases.
+pub const UPDATES_ENABLED: bool = selora_ai::updates::UPDATES_ENABLED;
+
 /// The running build's version, from the workspace manifest.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -47,6 +52,15 @@ fn update_error(message: impl Into<String>, retryable: bool) -> ProtocolErrorDto
     }
 }
 
+fn updates_disabled_error() -> ProtocolErrorDto {
+    ProtocolErrorDto {
+        code: "updates_disabled".into(),
+        message: "In-app updates are disabled in this build (release channel not configured yet)."
+            .into(),
+        retryable: false,
+    }
+}
+
 fn map_net(cause: selora_core::SeloraError) -> ProtocolErrorDto {
     update_error(format!("Update request failed: {cause}"), true)
 }
@@ -55,14 +69,17 @@ fn map_net(cause: selora_core::SeloraError) -> ProtocolErrorDto {
 /// installer already owns; falls back to the system temp directory.
 fn update_dir() -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
-        Some(root) => PathBuf::from(root).join("Selora IDE").join("updates"),
-        None => std::env::temp_dir().join("selora-updates"),
+        Some(root) => PathBuf::from(root).join("Skarn").join("updates"),
+        None => std::env::temp_dir().join("skarn-updates"),
     }
 }
 
 /// One GET against the release endpoint. Never downloads, never installs.
 #[tauri::command]
 pub async fn check_for_update() -> Result<UpdateCheckDto, ProtocolErrorDto> {
+    if !UPDATES_ENABLED {
+        return Err(updates_disabled_error());
+    }
     let release = selora_ai::updates::check_latest_release(CURRENT_VERSION)
         .await
         .map_err(map_net)?;
@@ -82,15 +99,21 @@ pub async fn check_for_update() -> Result<UpdateCheckDto, ProtocolErrorDto> {
 /// that found nothing newer answers a typed error instead of downloading.
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle) -> Result<(), ProtocolErrorDto> {
+    install_update_inner(&app).await
+}
+
+async fn install_update_inner<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<(), ProtocolErrorDto> {
+    if !UPDATES_ENABLED {
+        return Err(updates_disabled_error());
+    }
     let release = selora_ai::updates::check_latest_release(CURRENT_VERSION)
         .await
         .map_err(map_net)?;
     if !release.newer {
         return Err(update_error(
-            format!(
-                "Selora IDE {} is already the latest release.",
-                CURRENT_VERSION
-            ),
+            format!("Skarn {} is already the latest release.", CURRENT_VERSION),
             false,
         ));
     }
@@ -146,9 +169,9 @@ fn verify_authenticode(setup: &std::path::Path) -> Result<(), ProtocolErrorDto> 
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "if ((Get-AuthenticodeSignature -LiteralPath $env:SELORA_UPDATE_INSTALLER).Status -ne 'Valid') { exit 1 }",
+            "if ((Get-AuthenticodeSignature -LiteralPath $env:SKARN_UPDATE_INSTALLER).Status -ne 'Valid') { exit 1 }",
         ])
-        .env("SELORA_UPDATE_INSTALLER", setup)
+        .env("SKARN_UPDATE_INSTALLER", setup)
         .output()
         .map_err(|error| update_error(format!("Could not verify installer signature: {error}"), false))?;
     if output.status.success() {
@@ -227,7 +250,24 @@ mod tests {
     #[test]
     fn the_update_staging_dir_is_per_user() {
         let dir = update_dir();
-        assert!(dir.ends_with("updates") || dir.ends_with("selora-updates"));
+        assert!(dir.ends_with("updates") || dir.ends_with("skarn-updates"));
+    }
+
+    #[tokio::test]
+    async fn check_and_install_update_are_disabled_with_zero_network_calls() {
+        assert!(!UPDATES_ENABLED);
+        let check_err = check_for_update()
+            .await
+            .expect_err("check_for_update must return disabled status");
+        assert_eq!(check_err.code, "updates_disabled");
+        assert!(!check_err.retryable);
+
+        let app = tauri::test::mock_app();
+        let install_err = install_update_inner(app.handle())
+            .await
+            .expect_err("install_update must return disabled status");
+        assert_eq!(install_err.code, "updates_disabled");
+        assert!(!install_err.retryable);
     }
 
     #[cfg(windows)]

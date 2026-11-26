@@ -1,4 +1,4 @@
-// Settings > AI Gateway "Assistant providers": the toggles persist the
+// Settings > Providers "Assistant providers": the toggles persist the
 // disabled list immediately, a disabled provider leaves the selection lists,
 // and a live disabled provider is reported without switching the model.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,8 +27,9 @@ describe('SettingsPanelView assistant providers', () => {
     render(<SettingsPanelView bootstrap={makeBootstrap()} />);
 
     expect(screen.getByText('Assistant providers')).toBeTruthy();
-    expect(screen.getByText('8 of 8 enabled')).toBeTruthy();
-    expect(screen.getByLabelText('Enable Selora API Gateway')).toBeTruthy();
+    expect(screen.getByText('7 of 7 enabled')).toBeTruthy();
+    expect(screen.queryByLabelText('Enable Selora API Gateway')).toBeNull();
+    expect(screen.getByLabelText('Enable Anthropic Claude')).toBeTruthy();
     expect(screen.getByLabelText('Enable DeepSeek')).toBeTruthy();
     expect(screen.getByLabelText('Enable Custom Provider')).toBeTruthy();
   });
@@ -57,7 +58,7 @@ describe('SettingsPanelView assistant providers', () => {
       />,
     );
 
-    expect(screen.getByText('6 of 8 enabled')).toBeTruthy();
+    expect(screen.getByText('5 of 7 enabled')).toBeTruthy();
     const toggle = screen.getByLabelText('Enable DeepSeek') as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);

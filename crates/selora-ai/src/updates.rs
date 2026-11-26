@@ -17,6 +17,10 @@ use tokio::io::AsyncWriteExt;
 
 use selora_core::SeloraError;
 
+/// Stage 0 kill-switch: disabled until `codeREDxbt/Skarn` goes live with
+/// signed v1.0.0 releases (prevents querying any unowned or unpublished repo).
+pub const UPDATES_ENABLED: bool = false;
+
 /// The repository's public home, from the workspace manifest
 /// (`[workspace.package] repository`). Shared by the About dialog and the
 /// update check, so a rename is a one-line Cargo.toml change.
@@ -106,20 +110,24 @@ fn version_triple(tag: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+fn updates_disabled_error() -> SeloraError {
+    SeloraError::Net(
+        "in-app updates are disabled in this build (release channel not configured)".into(),
+    )
+}
+
 /// The update check (UI_SPEC.md §11): fetch the latest release and compare
 /// it against `current` (the running build's `CARGO_PKG_VERSION`).
 pub async fn check_latest_release(current: &str) -> Result<ReleaseInfo, SeloraError> {
+    if !UPDATES_ENABLED {
+        return Err(updates_disabled_error());
+    }
     check_latest_release_at(&latest_release_url(), current).await
 }
 
 /// The same check against an explicit endpoint (the wiremock seam).
 pub async fn check_latest_release_at(url: &str, current: &str) -> Result<ReleaseInfo, SeloraError> {
-    let client = reqwest::Client::builder()
-        // GitHub's API rejects requests without a User-Agent.
-        .user_agent(concat!("selora-ide/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| SeloraError::Net(error.to_string()))?;
-    let response = client
+    let response = update_client()?
         .get(url)
         .send()
         .await
@@ -184,13 +192,16 @@ pub fn parse_checksum(text: &str) -> Option<String> {
 fn update_client() -> Result<reqwest::Client, SeloraError> {
     reqwest::Client::builder()
         // GitHub's API rejects requests without a User-Agent.
-        .user_agent(concat!("selora-ide/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("skarn/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| SeloraError::Net(error.to_string()))
 }
 
 /// Fetch and parse the release's `.sha256` asset.
 pub async fn fetch_checksum(url: &str) -> Result<String, SeloraError> {
+    if !UPDATES_ENABLED {
+        return Err(updates_disabled_error());
+    }
     let response = update_client()?
         .get(url)
         .send()
@@ -223,6 +234,9 @@ pub async fn download_installer(
     dest_dir: &Path,
     progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<PathBuf, SeloraError> {
+    if !UPDATES_ENABLED {
+        return Err(updates_disabled_error());
+    }
     // `asset.name` comes from the release payload: keep only the leaf.
     let file_name = Path::new(&asset.name)
         .file_name()
@@ -322,7 +336,7 @@ mod tests {
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "tag_name": "v9.9.9",
-                    "html_url": "https://github.com/ToxicAngelX/Selora-IDE/releases/tag/v9.9.9"
+                    "html_url": "https://github.com/codeREDxbt/Skarn/releases/tag/v9.9.9"
                 })),
             )
             .mount(&server)
@@ -456,5 +470,79 @@ mod tests {
         assert_eq!(parse_checksum(&digest.to_ascii_uppercase()), Some(digest));
         assert_eq!(parse_checksum("<html>not found</html>"), None);
         assert_eq!(parse_checksum(""), None);
+    }
+
+    #[tokio::test]
+    async fn disabled_updater_makes_zero_network_calls() {
+        assert!(!UPDATES_ENABLED);
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let check_err = check_latest_release("0.1.0")
+            .await
+            .expect_err("disabled updater must not fetch");
+        assert!(check_err.to_string().contains("disabled"));
+
+        let checksum_err = fetch_checksum(&format!("{}/setup.exe.sha256", server.uri()))
+            .await
+            .expect_err("disabled updater must not fetch checksum");
+        assert!(checksum_err.to_string().contains("disabled"));
+
+        let asset = ReleaseAsset {
+            name: "Skarn-Setup-1.0.0.exe".into(),
+            download_url: format!("{}/setup.exe", server.uri()),
+            size: 16,
+        };
+        let dl_err = download_installer(&asset, &"a".repeat(64), &std::env::temp_dir(), &|_, _| {})
+            .await
+            .expect_err("disabled updater must not download installer");
+        assert!(dl_err.to_string().contains("disabled"));
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn old_repo_9_9_9_release_produces_no_update_offer() {
+        const LEGACY_REPO_SLUG: &str = "ToxicAngelX/Selora-IDE"; // skarn-allow-legacy-fixture
+        assert_eq!(release_slug(), "codeREDxbt/Skarn");
+        assert!(!latest_release_url().contains(LEGACY_REPO_SLUG));
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/repos/{LEGACY_REPO_SLUG}/releases/latest"
+            )))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tag_name": "v9.9.9",
+                    "html_url": format!("https://github.com/{LEGACY_REPO_SLUG}/releases/tag/v9.9.9")
+                })),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/repos/{}/releases/latest",
+                release_slug()
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let derived_url = format!("{}/repos/{}/releases/latest", server.uri(), release_slug());
+        let derived = check_latest_release_at(&derived_url, "0.1.0").await;
+        assert!(derived.is_err(), "unreleased target repo yields no update");
+
+        let direct = check_latest_release("0.1.0").await;
+        assert!(direct.is_err(), "disabled updater offers no update");
+
+        server.verify().await;
     }
 }

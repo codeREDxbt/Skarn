@@ -1557,6 +1557,9 @@ export const fetchModels = (): Promise<Model[]> =>
 
 // --- In-app updates (UI_SPEC §11) -------------------------------------------
 
+/** Stage 0 kill-switch: disabled until `codeREDxbt/Skarn` releases are live. */
+export const UPDATES_ENABLED = false;
+
 /** What `check_for_update` answers. `newer` false means "already latest". */
 export type UpdateCheck = {
   current_version: string;

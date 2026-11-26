@@ -547,7 +547,7 @@ impl fmt::Debug for SeloraClient {
 }
 
 impl SeloraClient {
-    /// A client for `base_url` (e.g. `https://api.selora.lol`) authenticated
+    /// A client for `base_url` (e.g. `https://api.openai.com/v1`) authenticated
     /// with `api_key`. No settings or keyring access: the caller owns key
     /// retrieval. A trailing `/` on `base_url` is tolerated.
     pub fn new(base_url: &str, api_key: &str) -> Self {
@@ -615,9 +615,9 @@ impl SeloraClient {
                     .header("anthropic-version", "2023-06-01");
             }
         }
-        req.header("HTTP-Referer", "https://selora.ide")
-            .header("X-Title", "Selora IDE")
-            .header("User-Agent", "Selora-IDE/0.1.0")
+        req.header("HTTP-Referer", "https://github.com/codeREDxbt/Skarn")
+            .header("X-Title", "Skarn")
+            .header("User-Agent", concat!("Skarn/", env!("CARGO_PKG_VERSION")))
     }
 
     /// `GET {base_url}/v1/models` — the model catalog, bearer-authenticated.

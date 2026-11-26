@@ -3,7 +3,7 @@
 // 24px, 1px top hairline, --type-xs.
 // Left: Workspace display name + Git branch with sync spinner + language/file info.
 // Center: Agent activity pill / status (interactive toggle for agent dock).
-// Right: LSP diagnostics summary (errors/warnings) + UTF-8 encoding + line/col + Core epoch + Selora Gateway connection status with live green pulse radar ring.
+// Right: LSP diagnostics summary (errors/warnings) + UTF-8 encoding + line/col + Core epoch + Provider connection status with live green pulse radar ring.
 import { useState, useSyncExternalStore } from 'react';
 import type { BootstrapState, ConnectionStatus } from '../bridge/bridge';
 import { layoutStore } from '../features/layout/layout-store';
@@ -37,18 +37,18 @@ function ConnectionStatusView({
           font: 'inherit',
           color: 'inherit',
         }}
-        title={onOpenConnect ? 'Gateway connected (click to manage API key / provider)' : undefined}
+        title={onOpenConnect ? 'Provider connected (click to manage API key / provider)' : undefined}
       >
         <span className="statusbar-radar-wrapper" aria-hidden="true">
           <span className="statusbar-radar-ring" />
           <span className="statusbar-dot" />
         </span>
-        selora connected
+        provider connected
       </button>
     );
   }
 
-  const label = status === 'connecting' ? 'selora connecting' : 'selora disconnected';
+  const label = status === 'connecting' ? 'provider connecting' : 'provider disconnected';
   return (
     <span className="statusbar-connection is-disconnected">
       <span className="statusbar-dot" aria-hidden="true" />
@@ -61,7 +61,7 @@ function ConnectionStatusView({
         className="statusbar-connect"
         disabled={!onOpenConnect}
         onClick={onOpenConnect}
-        title={onOpenConnect ? 'Connect API key / provider gateway' : 'Settings editing lands in a later slice'}
+        title={onOpenConnect ? 'Connect API key / provider' : 'Settings editing lands in a later slice'}
       >
         connect
       </button>
@@ -99,7 +99,7 @@ export function StatusBar({
     ? `Agent ${agentState.thinkingState.charAt(0).toUpperCase() + agentState.thinkingState.slice(1)}...`
     : agentWaiting
     ? 'Approval Required'
-    : 'Selora Agent';
+    : 'Agent';
 
   const handleGitSync = () => {
     setSyncing(true);

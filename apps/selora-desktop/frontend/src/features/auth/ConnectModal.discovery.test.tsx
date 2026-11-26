@@ -92,8 +92,8 @@ describe('ConnectModal truthful discovery & selection preservation', () => {
         'Could not discover models from NVIDIA (integrate.api.nvidia.com): HTTP 401 unauthorized.',
       );
     });
-    expect(screen.getByText('Gateway Not Connected')).toBeTruthy();
-    expect(screen.queryByText('Gateway Connected')).toBeNull();
+    expect(screen.getByText('Provider Not Connected')).toBeTruthy();
+    expect(screen.queryByText('Provider Connected')).toBeNull();
   });
 
   it('preserves explicit selectedModel across reconnect and catalog refresh', async () => {

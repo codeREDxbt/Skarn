@@ -79,7 +79,7 @@ pub(super) fn pane_selora(dialog: &mut SettingsDialog, ui: &mut egui::Ui) {
     let resp = ui.add(
         egui::TextEdit::singleline(&mut dialog.api_key)
             .password(true)
-            .hint_text("sk-gw-…")
+            .hint_text("Enter API key…")
             .id(egui::Id::new(API_KEY_INPUT_ID)),
     );
     if resp.changed() && dialog.api_key.contains(char::is_whitespace) {
@@ -124,7 +124,7 @@ pub(super) fn pane_selora(dialog: &mut SettingsDialog, ui: &mut egui::Ui) {
     }
     note_style(
         ui,
-        "Validated against the gateway, then stored in the OS keyring — never on disk.",
+        "Validated against your provider, then stored in the OS keyring — never on disk.",
     );
 
     field_gap(ui);

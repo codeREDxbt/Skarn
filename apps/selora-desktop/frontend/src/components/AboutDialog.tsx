@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MetalBrand } from '../features/onboarding/BrandFx';
 import { toastStore } from '../features/toasts/toast-store';
 import { currentEnvelopeContext } from '../app/app-store';
-import { openExternal, openLogs } from '../bridge/bridge';
+import { openExternal, openLogs, UPDATES_ENABLED } from '../bridge/bridge';
 import '../styles/onboarding.css';
 
 declare const __APP_VERSION__: string;
@@ -60,6 +60,9 @@ export async function checkForUpdate(
   currentVersion: string = __APP_VERSION__,
   fetcher: FetchLike = fetch,
 ): Promise<ReleaseInfo> {
+  if (!UPDATES_ENABLED) {
+    throw new Error('In-app updates are disabled in this build (release channel not configured yet).');
+  }
   const response = await fetcher(LATEST_RELEASE_URL, {
     headers: { Accept: 'application/vnd.github+json' },
   });
@@ -124,6 +127,11 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
   if (!open) return null;
 
   const runUpdateCheck = async () => {
+    if (!UPDATES_ENABLED) {
+      setError(null);
+      setNote('In-app updates are disabled in this build (release channel not configured yet).');
+      return;
+    }
     setChecking(true);
     setError(null);
     setNote(null);
@@ -254,9 +262,14 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
             type="button"
             className="about-button about-button-primary"
             onClick={() => void runUpdateCheck()}
-            disabled={checking}
+            disabled={checking || !UPDATES_ENABLED}
+            title={
+              UPDATES_ENABLED
+                ? undefined
+                : 'In-app update checks are disabled until releases are published.'
+            }
           >
-            {checking ? 'Checking…' : 'Check for updates'}
+            {checking ? 'Checking…' : UPDATES_ENABLED ? 'Check for updates' : 'Updates disabled'}
           </button>
           <button type="button" className="about-button" onClick={runOpenLogs}>
             Open logs

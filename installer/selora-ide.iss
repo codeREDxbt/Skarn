@@ -19,7 +19,7 @@
   #error "MyAppVersion is not defined - build via installer\prebuild.bat or pass /DMyAppVersion=X.Y.Z"
 #endif
 
-#define RepoUrl "https://github.com/ToxicAngelX/Selora-IDE"
+#define RepoUrl "https://github.com/codeREDxbt/Skarn"
 
 ; Directory holding the built exe and the staged DLLs. prebuild.bat passes an
 ; absolute path when CARGO_TARGET_DIR is set, so a custom cargo target dir
@@ -48,7 +48,7 @@ AppId={{7A3E9C41-5D2B-4E8F-B6A1-9C0D2E4F6A8B}
 AppName=Selora IDE
 AppVersion={#MyAppVersion}
 AppVerName=Selora IDE {#MyAppVersion}
-AppPublisher=Toxic
+AppPublisher=codeREDxbt
 AppPublisherURL={#RepoUrl}
 AppSupportURL={#RepoUrl}/issues
 DefaultDirName={localappdata}\Programs\Selora IDE

@@ -174,7 +174,7 @@ function AgentsWindowInner() {
        closeWindow: () => { if (isNativeFrontend()) void getCurrentWindow().close().catch((error) => reportError('Could not close window', error)); },
       openDocumentation: () => {
         const context = currentEnvelopeContext();
-        if (context) void openExternal('https://github.com/ToxicAngelX/Selora-IDE#readme', context).catch((error) => reportError('Could not open documentation', error));
+        if (context) void openExternal('https://github.com/codeREDxbt/Skarn/tree/main/docs', context).catch((error) => reportError('Could not open documentation', error));
       },
     });
   }, [agentsCommand, openFolder]);

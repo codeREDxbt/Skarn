@@ -1,9 +1,8 @@
-// Selora IDE — Provider & API Key Connection Modal (Elevated).
+// Provider & API Key Connection Modal (BYOK).
 //
-// Modern provider cards (Selora API Gateway, Anthropic Claude, OpenAI, DeepSeek,
-// Local Ollama, OpenRouter, GLM, Custom) with glowing selection state, live key
-// format validation badges, animated "Test Connection" button with spinning loader
-// and success checkmark, and smooth enter/exit modal transitions.
+// Provider cards (Anthropic, OpenAI, Local Ollama, Custom, DeepSeek,
+// OpenRouter, GLM) with selection state, live key format validation badges,
+// animated "Test Connection" button, and smooth enter/exit modal transitions.
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Key,
@@ -44,22 +43,12 @@ export type ProviderPreset = {
   placeholder: string;
   docsUrl?: string;
   description: string;
-  tag: 'Recommended' | 'Direct' | 'Local' | 'Gateway' | 'Custom';
+  tag: 'Direct' | 'Local' | 'Aggregator' | 'Custom';
   iconType: 'sparkles' | 'bot' | 'cpu' | 'zap' | 'server' | 'globe' | 'custom';
   keyPrefixHint: string;
 };
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
-  {
-    id: 'selora',
-    name: 'Selora API Gateway',
-    baseUrl: 'https://api.selora.lol',
-    placeholder: 'sk-selora-... or sk-gw-...',
-    description: 'Official Selora managed endpoint with built-in model routing & speed',
-    tag: 'Recommended',
-    iconType: 'sparkles',
-    keyPrefixHint: 'sk-gw-...',
-  },
   {
     id: 'anthropic',
     name: 'Anthropic Claude',
@@ -83,17 +72,6 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     keyPrefixHint: 'sk-proj-...',
   },
   {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    baseUrl: 'https://api.deepseek.com',
-    placeholder: 'sk-...',
-    docsUrl: 'https://platform.deepseek.com',
-    description: 'DeepSeek-V3 and DeepSeek-R1 reasoning & math models',
-    tag: 'Direct',
-    iconType: 'zap',
-    keyPrefixHint: 'sk-...',
-  },
-  {
     id: 'ollama',
     name: 'Local Ollama',
     baseUrl: 'http://localhost:11434/v1',
@@ -105,13 +83,34 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     keyPrefixHint: 'None (Local)',
   },
   {
+    id: 'custom',
+    name: 'Custom Provider',
+    baseUrl: '',
+    placeholder: 'Enter API key or leave blank...',
+    description: 'Any OpenAI-compatible completions endpoint',
+    tag: 'Custom',
+    iconType: 'custom',
+    keyPrefixHint: 'Custom',
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    placeholder: 'sk-...',
+    docsUrl: 'https://platform.deepseek.com',
+    description: 'DeepSeek-V3 and DeepSeek-R1 reasoning & math models',
+    tag: 'Direct',
+    iconType: 'zap',
+    keyPrefixHint: 'sk-...',
+  },
+  {
     id: 'openrouter',
     name: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1',
     placeholder: 'sk-or-v1-...',
     docsUrl: 'https://openrouter.ai/keys',
     description: 'Unified multi-provider access to Claude, GPT-4, Llama 3',
-    tag: 'Gateway',
+    tag: 'Aggregator',
     iconType: 'globe',
     keyPrefixHint: 'sk-or-...',
   },
@@ -125,16 +124,6 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     tag: 'Direct',
     iconType: 'cpu',
     keyPrefixHint: 'glm-...',
-  },
-  {
-    id: 'custom',
-    name: 'Custom Provider',
-    baseUrl: '',
-    placeholder: 'Enter API key or leave blank...',
-    description: 'Any OpenAI-compatible completions endpoint',
-    tag: 'Custom',
-    iconType: 'custom',
-    keyPrefixHint: 'Custom',
   },
 ];
 
@@ -183,16 +172,8 @@ function getKeyValidation(presetId: string, key: string, hasStoredKey: boolean) 
     }
     return {
       status: 'idle' as const,
-      badge: 'Format required',
+      badge: presetId ? 'Format required' : 'Select a provider',
       isValid: false,
-    };
-  }
-  if (presetId === 'selora') {
-    const valid = trimmed.startsWith('sk-selora-') || trimmed.startsWith('sk-gw-') || trimmed.startsWith('sk-');
-    return {
-      status: valid ? ('valid' as const) : ('warning' as const),
-      badge: valid ? 'Valid Selora format (sk-gw-...)' : 'Format hint: sk-gw-... or sk-selora-...',
-      isValid: valid,
     };
   }
   if (presetId === 'anthropic') {
@@ -253,8 +234,8 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<'credentials' | 'settings'>('credentials');
-  const [selectedPreset, setSelectedPreset] = useState<string>('selora');
-  const [baseUrl, setBaseUrl] = useState<string>('https://api.selora.lol');
+  const [selectedPreset, setSelectedPreset] = useState<string>('');
+  const [baseUrl, setBaseUrl] = useState<string>('');
   const [apiKey, setApiKey] = useState<string>('');
   const [showKey, setShowKey] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
@@ -305,6 +286,9 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
           } else {
             setSelectedPreset('custom');
           }
+        } else {
+          setBaseUrl('');
+          setSelectedPreset('');
         }
       } catch (err) {
         console.error('Failed to get API key status:', err);
@@ -330,17 +314,17 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
 
   if (!open) return null;
 
-  const currentPreset = PROVIDER_PRESETS.find((p) => p.id === selectedPreset) || PROVIDER_PRESETS[0];
-  // Settings > AI Gateway: disabled providers are hidden from the preset
+  const currentPreset = PROVIDER_PRESETS.find((p) => p.id === selectedPreset) ?? null;
+  // Settings > Providers: disabled providers are hidden from the preset
   // grid. The currently selected provider always stays visible so an open
   // session (or a stored base URL) is never silently switched.
   const selectablePresets = visiblePresets(
     PROVIDER_PRESETS,
     bootstrap.settings.disabled_providers ?? [],
-    selectedPreset,
+    selectedPreset || null,
   );
   const hiddenProviderCount = PROVIDER_PRESETS.length - selectablePresets.length;
-  const docsUrl = currentPreset.docsUrl ?? '';
+  const docsUrl = currentPreset?.docsUrl ?? '';
   const docsLinkHost = docsHost(docsUrl);
   const docsAllowed = isAllowedDocsUrl(docsUrl);
   const isConnected = keyStatus ? keyStatus.connected : bootstrap.connection === 'connected';
@@ -403,7 +387,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
       const msg =
         err && typeof err === 'object' && 'message' in err
           ? String((err as { message: string }).message)
-          : 'Failed to connect. Check your gateway address, API key, and network status.';
+          : 'Failed to connect. Check your endpoint URL, API key, and network status.';
       setError(msg);
       setTestSuccess(false);
       try {
@@ -541,10 +525,10 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
             </div>
             <div>
               <h2 id="connect-modal-title" className="connect-modal-title">
-                Model Provider & Gateway Connection
+                Model Provider Connection
               </h2>
               <p id="connect-modal-description" className="connect-modal-subtitle">
-                Configure your AI gateway credentials securely stored in OS Credential Manager
+                Bring your own key. Keys stay in Windows Credential Manager.
               </p>
             </div>
           </div>
@@ -569,7 +553,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
           <div className="connect-status-left">
             <span className="connect-status-dot" aria-hidden="true" />
             <span className="connect-status-label">
-              {isConnected ? 'Gateway Connected' : 'Gateway Not Connected'}
+              {isConnected ? 'Provider Connected' : 'Provider Not Connected'}
             </span>
             {keyStatus?.key_hint && (
               <span className="connect-key-hint" title="Stored key mask">
@@ -675,23 +659,23 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
               {hiddenProviderCount > 0 ? (
                 <p className="connect-label" role="note">
                   {hiddenProviderCount} provider{hiddenProviderCount === 1 ? '' : 's'} hidden by
-                  Settings &gt; AI Gateway. Re-enable it under Assistant providers.
+                  Settings &gt; Providers. Re-enable it under Assistant providers.
                 </p>
               ) : null}
             </div>
 
-            {/* Gateway Base URL */}
+            {/* Provider Base URL */}
             <div className="connect-field">
               <div className="connect-field-header">
                 <label className="connect-label" htmlFor="gateway-url">
-                  Gateway Base URL
+                  Provider Base URL
                 </label>
                 {docsUrl && (
                   <a
                     href={docsUrl}
                     rel="noreferrer"
                     className="connect-docs-link"
-                    aria-label={`${currentPreset.name} documentation (opens in a new tab)`}
+                    aria-label={`${currentPreset?.name ?? 'Provider'} documentation (opens in a new tab)`}
                     aria-disabled={docsAllowed ? undefined : true}
                     tabIndex={docsAllowed ? undefined : -1}
                     title={
@@ -761,7 +745,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                   placeholder={
                     keyStatus?.key_hint
                       ? `Stored: ${keyStatus.key_hint} (Enter new key to replace)`
-                      : currentPreset.placeholder
+                      : currentPreset?.placeholder ?? 'Select a provider above or enter an API key…'
                   }
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
@@ -826,13 +810,14 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                   aria-busy={loading}
                   disabled={
                     loading ||
+                    !baseUrl.trim() ||
                     (selectedPreset !== 'ollama' && !apiKey.trim() && !keyStatus?.has_key)
                   }
                 >
                   {loading ? (
                     <>
                       <Loader2 size={14} className="connect-spinner" aria-hidden="true" />
-                      <span>Testing Gateway…</span>
+                      <span>Testing Connection…</span>
                     </>
                   ) : testSuccess ? (
                     <>
@@ -1046,7 +1031,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                 rows={3}
               />
               <span className="connect-field-hint">
-                Appended to Selora's system prompt on every agent turn.
+                Appended to the system prompt on every agent turn.
               </span>
             </div>
 

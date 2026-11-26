@@ -97,7 +97,7 @@ function runCheck(label, cmd, args, cwd, timeoutMs = 90000) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
-      shell: process.platform === 'win32'
+      shell: process.platform === 'win32' && cmd === 'npm'
     });
     return null;
   } catch (err) {

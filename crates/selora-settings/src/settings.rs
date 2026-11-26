@@ -64,7 +64,7 @@ fn default_chat_sidebar_width() -> u32 {
 }
 
 fn default_base_url() -> String {
-    "https://api.selora.lol".into()
+    String::new()
 }
 
 fn default_command_palette() -> String {
@@ -86,15 +86,14 @@ fn default_save() -> String {
 /// The provider ids the desktop's Connect modal offers, in display order.
 /// `selora.disabled_providers` is validated against this list: an unknown id
 /// is a client bug, not a future provider the shell can guess.
-pub const KNOWN_PROVIDER_IDS: [&str; 8] = [
-    "selora",
+pub const KNOWN_PROVIDER_IDS: [&str; 7] = [
     "anthropic",
     "openai",
-    "deepseek",
     "ollama",
+    "custom",
+    "deepseek",
     "openrouter",
     "glm",
-    "custom",
 ];
 
 /// True when `id` names a provider the desktop knows (`KNOWN_PROVIDER_IDS`).
@@ -261,7 +260,7 @@ pub struct SeloraSettings {
     #[serde(default)]
     pub active_model: Option<String>,
 
-    /// Providers the user turned off in Settings > AI Gateway ("Assistant
+    /// Providers the user turned off in Settings > Providers ("Assistant
     /// providers"). Ids come from [`KNOWN_PROVIDER_IDS`]. This only gates
     /// provider selection and visibility in the shell; it never changes the
     /// stored key, the active model, or makes a network call.
@@ -790,7 +789,7 @@ pub(crate) mod tests {
         assert!(s.lsp.rust_analyzer_args.is_empty());
         assert!(s.lsp.typescript_server_args.is_empty());
         assert!(s.lsp.enabled, "language servers default on");
-        assert_eq!(s.selora.base_url, "https://api.selora.lol");
+        assert_eq!(s.selora.base_url, "");
         assert_eq!(s.selora.active_model, None);
         assert!(s.selora.disabled_providers.is_empty());
         assert_eq!(s.keybinds.command_palette, "Ctrl+Shift+P");
@@ -982,7 +981,7 @@ pub(crate) mod tests {
         assert_eq!(s.editor.tab_size, 4);
         assert!(s.editor.line_numbers);
         assert_eq!(s.ui.sidebar_width, 240);
-        assert_eq!(s.selora.base_url, "https://api.selora.lol");
+        assert_eq!(s.selora.base_url, "");
         assert_eq!(s.keybinds.save, "Ctrl+S");
 
         let _ = std::fs::remove_dir_all(dir);
@@ -999,7 +998,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             &path,
-            br#"{"_v":1,"selora":{"base_url":"https://api.selora.lol"}}"#,
+            br#"{"_v":1,"selora":{"base_url":"https://api.openai.com/v1"}}"#,
         )
         .expect("write pre-feature file");
         let s = Settings::load_from(&path).expect("pre-feature file must load");
@@ -1024,20 +1023,20 @@ pub(crate) mod tests {
         assert_eq!(
             KNOWN_PROVIDER_IDS,
             [
-                "selora",
                 "anthropic",
                 "openai",
-                "deepseek",
                 "ollama",
+                "custom",
+                "deepseek",
                 "openrouter",
-                "glm",
-                "custom"
+                "glm"
             ]
         );
-        assert!(is_known_provider("selora"));
+        assert!(!is_known_provider("selora"));
+        assert!(is_known_provider("anthropic"));
         assert!(is_known_provider("custom"));
         assert!(!is_known_provider(""));
-        assert!(!is_known_provider("SELORA"), "ids are case-sensitive");
+        assert!(!is_known_provider("ANTHROPIC"), "ids are case-sensitive");
         assert!(!is_known_provider("not-a-provider"));
     }
 
@@ -1187,7 +1186,7 @@ pub(crate) mod tests {
     "typescript_server_path": null
   },
   "selora": {
-    "base_url": "https://api.selora.lol",
+    "base_url": "https://api.openai.com/v1",
     "active_model": null
   },
   "keybinds": {
@@ -1324,7 +1323,7 @@ pub(crate) mod tests {
         let json = serde_json::json!({
             "_v": SCHEMA_VERSION,
             "editor": { "font_size": 15 },
-            "selora": { "base_url": "https://api.selora.lol" }
+            "selora": { "base_url": "https://api.openai.com/v1" }
         });
         std::fs::write(&path, serde_json::to_string(&json).unwrap()).expect("write");
 

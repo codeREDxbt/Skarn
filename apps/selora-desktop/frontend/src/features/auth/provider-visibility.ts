@@ -1,7 +1,7 @@
-// Selora IDE - Assistant-provider visibility helpers.
+// Assistant-provider visibility helpers.
 //
-// Settings > AI Gateway stores the provider ids the user turned off in
-// `selora.disabled_providers`. These pure helpers are the one place that
+// Settings > Providers stores the provider ids the user turned off in
+// `disabled_providers`. These pure helpers are the one place that
 // decides which provider a backend model id belongs to and how the disabled
 // list changes. They gate selection and visibility only: nothing here
 // connects, disconnects, switches a model, or makes a network call.
@@ -34,7 +34,6 @@ export function providerIdForModel(modelId: string, displayName = ''): string | 
     return 'ollama';
   }
   if (haystack.includes('openrouter')) return 'openrouter';
-  if (haystack.includes('selora')) return 'selora';
   return null;
 }
 

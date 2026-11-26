@@ -1,8 +1,8 @@
-//! Manual smoke test against the real Selora gateway (ROADMAP.md Phase 1
-//! acceptance). NOT run in CI — it needs a real key.
+//! Manual smoke test against a configured BYOK provider endpoint.
+//! NOT run in CI — it needs a real key.
 //!
 //! Usage:
-//!   SELORA_KEY=sk-gw-... cargo run -p selora-ai --example smoke [base_url]
+//!   SELORA_KEY=sk-... cargo run -p selora-ai --example smoke <base_url>
 //!
 //! Exercises exactly what the spike window does: `list_models`, then a
 //! streaming "say hi" chat, printing deltas as they arrive and the receipt
@@ -16,7 +16,9 @@ async fn main() {
     let key = std::env::var("SELORA_KEY").expect("SELORA_KEY must be set");
     let base_url = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "https://api.selora.lol".to_owned());
+        .or_else(|| std::env::var("SELORA_BASE_URL").ok())
+        .filter(|url| !url.is_empty())
+        .expect("pass <base_url> argument or set SELORA_BASE_URL");
 
     let client = SeloraClient::new(&base_url, &key);
 
@@ -37,7 +39,7 @@ async fn main() {
     };
 
     // --- stream_chat: "say hi" ---
-    // The spike takes the first model the gateway listed; SELORA_MODEL overrides.
+    // The smoke example takes the first model the provider listed; SELORA_MODEL overrides.
     let model_id = std::env::var("SELORA_MODEL")
         .ok()
         .filter(|m| !m.is_empty())

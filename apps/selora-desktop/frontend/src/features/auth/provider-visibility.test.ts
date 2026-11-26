@@ -1,4 +1,4 @@
-// Settings > AI Gateway: the pure helpers behind the Assistant providers card
+// Settings > Providers: the pure helpers behind the Assistant providers card
 // and the Connect modal's preset filter. No network, no store.
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,11 +10,11 @@ import {
 } from './provider-visibility';
 
 const PRESETS = [
-  { id: 'selora' },
   { id: 'anthropic' },
   { id: 'openai' },
-  { id: 'deepseek' },
   { id: 'ollama' },
+  { id: 'custom' },
+  { id: 'deepseek' },
 ];
 
 describe('provider visibility helpers', () => {
@@ -27,7 +27,7 @@ describe('provider visibility helpers', () => {
     expect(providerIdForModel('glm-4')).toBe('glm');
     expect(providerIdForModel('llama3.2:latest')).toBe('ollama');
     expect(providerIdForModel('openrouter/auto')).toBe('openrouter');
-    expect(providerIdForModel('selora-fast')).toBe('selora');
+    expect(providerIdForModel('selora-fast')).toBeNull();
     expect(providerIdForModel('mystery-model')).toBeNull();
     expect(providerIdForModel('')).toBeNull();
   });
@@ -54,9 +54,9 @@ describe('provider visibility helpers', () => {
 
   it('hides disabled presets but keeps the active one visible', () => {
     expect(visiblePresets(PRESETS, ['deepseek', 'ollama']).map((p) => p.id)).toEqual([
-      'selora',
       'anthropic',
       'openai',
+      'custom',
     ]);
     expect(
       visiblePresets(PRESETS, ['deepseek', 'ollama'], 'deepseek').map((p) => p.id),

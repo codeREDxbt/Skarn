@@ -20,8 +20,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/ToxicAngelX/Selora-IDE"
-homepage = "https://github.com/ToxicAngelX/Selora-IDE"
+repository = "https://github.com/codeREDxbt/Skarn"
+homepage = "https://github.com/codeREDxbt/Skarn"
 
 [workspace.dependencies]
 egui = "0.36"

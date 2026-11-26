@@ -136,7 +136,7 @@ export const SettingsPanelView: FC<SettingsPanelViewProps> = ({ bootstrap, onOpe
       .finally(() => setSaving(false));
   };
 
-  // Settings > AI Gateway "Assistant providers". The list is the persisted
+  // Settings > Providers "Assistant providers". The list is the persisted
   // gate: a disabled provider is hidden from provider/model selection, but an
   // already-active provider is never switched or disconnected here.
   const disabledProviders = settings.disabled_providers ?? [];
@@ -239,10 +239,10 @@ const restartServer = (language: string): void => {
           type="button"
           className={`settings-tab-btn ${activeTab === 'gateway' ? 'is-active' : ''}`}
           onClick={() => setActiveTab('gateway')}
-          title="AI Gateway & Providers"
+          title="Providers & Models"
         >
           <Key size={12} />
-          <span>AI Gateway</span>
+          <span>Providers</span>
         </button>
         <button
           type="button"
@@ -284,10 +284,10 @@ const restartServer = (language: string): void => {
         </p>
       ) : null}
 
-      {/* Tab 1: AI Gateway & Models */}
+      {/* Tab 1: Providers & Models */}
       {activeTab === 'gateway' && (
         <div className="settings-section-content">
-          {/* Status & Gateway Card */}
+          {/* Status & Provider Card */}
           <div className="settings-card ai-gateway-card">
             <div className="settings-card-header">
               <span className="settings-card-title">AI Provider & Key</span>
@@ -300,14 +300,14 @@ const restartServer = (language: string): void => {
               </span>
             </div>
             <p className="settings-card-hint">
-              Connect GLM, DeepSeek, OpenAI, OpenRouter, or custom completions gateways.
+              Connect Anthropic, OpenAI, Local Ollama, DeepSeek, OpenRouter, GLM, or custom endpoints.
             </p>
             <button
               type="button"
               className="settings-primary-btn"
               onClick={onOpenConnect}
             >
-              {isConnected ? 'Manage API Key & Gateway' : 'Configure API Key'}
+              {isConnected ? 'Manage API Key & Provider' : 'Configure API Key'}
             </button>
           </div>
 
@@ -421,8 +421,8 @@ const restartServer = (language: string): void => {
                 disabled
                 title={
                   activeModel
-                    ? 'The active model is reported by the connected gateway and cannot be changed in this build.'
-                    : 'No active model is reported by the gateway. This build has no model-selection control, so changes are not saved.'
+                    ? 'The active model is reported by the connected provider and cannot be changed in this build.'
+                    : 'No active model is reported by the provider. This build has no model-selection control, so changes are not saved.'
                 }
               >
                 <option value="">—</option>

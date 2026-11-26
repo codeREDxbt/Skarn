@@ -42,9 +42,9 @@ use uuid::Uuid;
 
 use crate::app_state::{AgentTurnRequest, AppMessage, Effect};
 
-/// Default gateway base URL (ARCHITECTURE.md §6.1). Overridable in settings;
+/// Default provider base URL. Empty until a BYOK provider is configured;
 /// tests point it at a wiremock server.
-pub const DEFAULT_BASE_URL: &str = "https://api.selora.lol";
+pub const DEFAULT_BASE_URL: &str = "";
 
 /// The repaint seam: called after every worker → main-thread message send.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -1206,7 +1206,7 @@ mod tests {
         mpsc::unbounded_channel::<selora_lsp::LspEffect>().0
     }
 
-    const TEST_KEY: &str = "sk-gw-test-key";
+    const TEST_KEY: &str = "sk-test-key";
 
     /// A happy-path SSE body: two deltas, a usage-bearing final chunk, DONE.
     const STREAM_SSE: &str = concat!(
@@ -1556,7 +1556,7 @@ mod tests {
             lsp_effect_tx(),
         );
 
-        let _ = effect_tx.send(Effect::SeloraConnect("sk-gw-rejected".into()));
+        let _ = effect_tx.send(Effect::SeloraConnect("sk-test-rejected".into()));
         let message = recv_until(&mut msg_rx, |m| matches!(m, AppMessage::SeloraStatus(_))).await;
         match &message {
             AppMessage::SeloraStatus(selora_ai::SeloraStatus::Error(_)) => {}

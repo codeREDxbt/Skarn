@@ -4,7 +4,7 @@ Selora IDE is a Windows desktop code editor with a workspace explorer, Git tools
 
 ## Download
 
-<https://github.com/ToxicAngelX/Selora-IDE/releases/latest>
+<https://github.com/codeREDxbt/Skarn/releases/latest>
 
 Run `Selora-IDE-Setup-0.1.0.exe`. The installer is per-user and does not need
 administrator access. It installs WebView2 when Windows does not already have it.

@@ -4027,7 +4027,7 @@ mod tests {
 
         // Connect: the status flips immediately (the splash disables its
         // button on it), the key goes to the runtime.
-        assert!(!app.route_splash_event(SplashEvent::Connect("sk-gw-rejected".to_owned())));
+        assert!(!app.route_splash_event(SplashEvent::Connect("sk-test-rejected".to_owned())));
         assert!(matches!(
             app.state.selora_status,
             selora_ai::SeloraStatus::Connecting
@@ -4112,7 +4112,7 @@ mod tests {
         app.msg_tx
             .send(AppMessage::UpdateChecked(Ok(selora_ai::ReleaseInfo {
                 tag: "v9.9.9".to_owned(),
-                html_url: "https://github.com/ToxicAngelX/Selora-IDE/releases/tag/v9.9.9"
+                html_url: "https://github.com/codeREDxbt/Skarn/releases/tag/v9.9.9"
                     .to_owned(),
                 newer: true,
                 installer: None,

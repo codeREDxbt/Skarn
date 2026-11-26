@@ -955,7 +955,7 @@ fn settings_view(settings: &selora_settings::Settings) -> SettingsViewDto {
     }
 }
 
-/// Settings > AI Gateway provider gate, normalized for the wire: unknown ids
+/// Settings > Providers gate, normalized for the wire: unknown ids
 /// (a hand-edited settings.json) are dropped and duplicates collapse, in the
 /// user's order. The persisted file is never rewritten here; the next accepted
 /// patch persists the normalized list.
@@ -3276,7 +3276,7 @@ impl DesktopState {
             validate_keybind_patch(patch.keybind_toggle_chat.as_deref(), "toggle chat")?;
         let save = validate_keybind_patch(patch.keybind_save.as_deref(), "save")?;
 
-        // Settings > AI Gateway: reject an unknown provider id before disk or
+        // Settings > Providers: reject an unknown provider id before disk or
         // memory is touched, then store the known ids deduplicated in the
         // user's order. An empty list is valid and re-enables every provider.
         let disabled_providers = match patch.disabled_providers.as_ref() {
@@ -5727,7 +5727,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Settings > AI Gateway "Assistant providers": disabling persists, the
+    /// Settings > Providers "Assistant providers": disabling persists, the
     /// view de-duplicates, the bootstrap event carries it, and an empty list
     /// re-enables every provider.
     #[test]
@@ -5781,7 +5781,7 @@ mod tests {
         );
 
         // The unrelated stored sections survive the save.
-        assert_eq!(persisted.selora.base_url, "https://api.selora.lol");
+        assert_eq!(persisted.selora.base_url, "");
         assert_eq!(persisted.ui.theme, "selora-dark");
 
         let reenabled = state
@@ -6046,16 +6046,16 @@ mod tests {
     #[test]
     fn open_external_allowlist_accepts_github_and_rejects_dangerous_urls() {
         assert_eq!(
-            validate_external_url("https://github.com/ToxicAngelX/Selora-IDE")
+            validate_external_url("https://github.com/codeREDxbt/Skarn")
                 .expect("the repository link is allowlisted"),
-            "https://github.com/ToxicAngelX/Selora-IDE"
+            "https://github.com/codeREDxbt/Skarn"
         );
         assert_eq!(
             validate_external_url(
-                "https://api.github.com/repos/ToxicAngelX/Selora-IDE/releases/latest"
+                "https://api.github.com/repos/codeREDxbt/Skarn/releases/latest"
             )
             .expect("the Releases API link is allowlisted"),
-            "https://api.github.com/repos/ToxicAngelX/Selora-IDE/releases/latest"
+            "https://api.github.com/repos/codeREDxbt/Skarn/releases/latest"
         );
 
         assert_eq!(

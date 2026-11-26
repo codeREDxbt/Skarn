@@ -1,4 +1,4 @@
-//! Selora AI — the client for the Selora gateway (`api.selora.lol`).
+//! Selora AI — OpenAI/Anthropic-compatible BYOK provider client.
 //!
 //! Responsibility (PLAN.md §5): `GET /v1/models`,
 //! `POST /v1/chat/completions` (streaming + non-streaming), the ghost-text

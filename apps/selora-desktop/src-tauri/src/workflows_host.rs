@@ -190,9 +190,9 @@ pub type WorkflowApprovalHandler = Arc<dyn Fn(uuid::Uuid, selora_ai::ApprovalCar
 /// (the same RISKS.md §8.3 rule `SeloraClient` follows).
 #[derive(Clone)]
 pub struct WorkflowHostConfig {
-    /// Gateway base URL (`https://api.selora.lol` or a loopback test server).
+    /// Provider base URL (e.g. `https://api.openai.com/v1` or a loopback test server).
     pub base_url: String,
-    /// Gateway key. Held for the process lifetime; never logged.
+    /// Provider API key. Held for the process lifetime; never logged.
     pub api_key: String,
     /// Model id every subagent ask uses.
     pub model: String,

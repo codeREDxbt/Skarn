@@ -12,6 +12,7 @@ import {
   installUpdate,
   listenUpdateProgress,
   openExternal,
+  UPDATES_ENABLED,
   type UpdateCheck,
   type UpdateProgress,
 } from '../bridge/bridge';
@@ -34,7 +35,7 @@ export function UpdatePrompt({ autoCheck }: UpdatePromptProps) {
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    if (!autoCheck || checkedRef.current) return;
+    if (!UPDATES_ENABLED || !autoCheck || checkedRef.current) return;
     checkedRef.current = true;
     let cancelled = false;
     void checkForUpdate()

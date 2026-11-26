@@ -91,7 +91,7 @@ function AppInner() {
       toastStore.pushLocal('warning', 'Documentation needs a live shell connection.');
       return;
     }
-    void openExternal('https://github.com/ToxicAngelX/Selora-IDE#readme', context).catch(
+    void openExternal('https://github.com/codeREDxbt/Skarn/tree/main/docs', context).catch(
       (error: unknown) =>
         toastStore.pushLocal(
           'error',

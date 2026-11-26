@@ -263,7 +263,7 @@ export const NO_WORKSPACE_MESSAGE =
 
 /** Shown when the backend catalog has no usable model. */
 export const NO_MODEL_MESSAGE =
-  'Connect and refresh models: no model is available to send this prompt to.';
+  'Choose a provider to start: no model is available to send this prompt to.';
 
 export function findCatalogModel(models: readonly Model[], idOrName: string): Model | undefined {
   const trimmed = idOrName.trim();
