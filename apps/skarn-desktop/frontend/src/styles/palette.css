@@ -1,16 +1,9 @@
 /* ==========================================================================
-   Selora IDE — theme palette and the light theme override.
+   Skarn — theme palette and the light theme override.
    --------------------------------------------------------------------------
-   The component stylesheets (shell, sidebar, editor, agent, dock, modals)
-   read these `--c-*` compatibility tokens instead of literal colors. The
-   tokens mirror the values the revamp surfaces shipped with, so the dark
-   theme is byte-for-byte the same color surface it was before theming.
-   Every `--c-*` token has an explicit light-theme value below; component
-   CSS must never hardcode a color, and a test enforces that rule.
-
-   Core semantic tokens (ink ramp, foreground, syntax, status) live in
-   tokens.css. Their light-theme values are re-declared here so one file
-   owns the complete light theme.
+   Compatibility `--c-*` tokens live here alongside the light-theme remap.
+   Core semantic tokens (ink ramp, foreground, surface, mono, syntax, status)
+   live in tokens.css and are re-declared below for `[data-theme="light"]`.
    ========================================================================== */
 
 :root {
@@ -274,9 +267,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Selora Moonlight — the second, real theme. It is a token remap, not a
-   CSS filter: every surface, border, syntax class, status color and glass
-   layer has a hand-tuned light value with WCAG AA contrast.
+   Skarn Daylight — the light theme token remap with WCAG AA contrast.
    -------------------------------------------------------------------------- */
 :root[data-theme="light"] {
   color-scheme: light;
@@ -324,48 +315,35 @@
 
   --scrim: rgb(15 23 42 / 0.32);
 
-  /* Monochrome Space surfaces. */
-  --space-deep: #f7f8fa;
-  --space-bg: #f7f8fa;
-  --space-bg-alt: #f1f4f8;
-  --space-mid: #eceff4;
-  --space-lift: #e7ebf1;
-  --space-raised: #ffffff;
-
+  /* Skarn Monochrome Surface & Elevation System (light) */
+  --surface-canvas: #f7f8fa;
+  --surface-sunken: #f1f4f8;
   --surface-1: #eef1f5;
   --surface-2: #e8ecf2;
   --surface-3: #ffffff;
+  --surface-raised: #ffffff;
   --surface-hover: #dde4ec;
+  --surface-active: #d2dae4;
 
-  --moonlight-200: #14171d;
-  --moonlight-300: #2a3140;
-  --moonlight-400: #4a5568;
-  --moonlight-500: #1f2430;
-  --moonlight-600: #3b4250;
-  --moonlight-700: #59647a;
+  --mono-100: #0b0d10;
+  --mono-200: #14171d;
+  --mono-300: #252b37;
+  --mono-400: #374151;
+  --mono-500: #4b5563;
+  --mono-600: #5c6675;
+  --mono-700: #6b7280;
 
+  --hairline-subtle: rgba(15, 23, 42, 0.05);
   --hairline-faint: rgba(15, 23, 42, 0.08);
   --hairline-active: rgba(15, 23, 42, 0.18);
 
-  /* Glows become soft ink shadows on paper. */
-  --glow-green: rgba(21, 128, 61, 0.2);
-  --glow-green-subtle: rgba(21, 128, 61, 0.1);
-  --glow-accent: rgba(15, 23, 42, 0.06);
-  --glow-accent-strong: rgba(15, 23, 42, 0.14);
-  --glow-warn: rgba(138, 83, 0, 0.18);
-  --glow-err: rgba(185, 28, 28, 0.18);
-  --glow-info: rgba(75, 85, 99, 0.16);
-
-  --glass-bg: rgba(255, 255, 255, 0.78);
-  --glass-bg-subtle: rgba(255, 255, 255, 0.66);
-  --glass-bg-elevated: rgba(255, 255, 255, 0.88);
-  --glass-border: rgba(15, 23, 42, 0.1);
-  --glass-border-hover: rgba(15, 23, 42, 0.18);
-
-  --grad-radial-subtle: radial-gradient(120% 120% at 50% 0%, rgba(15, 23, 42, 0.05) 0%, transparent 60%);
-  --grad-radial-accent: radial-gradient(circle at 50% 0%, rgba(15, 23, 42, 0.08) 0%, transparent 70%);
-  --grad-beam: linear-gradient(90deg, transparent 0%, rgba(15, 23, 42, 0.22) 50%, transparent 100%);
-  --grad-shimmer: linear-gradient(90deg, transparent 0%, rgba(15, 23, 42, 0.06) 50%, transparent 100%);
+  --tint-accent: rgba(15, 23, 42, 0.06);
+  --tint-accent-strong: rgba(15, 23, 42, 0.12);
+  --tint-ok: rgba(21, 128, 61, 0.1);
+  --tint-ok-strong: rgba(21, 128, 61, 0.18);
+  --tint-warn: rgba(138, 83, 0, 0.12);
+  --tint-err: rgba(185, 28, 28, 0.12);
+  --tint-info: rgba(75, 85, 99, 0.12);
 
   /* --- Revamp palette (light) ----------------------------------------- */
   --c-rgba-34-197-94-0p95: rgba(25, 143, 69, 0.95);

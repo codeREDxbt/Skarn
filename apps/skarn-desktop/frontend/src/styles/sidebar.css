@@ -1,20 +1,36 @@
 /* ==========================================================================
-   Selora IDE — Primary Sidebar Component Styles
-   FilesView, SearchView, GitView, SettingsView
+   Skarn IDE — Primary Sidebar Component Styles
+   FilesView, SearchView, GitView, SettingsView, Workflows host states
    ========================================================================== */
 
 /* --- 1. Global Sidebar Utilities & Shared Controls ----------------------- */
 
 .visually-hidden {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  padding: 0 !important;
-  margin: -1px !important;
-  overflow: hidden !important;
-  clip: rect(0, 0, 0, 0) !important;
-  white-space: nowrap !important;
-  border: 0 !important;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.workflows-panel-loading,
+.workflows-panel-fallback {
+  color: var(--fg-muted);
+  font-size: var(--type-sm);
+  line-height: var(--type-sm-lh);
+}
+
+.workflows-panel-fallback-title {
+  margin: 0 0 var(--space-2);
+  color: var(--fg-default);
+}
+
+.workflows-panel-fallback-detail {
+  margin: 0 0 var(--space-2);
 }
 
 .sidebar-toast-pill {
@@ -24,27 +40,15 @@
   right: 12px;
   z-index: 50;
   padding: 6px 10px;
-  background: var(--ink-mid);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
-  border-radius: var(--radius-2, 6px);
-  color: var(--moonlight-200);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
+  border-radius: var(--radius-2);
+  color: var(--mono-200);
   font-size: 11px;
   line-height: 1.4;
   text-align: center;
-  box-shadow: 0 4px 12px var(--c-rgba-0-0-0-0p4);
   pointer-events: none;
-  animation: sidebarToastFade 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes sidebarToastFade {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  animation: fade-slide-up var(--dur-quick) var(--ease-precise);
 }
 
 /* --- 2. File Explorer (FileTreeView) ------------------------------------- */
@@ -60,9 +64,9 @@
 .no-folder-state-card {
   margin-bottom: 10px;
   padding: 10px 12px;
-  background: var(--c-rgba-255-255-255-0p02);
-  border: 1px solid var(--c-rgba-255-255-255-0p06);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-faint);
+  border-radius: var(--radius-2);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -91,17 +95,33 @@
   padding: 4px 10px;
   font-size: 11px;
   font-weight: 500;
-  border-radius: var(--radius-1, 4px);
+  border-radius: var(--radius-1);
   background: transparent;
-  border: 1px solid var(--ink-hi);
+  border: 1px solid var(--hairline-subtle);
   color: var(--fg-muted);
-  cursor: default;
+  cursor: pointer;
+}
+
+.empty-state-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--fg-default);
+  border-color: var(--hairline-active);
+}
+
+.empty-state-btn:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.empty-state-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 2px;
 }
 
 .empty-state-btn[disabled] {
   background: transparent;
   border: var(--border-hairline);
   color: var(--fg-disabled);
+  cursor: default;
   opacity: 1;
 }
 
@@ -111,11 +131,14 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 6px 6px 4px;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+  border-bottom: 1px solid var(--hairline-faint);
   margin-bottom: 4px;
 }
 
 .explorer-title-area {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
   flex: 1;
 }
@@ -132,6 +155,13 @@
   display: block;
 }
 
+.tree-file-count {
+  color: var(--fg-faint);
+  font-size: 9.5px;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
 .tree-actions-group {
   display: flex;
   align-items: center;
@@ -140,7 +170,7 @@
   padding-right: 6px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-instant) var(--ease-calm);
   flex-shrink: 0;
 }
 
@@ -160,36 +190,43 @@
   padding: 0;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-1, 3px);
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
   flex-shrink: 0;
 }
 
-.tree-action-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.14);
+.tree-action-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--hairline-subtle);
   color: var(--fg-bright);
 }
 
-.tree-action-btn.is-delete:hover {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #f87171;
+.tree-action-btn:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.tree-action-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
+.tree-action-btn:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.tree-action-btn.is-delete:hover:not(:disabled) {
+  background: var(--tint-err);
+  border-color: var(--err);
+  color: var(--err);
 }
 
 .is-spinning {
-  animation: spinCw 0.6s linear infinite;
-}
-
-@keyframes spinCw {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  animation: spin-smooth var(--dur-max) var(--ease-linear) infinite;
 }
 
 /* Inline create */
@@ -198,18 +235,18 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  background: var(--c-rgba-34-197-94-0p05);
-  border: 1px dashed var(--c-rgba-34-197-94-0p3);
-  border-radius: var(--radius-1, 3px);
+  background: var(--tint-ok);
+  border: 1px dashed var(--ok);
+  border-radius: var(--radius-1);
   margin: 2px 4px 4px 4px;
 }
 
 .tree-inline-input {
   flex: 1;
   min-width: 0;
-  background: var(--ink-canvas);
-  border: 1px solid var(--c-rgba-255-255-255-0p2);
-  border-radius: 2px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 1px 4px;
   font-size: 11.5px;
   color: var(--fg-default);
@@ -242,16 +279,16 @@
   cursor: pointer;
   font-size: 11.5px;
   color: var(--fg-default);
-  transition: background 0.1s ease;
-  border-radius: 3px;
+  transition: background-color var(--dur-instant) var(--ease-calm);
+  border-radius: var(--radius-1);
 }
 
 .tree-node-row:hover {
-  background: var(--c-rgba-255-255-255-0p04);
+  background: var(--surface-hover);
 }
 
 .tree-node-row.is-selected {
-  background: var(--c-rgba-255-255-255-0p09);
+  background: var(--surface-active);
   color: var(--fg-bright);
 }
 
@@ -263,7 +300,7 @@
   bottom: 2px;
   width: 2px;
   background: var(--ok);
-  border-radius: 1px;
+  border-radius: var(--radius-1);
 }
 
 .tree-chevron-slot {
@@ -282,7 +319,7 @@
 
 .chevron-icon {
   color: var(--fg-muted);
-  transition: transform 0.12s ease;
+  transition: transform var(--dur-instant) var(--ease-calm);
 }
 
 /* File badges & icons */
@@ -296,7 +333,7 @@
   min-width: 15px;
   height: 14px;
   padding: 0 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -343,7 +380,12 @@
 }
 
 .folder-icon {
+  color: var(--mono-400);
   flex-shrink: 0;
+}
+
+.folder-icon.is-open {
+  color: var(--mono-200);
 }
 
 .tree-item-name {
@@ -355,13 +397,13 @@
 }
 
 .is-dirty-text {
-  color: var(--c-fbbf24);
+  color: var(--warn);
 }
 
 .tree-dirty-dot {
   font-size: 9.5px;
   font-weight: 700;
-  color: var(--c-f59e0b);
+  color: var(--warn);
   margin-right: 6px;
 }
 
@@ -384,28 +426,32 @@
   height: 16px;
   background: transparent;
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
 }
 
 .tree-hover-btn:hover {
-  background: var(--c-rgba-255-255-255-0p15);
+  background: var(--surface-hover);
   color: var(--fg-bright);
+}
+
+.tree-hover-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 /* Context Menu */
 .tree-context-menu {
   position: fixed;
   z-index: 100;
-  background: var(--ink-mid, var(--c-18181f));
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
+  border-radius: var(--radius-2);
   padding: 4px;
   display: flex;
   flex-direction: column;
   min-width: 165px;
-  box-shadow: 0 8px 24px var(--c-rgba-0-0-0-0p55);
 }
 
 .context-menu-item {
@@ -415,24 +461,29 @@
   padding: 5px 8px;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
   font-size: 11.5px;
   color: var(--fg-default);
   cursor: pointer;
   text-align: left;
-  transition: background 0.1s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm);
 }
 
 .context-menu-item:hover {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
+}
+
+.context-menu-item:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: -1px;
 }
 
 .context-menu-item.is-danger {
-  color: var(--c-f87171);
+  color: var(--err);
 }
 
 .context-menu-item.is-danger:hover {
-  background: var(--c-rgba-239-68-68-0p15);
+  background: var(--tint-err);
 }
 
 .context-kbd {
@@ -441,13 +492,13 @@
   font-size: 9px;
   color: var(--fg-muted);
   padding: 1px 4px;
-  background: var(--c-rgba-255-255-255-0p04);
-  border-radius: 2px;
+  background: var(--surface-2);
+  border-radius: var(--radius-1);
 }
 
 .context-menu-divider {
   height: 1px;
-  background: var(--glow-accent);
+  background: var(--hairline-faint);
   margin: 3px 0;
 }
 
@@ -482,13 +533,21 @@
   height: 18px;
   background: transparent;
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
 }
 
 .search-chevron-btn:hover {
   color: var(--fg-default);
+  background: var(--surface-hover);
+}
+
+.search-chevron-btn:focus-visible,
+.search-clear-btn:focus-visible,
+.search-small-action-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .replace-indent-spacer {
@@ -501,12 +560,12 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  background: var(--ink-canvas, var(--c-070709));
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: var(--radius-1, 4px);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 2px 6px;
   gap: 4px;
-  transition: border-color 0.12s;
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .search-input-field-wrapper:focus-within {
@@ -535,6 +594,7 @@
   justify-content: center;
   background: transparent;
   border: none;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
   padding: 0;
@@ -559,34 +619,55 @@
   padding: 0 3px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   font-family: var(--font-mono, monospace);
   font-size: 10px;
   color: var(--fg-muted);
   cursor: pointer;
-  transition: all 0.1s;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .modifier-btn:hover {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
   color: var(--fg-default);
 }
 
+.modifier-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
 .modifier-btn.is-active {
-  background: var(--c-rgba-34-197-94-0p15);
-  border-color: var(--c-rgba-34-197-94-0p4);
-  color: var(--c-4ade80);
+  background: var(--tint-ok);
+  border-color: var(--tint-ok-strong);
+  color: var(--ok);
 }
 
 .search-replace-btn {
   padding: 2px 8px;
   font-size: 10.5px;
   font-weight: 500;
-  background: var(--c-rgba-255-255-255-0p06);
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   color: var(--fg-default);
   cursor: pointer;
+}
+
+.search-replace-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
+}
+
+.search-replace-btn:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.search-replace-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .search-replace-btn:disabled {
@@ -601,7 +682,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 2px 6px 2px;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+  border-bottom: 1px solid var(--hairline-faint);
   margin-bottom: 6px;
 }
 
@@ -611,7 +692,7 @@
 }
 
 .search-count-label strong {
-  color: var(--moonlight-200);
+  color: var(--mono-200);
 }
 
 .search-header-actions {
@@ -622,10 +703,11 @@
 .search-small-action-btn {
   background: transparent;
   border: none;
+  border-radius: var(--radius-1);
   font-size: 10.5px;
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 0;
+  padding: 0 2px;
 }
 
 .search-small-action-btn:hover {
@@ -651,13 +733,13 @@
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background-color var(--dur-instant) var(--ease-calm);
 }
 
 .search-file-header-row:hover {
-  background: var(--c-rgba-255-255-255-0p04);
+  background: var(--surface-hover);
 }
 
 .search-file-chevron {
@@ -685,16 +767,16 @@
   font-size: 9.5px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--glow-accent);
-  color: var(--moonlight-400);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--mono-400);
 }
 
 .search-match-lines-list {
   display: flex;
   flex-direction: column;
   margin-left: 20px;
-  border-left: 1px solid var(--c-rgba-255-255-255-0p06);
+  border-left: 1px solid var(--hairline-faint);
   padding-left: 6px;
   gap: 1px;
 }
@@ -704,21 +786,21 @@
   align-items: baseline;
   gap: 8px;
   padding: 3px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   cursor: pointer;
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   color: var(--fg-muted);
-  transition: background 0.1s;
+  transition: background-color var(--dur-instant) var(--ease-calm);
 }
 
 .search-match-line-row:hover {
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-hover);
   color: var(--fg-default);
 }
 
 .search-match-line-row.is-selected {
-  background: var(--glow-green-subtle);
+  background: var(--tint-ok);
   color: var(--fg-bright);
 }
 
@@ -738,10 +820,10 @@
 }
 
 .search-highlight-mark {
-  background: var(--c-rgba-245-158-11-0p3);
-  color: var(--c-fde68a);
+  background: var(--tint-warn);
+  color: var(--warn);
   padding: 0 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
 }
 
 /* --- 4. Git Version Control (GitPanelView) -------------------------------- */
@@ -758,7 +840,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 6px 8px 4px;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+  border-bottom: 1px solid var(--hairline-faint);
   margin-bottom: 8px;
 }
 
@@ -770,14 +852,14 @@
 }
 
 .git-branch-icon {
-  color: var(--c-38bdf8);
+  color: var(--info);
   flex-shrink: 0;
 }
 
 .git-branch-name {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--moonlight-200);
+  color: var(--mono-200);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -789,9 +871,9 @@
   gap: 3px;
   font-size: 9.5px;
   padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--glow-green-subtle);
-  color: var(--c-4ade80);
+  border-radius: var(--radius-1);
+  background: var(--tint-ok);
+  color: var(--ok);
 }
 
 .git-header-actions {
@@ -808,14 +890,28 @@
   height: 22px;
   background: transparent;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
 }
 
-.git-icon-btn:hover {
-  background: var(--glow-accent);
+.git-icon-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
   color: var(--fg-bright);
+}
+
+.git-icon-btn:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.git-icon-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
+.git-icon-btn:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
 }
 
 /* Commit Box */
@@ -828,9 +924,9 @@
 
 .git-commit-textarea {
   width: 100%;
-  background: var(--ink-canvas, var(--c-070709));
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
   padding: 8px;
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 11.5px;
@@ -838,7 +934,7 @@
   resize: vertical;
   min-height: 54px;
   outline: none;
-  transition: border-color 0.12s;
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .git-commit-textarea:focus {
@@ -862,17 +958,23 @@
   gap: 6px;
   padding: 5px 12px;
   background: var(--ok);
-  border: none;
-  border-radius: var(--radius-1, 4px);
+  border: 1px solid var(--ok);
+  border-radius: var(--radius-1);
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--c-022c15);
+  color: var(--surface-canvas);
   cursor: pointer;
-  transition: opacity 0.12s, filter 0.12s;
+  transition: opacity var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm);
 }
 
 .git-commit-btn:hover:not(:disabled) {
-  filter: brightness(1.1);
+  opacity: 0.9;
+}
+
+.git-commit-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 2px;
 }
 
 .git-commit-btn:disabled {
@@ -889,9 +991,9 @@
 .git-commit-kbd {
   font-family: var(--font-mono, monospace);
   font-size: 9px;
-  background: var(--c-rgba-0-0-0-0p25);
+  background: var(--tint-accent);
   padding: 1px 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
 }
 
 /* Changes Sections */
@@ -905,14 +1007,19 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 4px;
+  padding: 4px;
   cursor: pointer;
   user-select: none;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
 }
 
 .git-section-header:hover {
-  background: var(--c-rgba-255-255-255-0p03);
+  background: var(--surface-hover);
+}
+
+.git-section-header:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: -1px;
 }
 
 .git-section-toggle {
@@ -932,9 +1039,9 @@
   font-size: 9.5px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--c-rgba-255-255-255-0p06);
-  color: var(--moonlight-400);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--mono-400);
 }
 
 .git-section-actions {
@@ -951,15 +1058,20 @@
   height: 18px;
   background: transparent;
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
   font-weight: 700;
 }
 
 .git-section-btn:hover {
-  background: var(--c-rgba-255-255-255-0p1);
+  background: var(--surface-hover);
   color: var(--fg-bright);
+}
+
+.git-section-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .git-file-list {
@@ -981,19 +1093,19 @@
   align-items: center;
   gap: 6px;
   padding: 3px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   cursor: pointer;
   font-size: 11.5px;
   color: var(--fg-default);
-  transition: background 0.1s;
+  transition: background-color var(--dur-instant) var(--ease-calm);
 }
 
 .git-file-row:hover {
-  background: var(--c-rgba-255-255-255-0p05);
+  background: var(--surface-hover);
 }
 
 .git-file-row.is-selected {
-  background: var(--c-rgba-255-255-255-0p09);
+  background: var(--surface-active);
 }
 
 .git-file-name {
@@ -1019,11 +1131,11 @@
 }
 
 .git-diff-plus {
-  color: var(--c-4ade80);
+  color: var(--ok);
 }
 
 .git-diff-minus {
-  color: var(--c-f87171);
+  color: var(--err);
 }
 
 .git-status-badge {
@@ -1034,15 +1146,15 @@
 }
 
 .git-status-badge.modified {
-  color: var(--c-fbbf24);
+  color: var(--warn);
 }
 
 .git-status-badge.added {
-  color: var(--c-4ade80);
+  color: var(--ok);
 }
 
 .git-status-badge.deleted {
-  color: var(--c-f87171);
+  color: var(--err);
 }
 
 .git-row-action-btn {
@@ -1053,7 +1165,7 @@
   height: 16px;
   background: transparent;
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   cursor: pointer;
   font-weight: 700;
@@ -1064,9 +1176,14 @@
   display: flex;
 }
 
-.git-row-action-btn:hover {
-  background: var(--c-rgba-255-255-255-0p12);
+.git-row-action-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
   color: var(--fg-bright);
+}
+
+.git-row-action-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .git-row-hover-actions {
@@ -1078,9 +1195,9 @@
 /* Inline Diff Inspector Card */
 .git-diff-preview-card {
   margin-top: 8px;
-  background: var(--c-09090d);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
   overflow: hidden;
 }
 
@@ -1089,13 +1206,13 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  background: var(--c-rgba-255-255-255-0p03);
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--hairline-faint);
 }
 
 .diff-file-label {
   font-size: 11px;
-  color: var(--moonlight-400);
+  color: var(--mono-400);
 }
 
 .diff-file-label strong {
@@ -1105,6 +1222,7 @@
 .diff-close-btn {
   background: transparent;
   border: none;
+  border-radius: var(--radius-1);
   font-size: 14px;
   color: var(--fg-muted);
   cursor: pointer;
@@ -1113,6 +1231,11 @@
 
 .diff-close-btn:hover {
   color: var(--fg-bright);
+}
+
+.diff-close-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .git-diff-lines {
@@ -1135,13 +1258,13 @@
 }
 
 .git-diff-line.is-add {
-  background: var(--glow-green-subtle);
-  color: var(--c-86efac);
+  background: var(--tint-ok);
+  color: var(--ok);
 }
 
 .git-diff-line.is-del {
-  background: var(--c-rgba-239-68-68-0p12);
-  color: var(--c-fca5a5);
+  background: var(--tint-err);
+  color: var(--err);
 }
 
 .git-diff-line.is-same {
@@ -1167,12 +1290,11 @@
   display: flex;
   align-items: center;
   gap: 3px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-1);
   padding: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-2, 6px);
+  border: 1px solid var(--hairline-faint);
+  border-radius: var(--radius-2);
   margin-bottom: 12px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .settings-tab-btn {
@@ -1184,38 +1306,37 @@
   padding: 6px 4px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
   font-size: 11px;
   font-weight: 500;
   color: var(--fg-muted);
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
   white-space: nowrap;
 }
 
 .settings-tab-btn:hover {
   color: var(--fg-default);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-hover);
+}
+
+.settings-tab-btn:active {
+  background: var(--surface-active);
+}
+
+.settings-tab-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: -1px;
 }
 
 .settings-tab-btn.is-active {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.05) 100%), var(--ink-mid);
+  background: var(--surface-3);
   color: var(--fg-bright);
   font-weight: 600;
-  border-color: rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 2px 6px rgba(0, 0, 0, 0.4);
-}
-
-.settings-tab-btn svg {
-  transition: transform var(--dur-instant) var(--ease-spring);
-}
-
-.settings-tab-btn:hover svg {
-  transform: scale(1.1);
+  border-color: var(--hairline-active);
 }
 
 .settings-tab-btn.is-active svg {
-  color: var(--moonlight-300, #e4e9f2);
+  color: var(--mono-300);
 }
 
 .settings-section-content {
@@ -1229,39 +1350,23 @@
 
 /* AI Gateway Card & Settings Cards */
 .settings-card {
-  background: linear-gradient(180deg, rgba(20, 22, 30, 0.8) 0%, rgba(12, 12, 17, 0.9) 100%), var(--ink-low);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-2, 8px);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 4px 16px rgba(0, 0, 0, 0.35);
-  transition: border-color var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-instant) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .settings-card:hover {
-  border-color: rgba(255, 255, 255, 0.14);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 6px 20px rgba(0, 0, 0, 0.45);
+  border-color: var(--hairline-active);
 }
 
 .settings-card.ai-gateway-card {
   position: relative;
   overflow: hidden;
-}
-
-.settings-card.ai-gateway-card::before {
-  content: "";
-  position: absolute;
-  top: -20px;
-  right: -20px;
-  width: 90px;
-  height: 90px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(34, 197, 94, 0.12) 0%, transparent 70%);
-  pointer-events: none;
 }
 
 .settings-card-header {
@@ -1280,7 +1385,7 @@
 .settings-status-pill {
   font-size: 10px;
   padding: 2px 7px;
-  border-radius: var(--radius-pill, 999px);
+  border-radius: var(--radius-pill);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -1288,27 +1393,23 @@
 }
 
 .settings-status-pill.is-connected {
-  background: rgba(34, 197, 94, 0.14);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.32);
-  box-shadow: 0 0 10px rgba(34, 197, 94, 0.22);
+  background: var(--tint-ok);
+  color: var(--ok);
+  border: 1px solid var(--tint-ok-strong);
 }
 
 .settings-status-pill.is-connected::before {
   content: "";
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
-  animation: pulse-glow 2s var(--ease-orbital) infinite;
 }
 
 .settings-status-pill.is-disconnected {
-  background: rgba(245, 158, 11, 0.14);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.32);
-  box-shadow: 0 0 10px rgba(245, 158, 11, 0.18);
+  background: var(--tint-warn);
+  color: var(--warn);
+  border: 1px solid var(--warn);
 }
 
 .settings-card-hint {
@@ -1318,30 +1419,43 @@
   line-height: 1.45;
 }
 
+.settings-card-hint.is-warning {
+  color: var(--warn);
+}
+
 .settings-primary-btn {
   margin-top: 4px;
   padding: 7px 14px;
   font-size: 11.5px;
   font-weight: 600;
-  border-radius: var(--radius-1, 6px);
-  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
-  color: #022412;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-1);
+  background: var(--ok);
+  color: var(--surface-canvas);
+  border: 1px solid var(--ok);
   cursor: pointer;
   text-align: center;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 3px 12px rgba(34, 197, 94, 0.38);
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: opacity var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm);
 }
 
-.settings-primary-btn:hover {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 6px 18px rgba(34, 197, 94, 0.5);
+.settings-primary-btn:hover:not(:disabled) {
+  opacity: 0.9;
 }
 
-.settings-primary-btn:active {
-  transform: scale(0.97) translateY(1px);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+.settings-primary-btn:active:not(:disabled) {
+  opacity: 0.82;
+}
+
+.settings-primary-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 2px;
+}
+
+.settings-primary-btn:disabled {
+  background: transparent;
+  border-color: var(--hairline-faint);
+  color: var(--fg-disabled);
+  cursor: default;
 }
 
 /* Assistant Providers List */
@@ -1359,16 +1473,31 @@
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  transition: all var(--dur-instant) var(--ease-calm);
+  border-radius: var(--radius-2);
+  background: var(--surface-sunken);
+  border: 1px solid var(--hairline-faint);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .settings-provider-item:hover {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.09);
-  transform: translateX(1px);
+  background: var(--surface-hover);
+  border-color: var(--hairline-subtle);
+}
+
+.settings-provider-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-provider-name {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Settings Form Groups */
@@ -1376,9 +1505,9 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-2, 8px);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-faint);
+  border-radius: var(--radius-2);
   padding: 10px 12px;
 }
 
@@ -1397,51 +1526,49 @@
 }
 
 .settings-select {
-  background: rgba(8, 8, 12, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 4px 8px;
   font-size: 11px;
   color: var(--fg-default);
   outline: none;
   cursor: pointer;
   max-width: 140px;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: border-color var(--dur-instant) var(--ease-calm), box-shadow var(--dur-instant) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .settings-select:focus-visible,
 .settings-number-input:focus-visible,
 .settings-text-input:focus-visible {
-  border-color: var(--moonlight-400);
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  border-color: var(--mono-400);
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .settings-number-input {
   width: 64px;
-  background: rgba(8, 8, 12, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 4px 8px;
   font-size: 11px;
   color: var(--fg-default);
   outline: none;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: border-color var(--dur-instant) var(--ease-calm), box-shadow var(--dur-instant) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .settings-text-input {
   width: 136px;
-  background: rgba(8, 8, 12, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 4px 8px;
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   color: var(--fg-default);
   outline: none;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: border-color var(--dur-instant) var(--ease-calm), box-shadow var(--dur-instant) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .settings-range-input {
@@ -1449,7 +1576,12 @@
   accent-color: var(--fg-default);
 }
 
-/* 3D Spring Switch */
+.settings-range-input:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Switch */
 .settings-switch {
   position: relative;
   display: inline-block;
@@ -1467,15 +1599,12 @@
 .switch-slider {
   position: absolute;
   cursor: pointer;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
-  transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  border-radius: 18px;
+  inset: 0;
+  background-color: var(--surface-3);
+  border: 1px solid var(--hairline-subtle);
+  transition: background-color var(--dur-quick) var(--ease-precise),
+    border-color var(--dur-quick) var(--ease-precise);
+  border-radius: var(--radius-pill);
 }
 
 .switch-slider:before {
@@ -1485,22 +1614,30 @@
   width: 12px;
   left: 2px;
   bottom: 2px;
-  background: radial-gradient(circle at 35% 30%, #ffffff 0%, #e4e9f2 60%, #cbd5e1 100%);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-  transition: 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  border-radius: 50%;
+  background: var(--mono-200);
+  transition: transform var(--dur-instant) var(--ease-precise),
+    background-color var(--dur-instant) var(--ease-precise);
+  border-radius: var(--radius-pill);
 }
 
 .settings-switch input:checked + .switch-slider {
-  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
-  border-color: rgba(255, 255, 255, 0.25);
-  box-shadow: 0 0 10px rgba(34, 197, 94, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  background: var(--ok);
+  border-color: var(--ok);
 }
 
 .settings-switch input:checked + .switch-slider:before {
   transform: translateX(14px);
-  background: #ffffff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 1px 1px #fff;
+  background: var(--mono-100);
+}
+
+.settings-switch input:focus-visible + .switch-slider {
+  outline: var(--border-focus);
+  outline-offset: 2px;
+}
+
+.settings-switch input:disabled + .switch-slider {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* Keybindings Table & Search */
@@ -1514,17 +1651,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(8, 8, 12, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
   padding: 5px 10px;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
-  transition: border-color var(--dur-instant) var(--ease-calm), box-shadow var(--dur-instant) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .keybind-search-wrapper:focus-within {
-  border-color: var(--moonlight-400);
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.1), inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  border-color: var(--mono-400);
 }
 
 .keybind-search-icon {
@@ -1543,10 +1678,9 @@
 .keybindings-table-wrapper {
   flex: 1;
   overflow-y: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
-  background: rgba(10, 10, 15, 0.6);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-1);
 }
 
 .keybindings-table {
@@ -1561,24 +1695,22 @@
   z-index: 1;
   text-align: left;
   padding: 6px 10px;
-  background: rgba(18, 18, 25, 0.95);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--surface-2);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
   color: var(--fg-muted);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--hairline-subtle);
 }
 
 .keybinding-row {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  transition: all var(--dur-instant) var(--ease-calm);
+  border-bottom: 1px solid var(--hairline-faint);
+  transition: background-color var(--dur-instant) var(--ease-calm);
 }
 
 .keybinding-row:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-hover);
 }
 
 .keybinding-cmd-cell {
@@ -1608,12 +1740,11 @@
 .settings-kbd {
   font-family: var(--font-mono, monospace);
   font-size: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   padding: 2px 6px;
-  color: var(--moonlight-200, #f2f5fa);
-  box-shadow: 0 2px 0 var(--ink-rule), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: var(--mono-200);
   display: inline-block;
   line-height: 1.2;
 }
@@ -1621,7 +1752,7 @@
 .settings-footer-info {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--hairline-faint);
 }
 
 .settings-later {
@@ -1630,20 +1761,7 @@
   margin: 0;
 }
 
-/* --- Z4 live workbench views --------------------------------------------- */
-
-.explorer-title-area {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.tree-file-count {
-  color: var(--fg-faint);
-  font-size: 9.5px;
-  font-family: var(--font-mono, monospace);
-  white-space: nowrap;
-}
+/* --- Live Workbench Views ------------------------------------------------- */
 
 .tree-node-row:focus-visible,
 .git-file-row:focus-visible,
@@ -1651,14 +1769,6 @@
 .search-match-line-row:focus-visible {
   outline: var(--border-focus);
   outline-offset: calc(var(--hairline) * -1);
-}
-
-.folder-icon {
-  color: var(--moonlight-400);
-}
-
-.folder-icon.is-open {
-  color: var(--moonlight-200);
 }
 
 .tree-empty-folder {
@@ -1691,10 +1801,10 @@
   justify-content: center;
   width: 42px;
   height: 42px;
-  color: var(--moonlight-400);
+  color: var(--mono-400);
   background: var(--ink-low);
   border: 1px solid var(--ink-hi);
-  border-radius: var(--radius-2, 6px);
+  border-radius: var(--radius-2);
 }
 
 .file-tree-empty h3,
@@ -1770,13 +1880,6 @@ button.search-match-line-row {
   background: transparent;
   font: inherit;
   text-align: left;
-}
-
-button.search-file-header-row {
-  color: inherit;
-}
-
-button.search-match-line-row {
   color: inherit;
 }
 
@@ -1855,7 +1958,7 @@ button.git-section-header {
   padding: 2px 4px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-1, 4px);
+  border-radius: var(--radius-1);
   color: var(--fg-default);
   cursor: pointer;
   font: inherit;
@@ -1864,7 +1967,7 @@ button.git-section-header {
 .git-branch-trigger:hover,
 .git-branch-trigger[aria-expanded='true'] {
   background: var(--ink-low);
-  border-color: var(--glass-border);
+  border-color: var(--hairline-subtle);
 }
 
 .git-branch-trigger:focus-visible {
@@ -1883,9 +1986,9 @@ button.git-section-header {
   width: 232px;
   max-width: calc(100vw - 24px);
   padding: 8px;
-  background: var(--ink-low);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
+  border-radius: var(--radius-2);
 }
 
 .git-menu-title {
@@ -1906,9 +2009,9 @@ button.git-section-header {
 .git-menu-error {
   padding: 4px 6px;
   border: 1px solid var(--ink-hi);
-  border-radius: var(--radius-1, 4px);
+  border-radius: var(--radius-1);
   color: var(--err);
-  background: var(--ink-canvas, var(--c-070709));
+  background: var(--surface-canvas);
   font-size: 10.5px;
   line-height: 1.4;
 }
@@ -1930,13 +2033,13 @@ button.git-section-header {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  padding: 2px 2px;
-  border-radius: 3px;
+  padding: 2px;
+  border-radius: var(--radius-1);
 }
 
 .git-branch-row:hover,
 .git-stash-row:hover {
-  background: var(--c-rgba-255-255-255-0p05);
+  background: var(--surface-hover);
 }
 
 .git-branch-row-main {
@@ -1945,7 +2048,7 @@ button.git-section-header {
   gap: 5px;
   flex: 1;
   min-width: 0;
-  padding: 2px 2px;
+  padding: 2px;
   background: transparent;
   border: none;
   color: var(--fg-default);
@@ -1955,13 +2058,18 @@ button.git-section-header {
   cursor: pointer;
 }
 
+.git-branch-row-main:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
 .git-branch-row-main:disabled {
   color: var(--fg-muted);
   cursor: default;
 }
 
 .git-branch-row-main[aria-current='true'] {
-  color: var(--c-4ade80);
+  color: var(--ok);
 }
 
 .git-branch-row-name {
@@ -1980,8 +2088,8 @@ button.git-section-header {
   gap: 4px;
   padding: 2px 6px;
   background: transparent;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-1, 4px);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   color: var(--fg-muted);
   font: inherit;
   font-size: 10px;
@@ -1993,8 +2101,17 @@ button.git-section-header {
 .git-conflict-btn:hover:not(:disabled),
 .git-menu-btn:hover:not(:disabled),
 .git-confirm-btn:hover:not(:disabled) {
-  background: var(--c-rgba-255-255-255-0p08);
+  background: var(--surface-hover);
   color: var(--fg-bright);
+  border-color: var(--hairline-active);
+}
+
+.git-branch-row-action:focus-visible,
+.git-conflict-btn:focus-visible,
+.git-menu-btn:focus-visible,
+.git-confirm-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .git-branch-row-action:disabled,
@@ -2011,16 +2128,16 @@ button.git-section-header {
   align-items: center;
   gap: 4px;
   padding-top: 6px;
-  border-top: 1px solid var(--c-rgba-255-255-255-0p05);
+  border-top: 1px solid var(--hairline-faint);
 }
 
 .git-menu-input {
   flex: 1;
   min-width: 0;
   padding: 3px 6px;
-  background: var(--ink-canvas, var(--c-070709));
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: var(--radius-1, 4px);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   color: var(--fg-default);
   font: inherit;
   font-size: 10.5px;
@@ -2038,8 +2155,8 @@ button.git-section-header {
   margin: 0 4px 8px;
   padding: 8px;
   background: var(--ink-low);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-2, 6px);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
 }
 
 .git-stash-row {
@@ -2047,7 +2164,7 @@ button.git-section-header {
 }
 
 .git-stash-label {
-  color: var(--c-38bdf8);
+  color: var(--info);
   font-family: var(--font-mono, monospace);
   font-size: 9.5px;
   white-space: nowrap;
@@ -2069,8 +2186,8 @@ button.git-section-header {
   margin: 0 4px 8px;
   padding: 7px 8px;
   border: 1px solid var(--err);
-  border-radius: var(--radius-2, 6px);
-  background: var(--c-rgba-255-255-255-0p03);
+  border-radius: var(--radius-2);
+  background: var(--tint-err);
 }
 
 .git-conflict-title {
@@ -2151,7 +2268,7 @@ button.git-section-header {
   padding: 3px 5px;
   background: transparent;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   color: var(--fg-default);
   font: inherit;
   text-align: left;
@@ -2159,7 +2276,7 @@ button.git-section-header {
 }
 
 .git-history-row:hover {
-  background: var(--c-rgba-255-255-255-0p05);
+  background: var(--surface-hover);
 }
 
 .git-history-row:focus-visible {
@@ -2169,7 +2286,7 @@ button.git-section-header {
 
 .git-history-sha {
   grid-area: sha;
-  color: var(--c-38bdf8);
+  color: var(--info);
   font-family: var(--font-mono, monospace);
   font-size: 9.5px;
   line-height: 1.5;
@@ -2196,9 +2313,9 @@ button.git-section-header {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: var(--c-09090d);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-2);
   overflow: hidden;
 }
 
@@ -2208,7 +2325,7 @@ button.git-section-header {
   justify-content: space-between;
   gap: 6px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p06);
+  border-bottom: 1px solid var(--hairline-faint);
 }
 
 .git-commit-detail-title {
@@ -2255,22 +2372,22 @@ button.git-section-header {
   gap: 8px;
   width: min(320px, 100%);
   padding: 14px;
-  background: var(--ink-canvas, var(--c-070709));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-2, 6px);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
+  border-radius: var(--radius-2);
 }
 
 .git-confirm-title {
   margin: 0;
   color: var(--fg-bright);
-  font-size: var(--type-md, 13px);
-  font-weight: var(--weight-semibold, 600);
+  font-size: var(--type-md);
+  font-weight: var(--weight-semibold);
 }
 
 .git-confirm-message {
   margin: 0;
   color: var(--fg-muted);
-  font-size: var(--type-xs, 11px);
+  font-size: var(--type-xs);
   line-height: 1.5;
 }
 
@@ -2293,5 +2410,5 @@ button.git-section-header {
 
 .git-confirm-btn.is-danger:hover:not(:disabled) {
   background: var(--err);
-  color: var(--ink-canvas, var(--c-070709));
+  color: var(--surface-canvas);
 }

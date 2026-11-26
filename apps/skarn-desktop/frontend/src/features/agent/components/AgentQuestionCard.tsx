@@ -45,46 +45,46 @@ export const AgentQuestionCard: React.FC<AgentQuestionCardProps> = ({
 
   return (
     <section
-      className="agent-decision-card agent-question-card agent-card-question"
+      className="agent-decision-card agent-question-card"
       aria-label="Agent question"
     >
-      <header className="agent-decision-header agent-card-question-header">
-        <span className="agent-decision-kind agent-card-kind">Question</span>
+      <header className="agent-decision-header">
+        <span className="agent-decision-kind">Question</span>
         {prompt.header ? (
-          <span className="agent-decision-context agent-card-context">{prompt.header}</span>
+          <span className="agent-decision-context">{prompt.header}</span>
         ) : null}
       </header>
 
-      <p className="agent-decision-question agent-card-question-text">{prompt.question}</p>
+      <p className="agent-decision-question">{prompt.question}</p>
 
       {answered ? (
-        <div className="agent-decision-answered agent-card-answered" role="status">
+        <div className="agent-decision-answered" role="status">
           <Check size={12} aria-hidden="true" />
           <span>{answered}</span>
         </div>
       ) : (
         <>
           {prompt.options.length > 0 ? (
-            <fieldset className="agent-question-options agent-card-options">
-              <legend className="agent-question-legend agent-card-legend">Choose an answer</legend>
+            <fieldset className="agent-question-options">
+              <legend className="agent-question-legend">Choose an answer</legend>
               {prompt.options.map((option, index) => (
-                <label key={option.id} className="agent-question-option agent-card-option">
+                <label key={option.id} className="agent-question-option">
                   <input
                     type="radio"
-                    className="agent-card-option-input"
+                    className="agent-question-option-input"
                     name={groupName}
                     value={option.id}
                     checked={selected === option.id}
                     disabled={submitting}
                     onChange={() => setSelected(option.id)}
                   />
-                  <span className="agent-question-option-body agent-card-option-body">
-                    <span className="agent-question-option-label agent-card-option-label">
+                  <span className="agent-question-option-body">
+                    <span className="agent-question-option-label">
                       {option.label}
                       {index === 0 ? <span className="visually-hidden"> (first option)</span> : null}
                     </span>
                     {option.description ? (
-                      <span className="agent-question-option-desc agent-card-option-desc">
+                      <span className="agent-question-option-desc">
                         {option.description}
                       </span>
                     ) : null}
@@ -95,12 +95,12 @@ export const AgentQuestionCard: React.FC<AgentQuestionCardProps> = ({
           ) : null}
 
           {freeTextAllowed ? (
-            <label className="agent-question-free agent-card-free">
-              <span className="agent-question-free-label agent-card-free-label">
+            <label className="agent-question-free">
+              <span className="agent-question-free-label">
                 {prompt.options.length > 0 ? 'Or add detail (optional)' : 'Your answer'}
               </span>
               <textarea
-                className="agent-question-textarea agent-card-textarea"
+                className="agent-question-textarea"
                 value={freeText}
                 rows={2}
                 disabled={submitting}
@@ -111,15 +111,15 @@ export const AgentQuestionCard: React.FC<AgentQuestionCardProps> = ({
           ) : null}
 
           {error ? (
-            <p className="agent-decision-error agent-card-error" role="alert">
+            <p className="agent-decision-error" role="alert">
               {error}
             </p>
           ) : null}
 
-          <div className="agent-decision-actions agent-card-actions-row">
+          <div className="agent-decision-actions">
             <button
               type="button"
-              className="agent-decision-primary agent-card-primary-btn"
+              className="agent-decision-primary"
               disabled={!canSend}
               aria-busy={submitting}
               onClick={() => onAnswer(selected, freeText)}

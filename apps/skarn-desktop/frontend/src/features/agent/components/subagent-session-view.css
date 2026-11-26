@@ -25,7 +25,7 @@
   white-space: nowrap;
   padding: 3px 8px;
   border: 1px solid var(--ink-hi);
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   background: var(--surface-2);
   color: var(--fg-default);
   font: inherit;
@@ -43,7 +43,7 @@
 .subagent-session-policy {
   padding: 2px 6px;
   border: 1px solid var(--ink-hi);
-  border-radius: 5px;
+  border-radius: var(--radius-2);
   font-size: 11px;
   justify-self: end;
   white-space: nowrap;
@@ -56,7 +56,7 @@
   width: 6px;
   height: 6px;
   margin-right: 5px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: currentColor;
   vertical-align: middle;
 }
@@ -83,4 +83,4 @@
   color: var(--fg-muted);
   font-size: 12px;
 }
-.subagent-session-thinking-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.subagent-session-thinking-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: currentColor; }

@@ -611,19 +611,11 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
       )}
 
       {/* 3. Smooth Auto-Expanding Text Input Area */}
-      <div className="composer-input-row" style={{ position: 'relative' }}>
+      <div className="composer-input-row">
         {!isFocused && !text && (
           <p
             className="agent-composer-placeholder"
             onClick={() => textareaRef.current?.focus()}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              margin: 0,
-              pointerEvents: 'none',
-              cursor: 'text',
-            }}
           >
             {gate.reason === 'no_workspace'
               ? 'Open a folder to let the agent read and write…'
@@ -659,7 +651,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
         </div>
       )}
 
-      {/* 4. Floating Dropdowns with Smooth Scale-In Animation */}
+      {/* 4. Floating Dropdowns */}
 
       {/* Permission Mode Selector */}
       {activeMenu === 'mode' && (
@@ -702,10 +694,10 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
 
           {availableModels.length === 0 ? (
             <div className="model-no-results" role="status">
-              <div className="item-title" style={{ color: 'var(--fg-default, var(--c-e4e4e7))' }}>
+              <div className="item-title">
                 Choose a provider to start
               </div>
-              <div className="item-desc" style={{ marginTop: 4 }}>
+              <div className="item-desc">
                 No models were reported by the backend. Choose a provider, then refresh
                 the catalog.
               </div>
@@ -714,13 +706,12 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
                 className="floating-menu-item"
                 role="menuitem"
                 onClick={handleRefreshModels}
-                style={{ justifyContent: 'center', marginTop: 6 }}
               >
                 <Zap size={13} className="text-amber-400 flex-shrink-0" />
                 <span className="item-title">Refresh models</span>
               </button>
               {modelError && (
-                <div className="item-desc" style={{ marginTop: 6, color: 'var(--c-f87171)' }}>
+                <div className="item-desc model-no-results-error">
                   {modelError}
                 </div>
               )}

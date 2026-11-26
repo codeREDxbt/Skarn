@@ -1,10 +1,6 @@
 /* ==========================================================================
-   Selora IDE — Phase Z5b onboarding + About
-   --------------------------------------------------------------------------
-   Tokens only (DESIGN_TOKENS.md §12; PHASE_Z2_DESIGN §13): no hex literals,
-   no raw px, no shadows, no gradients. The WebGL surfaces are supplied by
-   img-fx/metal-fx; their CSS fallback below is a pure orbital mark. All
-   entrance animations are removed by either reduced-motion path.
+   Skarn IDE — Onboarding, About & Startup Update Modal Styles
+   Flat hairline + surface-elevation separation; no gradients, blur, or glow.
    ========================================================================== */
 
 .onboarding-backdrop,
@@ -17,13 +13,11 @@
   justify-content: center;
   padding: var(--space-5);
   background: var(--scrim);
-  backdrop-filter: blur(var(--blur-scrim));
-  -webkit-backdrop-filter: blur(var(--blur-scrim));
 }
 
 .onboarding-backdrop {
   z-index: 1200;
-  animation: onboarding-fade var(--dur-base) var(--ease-fade);
+  animation: onboarding-fade var(--dur-base) var(--ease-precise);
 }
 
 .onboarding-dialog {
@@ -32,16 +26,10 @@
   width: min(calc(var(--space-6) * 30), 92vw);
   max-height: 88vh;
   overflow: hidden;
-  background: var(--glass-bg-elevated, var(--ink-mid));
-  backdrop-filter: blur(var(--blur-popover, 16px));
-  -webkit-backdrop-filter: blur(var(--blur-popover, 16px));
-  border: 1px solid var(--glass-border, var(--ink-hi));
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
   outline: none;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 24px 64px -16px rgba(0, 0, 0, 0.8),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
   perspective: 1200px;
   transform-style: preserve-3d;
   transform: rotateX(var(--tilt-y, 0deg)) rotateY(var(--tilt-x, 0deg));
@@ -57,21 +45,10 @@
   gap: var(--space-4);
   min-width: 0;
   padding: var(--space-5);
-  background: linear-gradient(180deg, rgba(14, 14, 19, 0.95) 0%, rgba(8, 8, 12, 0.98) 100%);
+  background: var(--surface-1);
   border-right: var(--border-hairline);
   position: relative;
   overflow: hidden;
-}
-
-.onboarding-visual::before {
-  content: "";
-  position: absolute;
-  top: -20%;
-  left: -20%;
-  width: 140%;
-  height: 140%;
-  background: radial-gradient(circle at 40% 30%, rgba(34, 197, 94, 0.05) 0%, transparent 60%);
-  pointer-events: none;
 }
 
 .onboarding-hero-fx,
@@ -80,11 +57,10 @@
   width: 100%;
   height: 100%;
   min-height: calc(var(--space-6) * 9);
-  border: 1px solid var(--hairline-faint, var(--ink-hi));
+  border: 1px solid var(--hairline-faint);
   border-radius: var(--radius-2);
   overflow: hidden;
-  background: radial-gradient(circle at 50% 35%, rgba(18, 18, 28, 0.9) 0%, var(--space-deep, #040405) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  background: var(--surface-canvas);
 }
 
 .onboarding-hero-card {
@@ -124,15 +100,9 @@
   position: absolute;
   width: 220px;
   height: 220px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hairline-faint);
   border-radius: var(--radius-1);
   transform: rotateX(58deg) translateZ(-20px);
-  background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
-  background-size: 22px 22px;
-  mask-image: radial-gradient(circle at center, black 40%, transparent 80%);
-  -webkit-mask-image: radial-gradient(circle at center, black 40%, transparent 80%);
   pointer-events: none;
 }
 
@@ -140,7 +110,7 @@
 .onboarding-hero-grid::after {
   content: "";
   position: absolute;
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--hairline-subtle);
 }
 
 .onboarding-hero-ambient {
@@ -148,10 +118,9 @@
   width: 140px;
   height: 140px;
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle at center, rgba(34, 197, 94, 0.15) 0%, rgba(56, 189, 248, 0.08) 45%, transparent 70%);
-  filter: blur(16px);
+  border: 1px solid var(--hairline-faint);
+  background: var(--tint-accent);
   pointer-events: none;
-  animation: float-subtle 4s ease-in-out infinite;
 }
 
 .onboarding-hero-centerpiece {
@@ -160,15 +129,13 @@
   align-items: center;
   justify-content: center;
   transform-style: preserve-3d;
-  animation: float-subtle 3.2s ease-in-out infinite;
 }
 
 .onboarding-hero-pulse-ring {
   position: absolute;
   inset: -12px;
   border-radius: var(--radius-pill);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  animation: ripple-ring 2.8s cubic-bezier(0.2, 0.8, 0.4, 1) infinite;
+  border: 1px solid var(--tint-ok-strong);
   pointer-events: none;
 }
 
@@ -210,8 +177,7 @@
   line-height: var(--type-sm-lh);
   font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-normal);
-  color: var(--fg-bright, #ffffff);
-  text-shadow: 0 0 12px rgba(255, 255, 255, 0.2);
+  color: var(--fg-bright);
 }
 
 .onboarding-hero-sub {
@@ -243,15 +209,7 @@
   overflow: hidden;
 }
 
-.onboarding-visual-rule::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-  animation: shimmer-sweep 3s ease-in-out infinite;
-}
-
-/* --- 3D Gyroscopic Brand Mark --------------------------------------------- */
+/* --- Gyroscopic Brand Mark ------------------------------------------------ */
 
 .onboarding-brand-mark {
   position: relative;
@@ -278,28 +236,25 @@
   position: absolute;
   inset: 4px;
   border-radius: var(--radius-pill);
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--hairline-active);
   pointer-events: none;
 }
 
 .onboarding-ring-equator {
-  animation: gyro-orbit-equator 7.2s linear infinite;
-  box-shadow: 0 0 8px rgba(255, 255, 255, 0.1);
+  border-color: var(--hairline-active);
 }
 
 .onboarding-ring-polar {
-  border-color: rgba(56, 189, 248, 0.35);
-  animation: gyro-orbit-polar 10.8s linear infinite;
+  border-color: var(--tint-info);
 }
 
 .onboarding-brand-shadow {
   position: absolute;
   bottom: -6px;
   width: 60%;
-  height: 8px;
+  height: 2px;
   border-radius: var(--radius-pill);
-  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.7) 0%, transparent 75%);
-  filter: blur(2px);
+  background: var(--hairline-faint);
   pointer-events: none;
 }
 
@@ -307,19 +262,15 @@
   position: absolute;
   inset: 34%;
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle at 35% 30%, #ffffff 0%, var(--moonlight-300, #e4e9f2) 40%, #1f2029 85%, #08080c 100%);
-  box-shadow:
-    0 0 16px rgba(255, 255, 255, 0.3),
-    0 0 32px var(--glow-green, rgba(34, 197, 94, 0.25)),
-    inset 0 1px 1px rgba(255, 255, 255, 0.8),
-    inset 0 -2px 4px rgba(0, 0, 0, 0.8);
+  background: var(--mono-300);
+  border: 1px solid var(--mono-100);
   z-index: 2;
 }
 
 .onboarding-brand-satellite {
   position: absolute;
   inset: 0;
-  animation: onboarding-orbit calc(var(--dur-long) * 4) linear infinite;
+  animation: onboarding-orbit var(--dur-splash) var(--ease-linear) infinite;
   z-index: 3;
 }
 
@@ -331,10 +282,8 @@
   width: calc(var(--space-1) * 1.2);
   height: calc(var(--space-1) * 1.2);
   border-radius: var(--radius-pill);
-  background: #ffffff;
+  background: var(--fg-bright);
   transform: translateX(-50%);
-  box-shadow: 0 0 8px 1px #ffffff, 0 0 16px var(--glow-green, rgba(34, 197, 94, 0.4));
-  animation: satellite-pulse 2.4s ease-in-out infinite;
 }
 
 .onboarding-content-mark {
@@ -354,8 +303,8 @@
   width: calc(var(--space-6) * 1.8);
   height: calc(var(--space-6) * 1.8);
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle at center, rgba(30, 30, 42, 0.6) 0%, var(--ink-low) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 4px 16px rgba(0, 0, 0, 0.4);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
 }
 
 .onboarding-metal-target .onboarding-brand-mark {
@@ -388,12 +337,23 @@
   border-radius: var(--radius-1);
   font-size: var(--type-sm);
   line-height: var(--type-sm-lh);
-  transition: color var(--dur-instant) var(--ease-calm), background-color var(--dur-instant) var(--ease-calm);
+  cursor: pointer;
+  transition: color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm);
 }
 
 .onboarding-skip:hover {
   color: var(--fg-default);
-  background: var(--ink-faint);
+  background: var(--surface-hover);
+}
+
+.onboarding-skip:focus-visible,
+.onboarding-dot:focus-visible,
+.onboarding-button:focus-visible,
+.about-button:focus-visible,
+.about-repo:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 2px;
 }
 
 .onboarding-eyebrow {
@@ -436,6 +396,7 @@
   padding: var(--space-1) 0;
   background: transparent;
   border: 0;
+  cursor: pointer;
 }
 
 .onboarding-dot-fill {
@@ -466,22 +427,30 @@
   line-height: var(--type-sm-lh);
   color: var(--fg-default);
   background: transparent;
-  transition: background-color var(--dur-instant) var(--ease-calm), border-color var(--dur-instant) var(--ease-calm);
+  cursor: pointer;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .onboarding-button-primary,
 .about-button-primary {
-  background: var(--ink-hi);
+  background: var(--surface-3);
+  border-color: var(--hairline-active);
 }
 
-.onboarding-button-primary:hover,
-.about-button-primary:hover {
-  background: var(--ink-rule);
+.onboarding-button-primary:hover:not(:disabled),
+.about-button-primary:hover:not(:disabled) {
+  background: var(--surface-active);
 }
 
-.onboarding-button-quiet:hover,
-.about-button:hover {
-  background: var(--ink-faint);
+.onboarding-button-quiet:hover:not(:disabled),
+.about-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.onboarding-button:active:not(:disabled),
+.about-button:active:not(:disabled) {
+  background: var(--surface-active);
 }
 
 .onboarding-button:disabled,
@@ -503,7 +472,7 @@
 
 .about-backdrop {
   z-index: 1100;
-  animation: onboarding-fade var(--dur-base) var(--ease-fade);
+  animation: onboarding-fade var(--dur-base) var(--ease-precise);
 }
 
 .about-dialog {
@@ -514,15 +483,9 @@
   min-height: calc(var(--space-6) * 9);
   padding: var(--space-5);
   text-align: center;
-  background: var(--glass-bg-elevated, var(--ink-mid));
-  backdrop-filter: blur(var(--blur-popover, 16px));
-  -webkit-backdrop-filter: blur(var(--blur-popover, 16px));
-  border: 1px solid var(--glass-border, var(--ink-hi));
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    0 24px 48px -12px rgba(0, 0, 0, 0.75),
-    0 0 0 1px rgba(255, 255, 255, 0.05);
   perspective: 1000px;
   transform-style: preserve-3d;
   transform: rotateX(var(--tilt-y, 0deg)) rotateY(var(--tilt-x, 0deg));
@@ -537,7 +500,6 @@
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
   color: var(--fg-default);
-  text-shadow: 0 0 16px rgba(255, 255, 255, 0.25);
 }
 
 .about-version {
@@ -545,13 +507,12 @@
   display: inline-flex;
   align-items: center;
   padding: 2px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-pill);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
-  color: var(--moonlight-400, var(--fg-muted));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  color: var(--mono-400);
 }
 
 .about-rule {
@@ -561,14 +522,6 @@
   margin: var(--space-3) 0;
   background: var(--ink-hi);
   overflow: hidden;
-}
-
-.about-rule::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-  animation: shimmer-sweep 3.5s ease-in-out infinite;
 }
 
 .about-license {
@@ -587,7 +540,7 @@
 }
 
 .about-repo:hover {
-  color: var(--fg-default);
+  color: var(--fg-bright);
   text-decoration-color: var(--fg-muted);
 }
 
@@ -626,9 +579,8 @@
 /* --- Startup update prompt ------------------------------------------------ */
 
 .update-backdrop {
-  /* Above the onboarding wizard: an update prompt must not hide behind it. */
   z-index: 1300;
-  animation: onboarding-fade var(--dur-base) var(--ease-fade);
+  animation: onboarding-fade var(--dur-base) var(--ease-precise);
 }
 
 .update-dialog {
@@ -637,8 +589,8 @@
   width: min(calc(var(--space-6) * 11), 92vw);
   padding: var(--space-5);
   text-align: center;
-  background: var(--ink-mid);
-  border: var(--border-hairline);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
   animation: onboarding-rise var(--dur-base) var(--ease-precise);
 }
@@ -722,10 +674,7 @@
   .about-backdrop,
   .about-dialog,
   .update-backdrop,
-  .update-dialog {
-    animation: none;
-  }
-
+  .update-dialog,
   .onboarding-brand-satellite {
     animation: none;
   }
@@ -749,8 +698,7 @@
 }
 
 /* --- Small windows --------------------------------------------------------- */
-/* Short viewport: drop the forced hero/body min-heights and let the two
-   dialog columns scroll instead of clipping their content. */
+
 @media (max-height: 620px) {
   .onboarding-visual,
   .onboarding-content {
@@ -759,10 +707,7 @@
 
   .onboarding-hero-fx,
   .onboarding-hero-fallback,
-  .onboarding-hero-card {
-    min-height: 0;
-  }
-
+  .onboarding-hero-card,
   .onboarding-body {
     min-height: 0;
   }
@@ -772,7 +717,6 @@
   }
 }
 
-/* Very narrow viewport: stack the two dialog columns and scroll the dialog. */
 @media (max-width: 560px) {
   .onboarding-dialog {
     grid-template-columns: 1fr;

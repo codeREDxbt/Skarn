@@ -50,20 +50,20 @@ export const ThinkingOrb: React.FC<ThinkingOrbProps> = ({
           <radialGradient id={coreGradId} cx="0.38" cy="0.32" r="0.9">
             <stop offset="0%" stopColor="var(--fg-bright)" />
             <stop offset="65%" stopColor="var(--c-f5f6f8)" />
-            <stop offset="100%" stopColor="var(--moonlight-400)" />
+            <stop offset="100%" stopColor="var(--mono-400)" />
           </radialGradient>
 
           {/* Tilted Orbital Track Gradient */}
           <linearGradient id={ringGradId} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="var(--moonlight-200)" stopOpacity="0.95" />
-            <stop offset="50%" stopColor="var(--moonlight-400)" stopOpacity="0.6" />
-            <stop offset="100%" stopColor="var(--moonlight-700)" stopOpacity="0.35" />
+            <stop offset="0%" stopColor="var(--mono-200)" stopOpacity="0.95" />
+            <stop offset="50%" stopColor="var(--mono-400)" stopOpacity="0.6" />
+            <stop offset="100%" stopColor="var(--mono-700)" stopOpacity="0.35" />
           </linearGradient>
 
           {/* Fluid Ring Pulse Gradient */}
           <radialGradient id={pulseGradId} cx="0.5" cy="0.5" r="0.5">
-            <stop offset="70%" stopColor="var(--moonlight-400)" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="var(--moonlight-700)" stopOpacity="0" />
+            <stop offset="70%" stopColor="var(--mono-400)" stopOpacity="0.4" />
+            <stop offset="100%" stopColor="var(--mono-700)" stopOpacity="0" />
           </radialGradient>
 
           {/* Soft high-DPI glow filter */}

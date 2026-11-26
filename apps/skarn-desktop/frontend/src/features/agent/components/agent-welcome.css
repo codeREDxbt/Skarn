@@ -109,23 +109,4 @@
   transform-style: preserve-3d;
 }
 
-/* Reduced-motion compliance */
-@media (prefers-reduced-motion: reduce) {
-  .agent-welcome-brand-ambient,
-  .agent-welcome-brand-stage,
-  .agent-welcome-pulse-ring,
-  .agent-welcome-brand-mark .onboarding-ring-equator,
-  .agent-welcome-brand-mark .onboarding-ring-polar,
-  .agent-welcome-brand-mark .onboarding-brand-satellite {
-    animation: none !important;
-  }
-}
-
-:root[data-reduced-motion="true"] .agent-welcome-brand-ambient,
-:root[data-reduced-motion="true"] .agent-welcome-brand-stage,
-:root[data-reduced-motion="true"] .agent-welcome-pulse-ring,
-:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-ring-equator,
-:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-ring-polar,
-:root[data-reduced-motion="true"] .agent-welcome-brand-mark .onboarding-brand-satellite {
-  animation: none !important;
-}
+/* Reduced-motion compliance (loops frozen by base.css) */

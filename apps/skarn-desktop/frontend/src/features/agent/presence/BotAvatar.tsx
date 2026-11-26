@@ -66,19 +66,19 @@ export const BotAvatar: React.FC<BotAvatarProps> = ({
           <radialGradient id={`${gradId}-core`} cx="0.38" cy="0.32" r="0.9">
             <stop offset="0%" stopColor="var(--fg-bright)" />
             <stop offset="70%" stopColor="var(--c-f5f6f8)" />
-            <stop offset="100%" stopColor="var(--moonlight-400)" />
+            <stop offset="100%" stopColor="var(--mono-400)" />
           </radialGradient>
           <linearGradient id={`${gradId}-ring`} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="var(--moonlight-200)" />
-            <stop offset="55%" stopColor="var(--moonlight-400)" />
-            <stop offset="100%" stopColor="var(--moonlight-700)" />
+            <stop offset="0%" stopColor="var(--mono-200)" />
+            <stop offset="55%" stopColor="var(--mono-400)" />
+            <stop offset="100%" stopColor="var(--mono-700)" />
           </linearGradient>
         </defs>
 
         {isOrbitalPlanet ? (
-          // --- Official Selora Living Logo-Mark / Orbital Planet Companion ---
+          // --- Official Skarn Living Logo-Mark / Orbital Planet Companion ---
           <g className="skarn-planet-mark">
-            {/* Soft moonlight atmospheric halo */}
+            {/* Soft monochrome atmospheric halo */}
             <circle cx="12" cy="12" r="10" fill="var(--c-rgba-205-214-228-0p12)" className="skarn-orb-halo" />
 
             {/* Tilted orbital ring (-18deg like logo-mark.svg) */}
@@ -96,7 +96,7 @@ export const BotAvatar: React.FC<BotAvatarProps> = ({
             />
 
             {/* Satellite moon on the orbital ring */}
-            <circle cx="18" cy="8.5" r="1.5" fill="var(--moonlight-300)" className="skarn-orb-sat" />
+            <circle cx="18" cy="8.5" r="1.5" fill="var(--mono-300)" className="skarn-orb-sat" />
 
             {/* Core planet star */}
             <circle
@@ -108,7 +108,7 @@ export const BotAvatar: React.FC<BotAvatarProps> = ({
             />
 
             {/* Specular glint */}
-            <circle cx="10" cy="10" r="1.4" fill="var(--moonlight-300)" opacity="0.8" />
+            <circle cx="10" cy="10" r="1.4" fill="var(--mono-300)" opacity="0.8" />
 
             {/* Blinking eyes / expressions */}
             {status !== 'sleeping' ? (

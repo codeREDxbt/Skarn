@@ -1,11 +1,8 @@
 /* ==========================================================================
-   Selora IDE — Phase Z5c keyboard cheat sheet
+   Skarn — Keyboard cheat sheet modal
    --------------------------------------------------------------------------
-   Modal dialog on the sanctioned --ink-mid surface with the same backdrop
-   pattern as the command palette (--scrim + --blur-surface). Tokens only
-   (DESIGN_TOKENS.md §12; PHASE_Z2_DESIGN §13): no hex literals, no raw px
-   outside layout arithmetic on --space-*, no shadows, no gradients. One-shot
-   fade/bloom only; base.css disables both under either reduced-motion path.
+   Flat --ink-mid modal over --scrim backdrop. Zero frosted blur, zero
+   shadows, zero gradients. Keyboard-initiated open is instant (0ms).
    ========================================================================== */
 
 .cheatsheet-backdrop {
@@ -17,9 +14,6 @@
   justify-content: center;
   padding: var(--space-5);
   background: var(--scrim);
-  backdrop-filter: blur(var(--blur-surface));
-  -webkit-backdrop-filter: blur(var(--blur-surface));
-  animation: cheatsheet-fade-in var(--dur-quick) var(--ease-fade);
 }
 
 .cheatsheet {
@@ -31,7 +25,6 @@
   background: var(--ink-mid);
   border: var(--border-hairline);
   border-radius: var(--radius-2);
-  animation: cheatsheet-bloom var(--dur-base) var(--ease-precise);
 }
 
 /* --- Header --------------------------------------------------------------- */
@@ -228,25 +221,4 @@
   color: var(--fg-faint);
   background: var(--ink-low);
   border-top: var(--border-hairline);
-}
-
-/* --- One-shot entrance (the only motion in the sheet) --------------------- */
-@keyframes cheatsheet-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes cheatsheet-bloom {
-  from {
-    transform: scale(0.98);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
 }

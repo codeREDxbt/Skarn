@@ -5,103 +5,116 @@
   display: grid;
   place-items: center;
   background: var(--scrim);
-  backdrop-filter: blur(var(--blur-scrim, 16px));
-  -webkit-backdrop-filter: blur(var(--blur-scrim, 16px));
-  animation: modal-fade-in var(--dur-quick, 160ms) var(--ease-calm);
 }
 
 .explorer-dialog {
   width: min(440px, calc(100vw - 32px));
-  padding: var(--space-5, 24px);
-  border: 1px solid var(--glass-border);
-  border-radius: 10px;
-  background: var(--glass-bg-elevated);
-  backdrop-filter: blur(var(--blur-popover, 16px));
-  -webkit-backdrop-filter: blur(var(--blur-popover, 16px));
+  padding: var(--space-5);
+  border: 1px solid var(--hairline-active);
+  border-radius: var(--radius-2);
+  background: var(--surface-3);
   color: var(--fg-default);
-  box-shadow: 0 20px 50px var(--c-rgba-0-0-0-0p85), 0 0 0 1px var(--hairline-faint), 0 0 30px var(--glow-accent);
-  animation: modal-scale-in var(--dur-quick, 160ms) var(--ease-smooth);
 }
 
 .explorer-dialog h3 {
-  margin: 0 0 var(--space-4, 16px);
-  font-size: var(--type-lg, 15px);
-  font-weight: var(--weight-semibold, 600);
+  margin: 0 0 var(--space-4);
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
   color: var(--fg-bright);
   letter-spacing: var(--tracking-tight);
 }
 
 .explorer-dialog label {
   display: grid;
-  gap: var(--space-2, 8px);
-  font-size: var(--type-sm, 12px);
+  gap: var(--space-2);
+  font-size: var(--type-sm);
   color: var(--fg-muted);
 }
 
 .explorer-dialog input {
   width: 100%;
   box-sizing: border-box;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--ink-canvas);
   border: 1px solid var(--hairline-active);
-  border-radius: var(--radius-2, 6px);
+  border-radius: var(--radius-1);
   font-family: var(--font-sans);
-  font-size: var(--type-md, 13px);
+  font-size: var(--type-md);
   color: var(--fg-default);
   outline: none;
-  transition: border-color var(--dur-instant, 80ms) var(--ease-calm), box-shadow var(--dur-instant, 80ms) var(--ease-calm);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
-.explorer-dialog input:focus {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 1px var(--border-focus), 0 0 12px var(--glow-accent);
+.explorer-dialog input:focus-visible {
+  border-color: var(--fg-default);
 }
 
 .explorer-dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: var(--space-2, 8px);
-  margin-top: var(--space-5, 20px);
+  gap: var(--space-2);
+  margin-top: var(--space-5);
 }
 
 .explorer-dialog button {
   padding: 6px 14px;
-  border-radius: var(--radius-2, 6px);
-  font-size: var(--type-sm, 12px);
-  font-weight: var(--weight-medium, 500);
+  border-radius: var(--radius-1);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
   cursor: pointer;
-  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
+}
+
+.explorer-dialog button:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
+.explorer-dialog button:disabled {
+  color: var(--fg-disabled);
+  border-color: var(--ink-hi);
+  cursor: default;
 }
 
 .explorer-dialog button:not(.is-primary):not([type="submit"]) {
   background: transparent;
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--hairline-faint);
   color: var(--fg-muted);
 }
 
-.explorer-dialog button:not(.is-primary):not([type="submit"]):hover {
+.explorer-dialog button:not(.is-primary):not([type="submit"]):hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--fg-default);
-  border-color: var(--glass-border-hover);
+  border-color: var(--hairline-active);
+}
+
+.explorer-dialog button:not(.is-primary):not([type="submit"]):active:not(:disabled) {
+  background: var(--surface-active);
 }
 
 .explorer-dialog button[type="submit"],
 .explorer-dialog button.is-primary {
   background: var(--ok);
-  border: 1px solid transparent;
-  color: #022c15;
-  font-weight: var(--weight-semibold, 600);
-  box-shadow: 0 0 12px var(--glow-green-subtle);
+  border: 1px solid var(--ok);
+  color: var(--ink-canvas);
+  font-weight: var(--weight-semibold);
 }
 
-.explorer-dialog button[type="submit"]:hover,
-.explorer-dialog button.is-primary:hover {
-  filter: brightness(1.1);
-  box-shadow: 0 0 16px var(--glow-green);
+.explorer-dialog button[type="submit"]:hover:not(:disabled),
+.explorer-dialog button.is-primary:hover:not(:disabled) {
+  background: var(--tint-ok-strong);
+  color: var(--ok);
+}
+
+.explorer-dialog button[type="submit"]:active:not(:disabled),
+.explorer-dialog button.is-primary:active:not(:disabled) {
+  background: var(--tint-ok);
 }
 
 .explorer-dialog [role='alert'] {
   color: var(--err);
-  font-size: var(--type-xs, 11px);
-  margin-top: var(--space-2, 8px);
+  font-size: var(--type-xs);
+  margin-top: var(--space-2);
 }

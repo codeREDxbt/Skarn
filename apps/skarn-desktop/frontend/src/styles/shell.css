@@ -1,13 +1,7 @@
 /* ==========================================================================
-   Selora IDE — Phase Z2 component styles (frontend-owned).
-
-   Everything here reads the designer-owned token layer (tokens.css via
-   base.css). No hex literals; no raw px outside layout arithmetic on
-   --space-* (the 0px track fallbacks are structural — DESIGN §1: collapsed,
-   not a magic size); no box-shadow; no gradient; no font-weight above 600;
-   no animation shorter than --dur-instant or longer than --dur-long.
-   Region sizes are inline custom properties written from React state
-   (DESIGN §1) — never CSS constants.
+   Skarn IDE — Shell Grid & Workbench Chrome Styles
+   Flat hairline + surface-elevation separation; sharp 0/2/4px identity;
+   zero !important layout overrides; explicit property transitions; 0ms keyboard UI.
    ========================================================================== */
 
 /* --- 1. The seven-region grid ------------------------------------------- */
@@ -29,28 +23,28 @@
   min-height: 0;
   display: grid;
   grid-template-columns:
-    var(--chrome-activitybar-w)      /* 2 · activity bar — fixed, token */
-    var(--sidebar-w, 0px)            /* 3 · primary sidebar, 0 when collapsed */
-    var(--hit-zone-sidebar, 0px)     /* sidebar resize handle track */
-    1fr                              /* 4+6 · center column */
-    var(--hit-zone-agent, 0px)       /* agent-dock resize handle track */
-    var(--agent-w, 0px);             /* 5 · agent dock, 0 when collapsed */
+    var(--chrome-activitybar-w)
+    var(--sidebar-w, 0px)
+    var(--hit-zone-sidebar, 0px)
+    1fr
+    var(--hit-zone-agent, 0px)
+    var(--agent-w, 0px);
 }
 
-/* Explicit collapse states to eliminate ghost grid tracks */
+/* Explicit collapse states override inherited .shell inline track variables */
 .workbench[data-sidebar-open="false"] {
-  --sidebar-w: 0px !important;
-  --hit-zone-sidebar: 0px !important;
+  --sidebar-w: 0px;
+  --hit-zone-sidebar: 0px;
 }
 
 .workbench[data-agent-open="false"] {
-  --agent-w: 0px !important;
-  --hit-zone-agent: 0px !important;
+  --agent-w: 0px;
+  --hit-zone-agent: 0px;
 }
 
 .workbench[data-bottom-open="false"] {
-  --bottom-h: 0px !important;
-  --hit-zone-bottom: 0px !important;
+  --bottom-h: 0px;
+  --hit-zone-bottom: 0px;
 }
 
 /* Agent Focused View: Agent takes center-stage edge-to-edge next to ActivityBar */
@@ -64,14 +58,14 @@
 .workbench[data-view-mode="agent"] .handle-track-agent,
 .workbench[data-view-mode="agent"] .primary-sidebar-slot,
 .workbench[data-view-mode="agent"] .handle-track-sidebar {
-  display: none !important;
+  display: none;
 }
 
 .workbench[data-view-mode="agent"] .agent-dock-slot {
-  grid-column: 2 / -1 !important;
-  width: 100% !important;
-  min-width: 0 !important;
-  display: flex !important;
+  grid-column: 2 / -1;
+  width: 100%;
+  min-width: 0;
+  display: flex;
 }
 
 /* Agent Focused View when user explicitly has primary sidebar open */
@@ -84,23 +78,23 @@
 }
 
 .workbench[data-view-mode="agent"][data-sidebar-open="true"] .primary-sidebar-slot {
-  grid-column: 2 !important;
-  display: flex !important;
+  grid-column: 2;
+  display: flex;
 }
 
 .workbench[data-view-mode="agent"][data-sidebar-open="true"] .handle-track-sidebar {
-  grid-column: 3 !important;
-  display: flex !important;
+  grid-column: 3;
+  display: flex;
 }
 
 .workbench[data-view-mode="agent"][data-sidebar-open="true"] .agent-dock-slot {
-  grid-column: 4 / -1 !important;
-  width: 100% !important;
-  min-width: 0 !important;
-  display: flex !important;
+  grid-column: 4 / -1;
+  width: 100%;
+  min-width: 0;
+  display: flex;
 }
 
-/* Split View Mode: Agent Workbench + Editor side by side (ZCode Benchmark Default) */
+/* Split View Mode: Agent Workbench + Editor side by side */
 .workbench[data-view-mode="split"] {
   grid-template-columns:
     var(--chrome-activitybar-w)
@@ -123,7 +117,7 @@
   min-width: 0;
 }
 
-/* Editor View Mode: Classic Editor in center, Agent as side dock */
+/* Editor View Mode: Classic Editor in center */
 .workbench[data-view-mode="editor"] {
   grid-template-columns:
     var(--chrome-activitybar-w)
@@ -136,7 +130,7 @@
 
 .workbench[data-view-mode="editor"] .agent-dock-slot,
 .workbench[data-view-mode="editor"] .handle-track-agent {
-  display: none !important;
+  display: none;
 }
 
 .activitybar {
@@ -183,9 +177,9 @@
   min-height: 0;
   display: grid;
   grid-template-rows:
-    1fr                            /* 4 · editor region */
-    var(--hit-zone-bottom, 0px)    /* bottom-dock resize handle track */
-    var(--bottom-h, 0px);          /* 6 · bottom dock, 0 when collapsed */
+    1fr
+    var(--hit-zone-bottom, 0px)
+    var(--bottom-h, 0px);
 }
 
 .editor-region-slot {
@@ -214,7 +208,7 @@
   display: flex;
 }
 
-/* --- 2. Resize handles (DESIGN §4) --------------------------------------- */
+/* --- 2. Resize handles -------------------------------------------------- */
 
 .region-handle {
   flex: 1;
@@ -231,11 +225,6 @@
   cursor: row-resize;
 }
 
-/* The lit 1px line at the boundary center. Transparent at rest — the
-   adjacent region's own hairline is the visual boundary; hover lifts it one
-   ink step; keyboard focus or active drag lights it --fg-default. That lit
-   line IS the focus indicator: the outline is suppressed here on purpose
-   (DESIGN §4 — never an outline around a 6px strip). */
 .region-handle::before {
   content: "";
   position: absolute;
@@ -262,7 +251,7 @@
 }
 
 .region-handle:focus-visible {
-  outline: none; /* replaced by the lit line — see the block comment above */
+  outline: none;
 }
 
 .region-handle:focus-visible::before,
@@ -270,7 +259,7 @@
   background: var(--fg-default);
 }
 
-/* --- 3. Title bar (DESIGN §3.1) ------------------------------------------ */
+/* --- 3. Title bar ------------------------------------------------------- */
 
 .titlebar {
   display: flex;
@@ -279,8 +268,7 @@
   padding-left: var(--space-2);
   background: var(--ink-canvas);
   min-width: 0;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--hairline-faint);
 }
 
 .titlebar-identity {
@@ -292,11 +280,6 @@
 .titlebar-mark {
   display: flex;
   color: var(--fg-default);
-  transition: transform var(--dur-instant) var(--ease-calm);
-}
-
-.titlebar-mark:hover {
-  transform: scale(1.08) rotate(4deg);
 }
 
 .titlebar-title {
@@ -328,17 +311,38 @@
   border: none;
   background: transparent;
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm);
 }
 
 .titlebar-menu-button:hover {
-  background: var(--ink-faint);
+  background: var(--surface-hover);
   color: var(--fg-default);
 }
 
 .titlebar-menu-button.is-open {
-  background: var(--ink-low);
+  background: var(--surface-active);
   color: var(--fg-default);
+}
+
+.titlebar-menu-button:focus-visible,
+.titlebar-search-trigger:focus-visible,
+.view-mode-pill:focus-visible,
+.window-control:focus-visible,
+.activity-button:focus-visible,
+.activity-motion-toggle:focus-visible,
+.agent-chip:focus-visible,
+.bottom-tab:focus-visible,
+.bottom-close:focus-visible,
+.statusbar-item:focus-visible,
+.statusbar-agent-pill:focus-visible,
+.statusbar-connection:focus-visible,
+.statusbar-connect:focus-visible,
+.empty-action:focus-visible,
+.palette-cat-pill:focus-visible,
+.toast-dismiss:focus-visible,
+.toast-open:focus-visible,
+.problem-copy-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .titlebar-dropdown {
@@ -349,14 +353,10 @@
   min-width: calc(var(--space-4) * 18);
   max-height: calc(var(--space-4) * 20);
   overflow-y: auto;
-  background: var(--c-rgba-22-22-28-0p96);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
   padding: var(--space-1) 0;
-  box-shadow: 0 12px 28px var(--c-rgba-0-0-0-0p55), 0 0 0 1px var(--c-rgba-255-255-255-0p05);
-  animation: fade-slide-down var(--dur-quick, 160ms) var(--ease-precise);
   transform-origin: top left;
 }
 
@@ -375,13 +375,17 @@
   border: none;
   background: transparent;
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm), box-shadow var(--dur-instant) var(--ease-calm);
 }
 
 .titlebar-menu-item:hover:not([disabled]),
 .titlebar-menu-item:focus-visible:not([disabled]) {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
   color: var(--fg-default);
+  outline: none;
+}
+
+.titlebar-menu-item:active:not([disabled]) {
+  background: var(--surface-active);
 }
 
 .titlebar-menu-item[disabled] {
@@ -396,9 +400,9 @@
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   color: var(--fg-faint);
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-2);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
 }
 
 .titlebar-center {
@@ -407,7 +411,7 @@
   align-items: center;
   gap: var(--space-2);
   user-select: none;
-  min-width: 0; /* allows pills to be crowded out before window controls */
+  min-width: 0;
 }
 
 .titlebar-search-trigger {
@@ -416,23 +420,26 @@
   gap: 7px;
   height: 22px;
   padding: 0 10px;
-  background: var(--c-rgba-255-255-255-0p04);
-  border: 1px solid var(--c-rgba-255-255-255-0p09);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-pill);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   color: var(--fg-muted);
   font-size: var(--type-xs);
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
   user-select: none;
 }
 
 .titlebar-search-trigger:hover {
-  background: radial-gradient(circle at top, rgba(255, 255, 255, 0.08), transparent 75%), var(--glow-accent);
-  border-color: rgba(255, 255, 255, 0.22);
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
   color: var(--fg-bright);
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  transform: translateY(-0.5px);
+}
+
+.titlebar-search-trigger:active {
+  background: var(--surface-active);
 }
 
 .titlebar-search-icon {
@@ -442,7 +449,7 @@
 
 .titlebar-search-trigger:hover .titlebar-search-icon {
   opacity: 1;
-  color: var(--moonlight-300, #e4e9f2);
+  color: var(--mono-300);
 }
 
 .titlebar-search-text {
@@ -458,16 +465,16 @@
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 1px 5px;
-  background: var(--c-rgba-255-255-255-0p06);
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
   color: var(--fg-faint);
   line-height: 12px;
 }
 
 .titlebar-search-trigger:hover .titlebar-search-kbd {
   color: var(--fg-muted);
-  border-color: var(--glow-accent-strong);
+  border-color: var(--hairline-active);
 }
 
 .titlebar-session-badge {
@@ -475,27 +482,26 @@
   align-items: center;
   gap: 6px;
   padding: 2px 8px;
-  background: var(--c-rgba-255-255-255-0p04);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-1);
   font-size: var(--type-xs);
   color: var(--fg-default);
   font-weight: 500;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .titlebar-session-badge:hover {
-  background: var(--glow-accent);
-  border-color: var(--glass-border-hover);
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
 }
 
 .session-status-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: var(--ok);
-  box-shadow: 0 0 6px var(--c-rgba-34-197-94-0p5);
-  animation: pulse-glow 2.5s var(--ease-orbital) infinite;
 }
 
 .titlebar-git-pill {
@@ -504,25 +510,27 @@
   gap: 5px;
   padding: 2px 8px;
   background: transparent;
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-1);
   font-size: var(--type-xs);
   color: var(--fg-muted);
   font-family: var(--font-mono);
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .titlebar-git-pill:hover {
-  background: var(--c-rgba-255-255-255-0p06);
-  border-color: var(--glass-border-hover);
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
   color: var(--fg-default);
 }
 
 .titlebar-view-switcher {
   display: inline-flex;
   align-items: center;
-  background: var(--ink-base);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-canvas);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-1);
   padding: 1px;
   gap: 1px;
@@ -533,32 +541,34 @@
   align-items: center;
   gap: 5px;
   padding: 2px 8px;
-  border: none;
-  border-radius: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
   background: transparent;
   color: var(--fg-muted);
   font-size: var(--type-xs);
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
 }
 
 .view-mode-pill:hover {
   color: var(--fg-default);
-  background: var(--ink-low);
+  background: var(--surface-hover);
+}
+
+.view-mode-pill:active {
+  background: var(--surface-active);
 }
 
 .view-mode-pill.is-active {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.06) 100%), var(--ink-mid);
+  background: var(--surface-3);
   color: var(--fg-bright);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 4px rgba(0, 0, 0, 0.4);
+  border-color: var(--hairline-active);
 }
 
 .titlebar-right {
   display: flex;
   align-items: stretch;
-  flex-shrink: 0; /* bell + window controls stay on screen at any width */
+  flex-shrink: 0;
   margin-left: var(--space-1);
 }
 
@@ -568,7 +578,7 @@
 }
 
 .window-control {
-  width: calc(var(--space-1) * 11); /* 44px keeps the 4px grid (DESIGN §3.1) */
+  width: calc(var(--space-1) * 11);
   height: var(--chrome-titlebar-h);
   display: grid;
   place-items: center;
@@ -576,24 +586,25 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .window-control:hover {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
   color: var(--fg-default);
 }
 
 .window-control:active {
-  transform: scale(0.92);
+  background: var(--surface-active);
 }
 
 .window-control.is-close:hover {
-  background: var(--c-rgba-220-38-38-0p85);
+  background: var(--err);
   color: var(--fg-bright);
 }
 
-/* --- 3a. Notification center (Z5a) --------------------------------------- */
+/* --- 3a. Notification center -------------------------------------------- */
 
 .notification-center {
   position: relative;
@@ -610,11 +621,12 @@
   place-items: center;
   padding: 0;
   border: none;
-  border-radius: 0;
+  border-radius: var(--radius-0);
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .notification-bell:hover,
@@ -661,8 +673,8 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--ink-mid);
-  border: var(--border-hairline);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
   animation: fade-slide-down var(--dur-quick) var(--ease-precise);
   transform-origin: top right;
@@ -714,7 +726,8 @@
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .notification-action:hover:not(:disabled),
@@ -831,7 +844,7 @@
   line-height: var(--type-xs-lh);
 }
 
-/* --- 4. Activity bar (DESIGN §3.2) --------------------------------------- */
+/* --- 4. Activity bar ---------------------------------------------------- */
 
 .activity-item-wrapper {
   position: relative;
@@ -848,29 +861,30 @@
   display: grid;
   place-items: center;
   color: var(--fg-muted);
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .activity-button:hover {
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-hover);
   color: var(--fg-default);
-  transform: translateY(-0.5px);
 }
 
 .activity-button:active {
-  transform: scale(0.94);
+  background: var(--surface-active);
 }
 
 .activity-button.is-selected {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.05) 100%), var(--ink-mid);
+  background: var(--surface-3);
+  border-color: var(--hairline-subtle);
   color: var(--fg-bright);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 0 12px rgba(255, 255, 255, 0.06);
 }
 
-/* The 2×16 painted leading edge mark (REVAMP_SPEC §7 bend 3) */
+/* Leading edge mark for selected rail slot */
 .activity-button.is-selected::before {
   content: "";
   position: absolute;
@@ -878,21 +892,8 @@
   top: calc(50% - var(--space-4) / 2);
   width: var(--chrome-edge-mark-w);
   height: var(--space-4);
-  background: linear-gradient(180deg, var(--moonlight-200, #f2f5fa), var(--moonlight-400, #cdd6e4));
+  background: var(--mono-200);
   border-radius: var(--radius-pill);
-  box-shadow: 0 0 8px rgba(205, 214, 228, 0.65), 0 0 16px rgba(56, 189, 248, 0.35);
-  animation: edge-mark-slide var(--dur-quick) var(--ease-precise);
-}
-
-@keyframes edge-mark-slide {
-  from {
-    opacity: 0;
-    transform: scaleY(0.4);
-  }
-  to {
-    opacity: 1;
-    transform: scaleY(1);
-  }
 }
 
 .activity-badge {
@@ -913,40 +914,27 @@
   justify-content: center;
   user-select: none;
   pointer-events: none;
-  box-shadow: 0 1px 4px var(--c-rgba-0-0-0-0p4);
 }
 
 .activity-badge.is-error {
   background: var(--err);
   color: var(--fg-bright);
-  box-shadow: 0 0 6px var(--c-rgba-220-38-38-0p6);
 }
 
 .activity-badge.is-warn {
   background: var(--warn);
   color: var(--ink-canvas);
-  box-shadow: 0 0 6px var(--c-rgba-212-160-23-0p5);
 }
 
 .activity-badge.is-git {
-  background: var(--hairline-active);
+  background: var(--surface-3);
   color: var(--fg-default);
-  border: 1px solid var(--c-rgba-255-255-255-0p2);
+  border: 1px solid var(--hairline-active);
 }
 
-.activity-badge.is-pulse {
-  animation: badge-pulse 2s infinite ease-in-out;
-}
-
-@keyframes badge-pulse {
-  0%, 100% {
-    transform: scale(1);
-    opacity: 0.9;
-  }
-  50% {
-    transform: scale(1.15);
-    opacity: 1;
-  }
+.activity-badge.is-success {
+  background: var(--ok);
+  color: var(--ink-canvas);
 }
 
 .activity-tooltip {
@@ -954,9 +942,8 @@
   left: calc(100% + 10px);
   top: 50%;
   transform: translateY(-50%) translateX(-4px);
-  background: var(--c-rgba-18-18-22-0p96);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-1);
   padding: 3px 8px;
   font-size: var(--type-xs);
@@ -965,9 +952,10 @@
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
-  transition: opacity var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-calm), visibility var(--dur-instant);
+  transition: opacity var(--dur-instant) var(--ease-calm),
+    transform var(--dur-instant) var(--ease-calm),
+    visibility var(--dur-instant);
   z-index: 100;
-  box-shadow: 0 4px 14px var(--c-rgba-0-0-0-0p5);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -984,9 +972,9 @@
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--fg-faint);
-  background: var(--glow-accent);
+  background: var(--surface-2);
   padding: 1px 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
 }
 
 .activity-motion-toggle {
@@ -999,13 +987,18 @@
   cursor: pointer;
   background: transparent;
   border: none;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
   user-select: none;
 }
 
 .activity-motion-toggle:hover {
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-hover);
   color: var(--fg-default);
+}
+
+.activity-motion-toggle:active {
+  background: var(--surface-active);
 }
 
 .activity-motion-toggle.is-calm {
@@ -1014,14 +1007,14 @@
 }
 
 .activity-motion-toggle.is-active {
-  color: var(--moonlight-400, #cdd6e4);
+  color: var(--mono-400);
 }
 
 .activity-spacer {
   flex: 1;
 }
 
-/* --- 5. Primary sidebar (DESIGN §3.3) ------------------------------------- */
+/* --- 5. Primary sidebar ------------------------------------------------- */
 
 .primary-sidebar {
   flex: 1;
@@ -1081,11 +1074,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  background: rgba(14, 14, 20, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-2);
   padding: var(--space-3);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 4px 14px rgba(0, 0, 0, 0.3);
   margin-top: var(--space-3);
 }
 
@@ -1095,7 +1087,7 @@
   gap: var(--space-2);
   align-items: center;
   padding: 3px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--hairline-faint);
 }
 
 .settings-echo-row:last-child {
@@ -1112,12 +1104,12 @@
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
-  color: var(--moonlight-200, var(--fg-default));
+  color: var(--mono-200);
   text-align: right;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-2);
   padding: 2px 6px;
-  border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-1);
+  border: 1px solid var(--hairline-faint);
 }
 
 .settings-later {
@@ -1126,7 +1118,7 @@
   color: var(--fg-faint);
 }
 
-/* --- 6. Editor region (DESIGN §3.4) --------------------------------------- */
+/* --- 6. Editor region --------------------------------------------------- */
 
 .editor-region {
   flex: 1;
@@ -1152,7 +1144,7 @@
   padding: var(--space-6);
 }
 
-/* --- 7. Agent dock (DESIGN §3.5) ------------------------------------------- */
+/* --- 7. Agent dock ------------------------------------------------------ */
 
 .agent-dock {
   flex: 1;
@@ -1174,7 +1166,7 @@
 }
 
 .agent-presence-slot {
-  width: calc(var(--space-1) * 5); /* the 20px Z3 orb slot (DESIGN §3.5) */
+  width: calc(var(--space-1) * 5);
   height: calc(var(--space-1) * 5);
   display: grid;
   place-items: center;
@@ -1235,7 +1227,9 @@
   line-height: var(--type-sm-lh);
   color: var(--fg-muted);
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .agent-chip:hover {
@@ -1244,8 +1238,10 @@
   border-color: var(--ink-rule);
 }
 
-/* The composer card visual (REVAMP_SPEC §2.1): --ink-mid fill lifts one ink
-   step off the dock; inert in Z2 — the border beam mount point is Z3's. */
+.agent-chip:active {
+  background: var(--surface-active);
+}
+
 .agent-composer {
   margin: var(--space-3);
   padding: var(--space-3);
@@ -1261,7 +1257,7 @@
   color: var(--fg-faint);
 }
 
-/* --- 8. Bottom dock (DESIGN §3.6) ------------------------------------------ */
+/* --- 8. Bottom dock ----------------------------------------------------- */
 
 .bottom-dock {
   flex: 1;
@@ -1311,8 +1307,7 @@
   right: 0;
   bottom: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--moonlight-200, #f2f5fa) 20%, var(--moonlight-200, #f2f5fa) 80%, transparent);
-  box-shadow: 0 -1px 8px rgba(255, 255, 255, 0.45);
+  background: var(--mono-200);
 }
 
 .bottom-close {
@@ -1337,7 +1332,7 @@
   padding: var(--space-3);
 }
 
-/* --- 9. Status bar (DESIGN §3.7) ------------------------------------------- */
+/* --- 9. Status bar ------------------------------------------------------ */
 
 .statusbar {
   display: flex;
@@ -1346,7 +1341,6 @@
   padding: 0 var(--space-3);
   background: var(--ink-low);
   border-top: var(--border-hairline);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   min-width: 0;
@@ -1363,7 +1357,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-width: 0; /* lets the workspace name truncate instead of pushing right items out */
+  min-width: 0;
 }
 
 .statusbar-center {
@@ -1392,18 +1386,19 @@
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
   user-select: none;
   text-decoration: none;
 }
 
 .statusbar-item:hover {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
   color: var(--fg-default);
 }
 
 .statusbar-item:active {
-  background: var(--c-rgba-255-255-255-0p12);
+  background: var(--surface-active);
 }
 
 .statusbar-workspace {
@@ -1433,7 +1428,7 @@
 }
 
 .statusbar-git .sync-icon.is-spinning {
-  animation: spin-smooth 0.8s linear infinite;
+  animation: spin-smooth var(--dur-max) var(--ease-linear) infinite;
   opacity: 1;
   color: var(--ok);
 }
@@ -1443,24 +1438,30 @@
   align-items: center;
   gap: 6px;
   padding: 1px 10px;
-  background: var(--c-rgba-255-255-255-0p03);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-pill);
   color: var(--fg-muted);
   font-size: var(--type-xs);
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .statusbar-agent-pill:hover {
-  background: var(--hairline-faint);
-  border-color: var(--glass-border-hover);
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
   color: var(--fg-default);
 }
 
+.statusbar-agent-pill:active {
+  background: var(--surface-active);
+}
+
 .statusbar-agent-pill.is-active {
-  background: var(--c-rgba-34-197-94-0p08);
-  border-color: var(--c-rgba-34-197-94-0p3);
+  background: var(--tint-ok);
+  border-color: var(--tint-ok-strong);
   color: var(--ok);
 }
 
@@ -1468,20 +1469,16 @@
   position: relative;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: var(--ok);
-  box-shadow: 0 0 6px var(--c-rgba-34-197-94-0p6);
 }
 
 .agent-radar-dot.is-thinking {
-  background: var(--c-38bdf8);
-  box-shadow: 0 0 8px var(--c-rgba-56-189-248-0p8);
-  animation: pulse-glow 1.2s var(--ease-orbital) infinite;
+  background: var(--info);
 }
 
 .agent-radar-dot.is-waiting {
   background: var(--warn);
-  box-shadow: 0 0 8px var(--c-rgba-212-160-23-0p8);
 }
 
 .statusbar-diagnostics {
@@ -1517,10 +1514,26 @@
   align-items: center;
   gap: 6px;
   padding: 1px 8px;
+  border: none;
+  background: transparent;
+  font: inherit;
   border-radius: var(--radius-1);
   color: var(--fg-muted);
   font-size: var(--type-xs);
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
+}
+
+button.statusbar-connection {
+  cursor: pointer;
+}
+
+button.statusbar-connection:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+button.statusbar-connection:disabled {
+  cursor: default;
 }
 
 .statusbar-connection.is-connected {
@@ -1541,25 +1554,23 @@
   position: absolute;
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--ok);
-  opacity: 0;
-  animation: ripple-ring 2.2s infinite cubic-bezier(0, 0.2, 0.8, 1);
+  opacity: 0.45;
 }
 
 .statusbar-connection.is-connected .statusbar-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: var(--ok);
-  box-shadow: 0 0 6px var(--c-rgba-34-197-94-0p5);
   margin-right: 0;
 }
 
 .statusbar-connection.is-disconnected .statusbar-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   border: 1.5px solid var(--fg-muted);
   background: transparent;
   box-sizing: border-box;
@@ -1573,11 +1584,12 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .statusbar-connect:hover:not([disabled]) {
-  background: var(--glow-accent);
+  background: var(--surface-hover);
 }
 
 .statusbar-connect[disabled] {
@@ -1587,7 +1599,7 @@
   cursor: default;
 }
 
-/* --- 10. Empty states (DESIGN §6) ------------------------------------------ */
+/* --- 10. Empty states --------------------------------------------------- */
 
 .empty-state {
   display: flex;
@@ -1618,7 +1630,6 @@
   gap: var(--space-2);
 }
 
-/* UI_SPEC §12's button: --ink-mid fill, 32px tall, --radius-1. */
 .empty-action {
   height: calc(var(--space-4) * 2);
   padding: 0 var(--space-4);
@@ -1628,27 +1639,22 @@
   border-radius: var(--radius-1);
   font-size: var(--type-md);
   line-height: var(--type-md-lh);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 6px rgba(0, 0, 0, 0.35);
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm), transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-instant) var(--ease-calm);
+  cursor: pointer;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .empty-action:hover:not([disabled]) {
   background: var(--ink-hi);
   color: var(--fg-bright);
-  border-color: rgba(255, 255, 255, 0.2);
-  transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.45);
+  border-color: var(--hairline-active);
 }
 
 .empty-action:active:not([disabled]) {
-  transform: translateY(1px);
-  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.4);
+  background: var(--surface-active);
 }
 
-/* The disabled state must be unmistakable, not just fainter text: owner
-   testing read the ink-mid fill + --fg-disabled text as a clickable button.
-   Disabled drops the fill to the ghost look (transparent + hairline),
-   matching the agent-chip disabled family. */
 .empty-action[disabled] {
   background: transparent;
   border: var(--border-hairline);
@@ -1667,44 +1673,30 @@
 .key-chip {
   padding: var(--space-1) var(--space-2);
   background: var(--ink-mid);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hairline-subtle);
   border-radius: var(--radius-1);
-  box-shadow: 0 2px 0 var(--ink-rule), inset 0 1px 0 rgba(255, 255, 255, 0.12);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
-  color: var(--moonlight-400, var(--fg-muted));
+  color: var(--mono-400);
   display: inline-flex;
   align-items: center;
-  transition: transform var(--dur-instant) var(--ease-precise), box-shadow var(--dur-instant) var(--ease-precise), color var(--dur-instant) var(--ease-calm);
 }
 
 .key-chip:hover {
   color: var(--fg-bright);
-  border-color: rgba(255, 255, 255, 0.18);
+  border-color: var(--hairline-active);
 }
 
-/* --- 11. Command palette (UI_SPEC §5, DESIGN §7.2 — Raycast/Spotlight Elevated) --- */
+/* --- 11. Command palette (0ms keyboard-initiated chrome) ---------------- */
 
 .palette-backdrop {
   position: fixed;
   inset: 0;
   z-index: 999;
   background: var(--scrim);
-  backdrop-filter: blur(var(--blur-surface));
-  -webkit-backdrop-filter: blur(var(--blur-surface));
   display: flex;
   justify-content: center;
-  animation: palette-fade-in 0.16s ease-out;
-}
-
-@keyframes palette-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 .palette {
@@ -1716,30 +1708,11 @@
   align-self: flex-start;
   display: flex;
   flex-direction: column;
-  background: var(--glass-bg-elevated, var(--ink-mid));
-  backdrop-filter: blur(var(--blur-popover, 20px));
-  -webkit-backdrop-filter: blur(var(--blur-popover, 20px));
-  border: 1px solid var(--glass-border, var(--border-hairline));
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline-active);
   border-radius: var(--radius-2);
   overflow: hidden;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    0 24px 60px -12px rgba(0, 0, 0, 0.8),
-    0 0 0 1px rgba(255, 255, 255, 0.06);
-  animation: bloom var(--dur-base) cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
-}
-
-/* DESIGN_TOKENS §7.3's bloom, verbatim. */
-@keyframes bloom {
-  from {
-    transform: scale(0.96);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
 }
 
 .palette-input-row {
@@ -1753,12 +1726,12 @@
 .palette-prefix {
   width: 28px;
   height: 28px;
-  border-radius: 7px;
-  background: var(--c-rgba-16-185-129-0p12);
-  border: 1px solid var(--c-rgba-16-185-129-0p25);
+  border-radius: var(--radius-2);
+  background: var(--tint-ok);
+  border: 1px solid var(--tint-ok-strong);
   display: grid;
   place-items: center;
-  color: var(--c-10b981);
+  color: var(--ok);
   flex-shrink: 0;
 }
 
@@ -1767,14 +1740,13 @@
   min-width: 0;
   background: transparent;
   border: 0;
-  outline: none; /* the palette card is the focus surface; the input is always focused while open */
+  outline: none;
   font-size: 15px;
   line-height: 22px;
   color: var(--fg-default);
   letter-spacing: -0.01em;
 }
 
-/* Form A focus: the palette card itself is the visible focus surface. */
 .palette:focus-within {
   border-color: var(--fg-default);
 }
@@ -1788,11 +1760,11 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 500;
-  color: var(--c-9ca3af);
-  background: var(--c-rgba-255-255-255-0p06);
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
 }
 
 /* Category Filter Tabs */
@@ -1800,33 +1772,32 @@
   display: flex;
   gap: 6px;
   padding: 8px 14px;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
-  background: var(--c-rgba-0-0-0-0p2);
+  border-bottom: 1px solid var(--hairline-faint);
+  background: var(--surface-sunken);
   overflow-x: auto;
 }
 
 .palette-cat-pill {
   background: transparent;
   border: 1px solid transparent;
-  color: var(--c-9ca3af);
+  color: var(--fg-muted);
   font-size: 11.5px;
   font-weight: 500;
   padding: 3px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   cursor: pointer;
-  transition: all 0.12s ease;
   white-space: nowrap;
 }
 
 .palette-cat-pill:hover {
-  background: var(--c-rgba-255-255-255-0p06);
-  color: var(--c-f3f4f6);
+  background: var(--surface-hover);
+  color: var(--fg-bright);
 }
 
 .palette-cat-pill.is-active {
-  background: var(--c-rgba-16-185-129-0p14);
-  border-color: var(--c-rgba-16-185-129-0p35);
-  color: var(--c-34d399);
+  background: var(--tint-ok);
+  border-color: var(--tint-ok-strong);
+  color: var(--ok);
 }
 
 /* Command List */
@@ -1845,20 +1816,18 @@
   gap: 12px;
   min-height: 36px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   border-left: 2px solid transparent;
   cursor: pointer;
-  transition: all 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .palette-option:hover {
-  background: var(--c-rgba-255-255-255-0p04);
+  background: var(--surface-hover);
 }
 
 .palette-option.is-active {
-  background: linear-gradient(90deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 185, 129, 0.02) 100%);
-  border-left-color: var(--ok, var(--c-10b981));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  background: var(--tint-ok);
+  border-left-color: var(--ok);
 }
 
 .palette-option-left {
@@ -1871,40 +1840,39 @@
 .palette-item-icon {
   width: 22px;
   height: 22px;
-  border-radius: 5px;
-  background: var(--c-rgba-255-255-255-0p05);
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
   display: grid;
   place-items: center;
-  color: var(--c-9ca3af);
+  color: var(--fg-muted);
   flex-shrink: 0;
-  transition: all 0.12s ease;
 }
 
 .palette-option.is-active .palette-item-icon {
-  background: var(--c-rgba-16-185-129-0p2);
-  color: var(--c-34d399);
+  background: var(--tint-ok-strong);
+  color: var(--ok);
 }
 
 .palette-option-label {
   font-size: 13px;
   line-height: 18px;
-  color: var(--c-e5e7eb);
+  color: var(--fg-default);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .palette-option.is-active .palette-option-label {
-  color: var(--c-f9fafb);
+  color: var(--fg-bright);
   font-weight: 500;
 }
 
 /* Fuzzy highlight */
 .palette-highlight {
-  background: var(--c-rgba-16-185-129-0p22);
-  color: var(--c-34d399);
+  background: var(--tint-ok-strong);
+  color: var(--ok);
   font-weight: 600;
-  border-radius: 2px;
+  border-radius: var(--radius-1);
   padding: 0 1px;
 }
 
@@ -1913,33 +1881,33 @@
   font-size: 10px;
   font-weight: 500;
   padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--c-rgba-255-255-255-0p06);
-  color: var(--c-9ca3af);
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+  color: var(--fg-muted);
 }
 
 .palette-cat-tag.cat-agent {
-  background: var(--c-rgba-168-85-247-0p12);
-  color: var(--c-c084fc);
+  background: var(--tint-accent);
+  color: var(--mono-300);
 }
 
 .palette-cat-tag.cat-view {
-  background: var(--c-rgba-59-130-246-0p12);
-  color: var(--c-60a5fa);
+  background: var(--tint-info);
+  color: var(--info);
 }
 
 .palette-cat-tag.cat-files {
-  background: var(--c-rgba-16-185-129-0p12);
-  color: var(--c-34d399);
+  background: var(--tint-ok);
+  color: var(--ok);
 }
 
 .palette-recent-tag {
   font-size: 9.5px;
   font-weight: 500;
   padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--c-rgba-245-158-11-0p12);
-  color: var(--c-fbbf24);
+  border-radius: var(--radius-1);
+  background: var(--tint-warn);
+  color: var(--warn);
 }
 
 /* Shortcut Pills */
@@ -1960,17 +1928,16 @@
   font-family: var(--font-mono, monospace);
   font-size: 10.5px;
   font-weight: 500;
-  color: var(--c-9ca3af);
-  background: var(--c-191e26);
-  border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: 4px;
-  box-shadow: 0 1px 0 var(--c-rgba-0-0-0-0p4);
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-subtle);
+  border-radius: var(--radius-1);
 }
 
 .palette-option.is-active .palette-kbd {
-  color: var(--c-e5e7eb);
-  border-color: var(--glow-accent-strong);
-  background: var(--c-212833);
+  color: var(--fg-bright);
+  border-color: var(--hairline-active);
+  background: var(--surface-3);
 }
 
 /* Empty State */
@@ -2016,15 +1983,15 @@
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  background: var(--c-rgba-0-0-0-0p28);
-  border-top: 1px solid var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-sunken);
+  border-top: 1px solid var(--hairline-faint);
   font-size: 11px;
   color: var(--info);
 }
 
 .palette-footer-brand {
   font-weight: 500;
-  color: var(--c-9ca3af);
+  color: var(--fg-muted);
 }
 
 .palette-footer-shortcuts {
@@ -2047,10 +2014,10 @@
 }
 
 .palette-footer-divider {
-  color: var(--c-4b5563);
+  color: var(--fg-faint);
 }
 
-/* --- 12. Toasts (UI_SPEC §13, DESIGN §8.2 — Elevated Stack) --- */
+/* --- 12. Toasts --------------------------------------------------------- */
 
 .toast-viewport {
   position: fixed;
@@ -2077,7 +2044,8 @@
   font-size: var(--type-xs);
   line-height: var(--type-xs-lh);
   cursor: pointer;
-  transition: background-color var(--dur-instant) var(--ease-calm), color var(--dur-instant) var(--ease-calm);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .toast-view-all:hover,
@@ -2090,15 +2058,14 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--ink-mid);
+  background: var(--surface-raised);
   border-radius: var(--radius-2);
-  border: var(--border-hairline);
-  backdrop-filter: blur(var(--blur-surface));
-  -webkit-backdrop-filter: blur(var(--blur-surface));
+  border: 1px solid var(--hairline-active);
   overflow: hidden;
   pointer-events: auto;
   animation: toast-slide-up var(--dur-base) var(--ease-precise);
-  transition: transform var(--dur-quick) var(--ease-calm), opacity var(--dur-quick) var(--ease-calm);
+  transition: transform var(--dur-quick) var(--ease-calm),
+    opacity var(--dur-quick) var(--ease-calm);
 }
 
 @keyframes toast-slide-up {
@@ -2113,7 +2080,7 @@
 }
 
 .toast.is-leaving {
-  animation: toast-slide-down 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: toast-slide-down var(--dur-base) var(--ease-precise) forwards;
 }
 
 @keyframes toast-slide-down {
@@ -2127,7 +2094,6 @@
   }
 }
 
-/* DESIGN_TOKENS §7.3's fade, verbatim. */
 @keyframes fade {
   from {
     opacity: 0;
@@ -2147,52 +2113,47 @@
 .toast-severity {
   width: 26px;
   height: 26px;
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   display: grid;
   place-items: center;
   flex-shrink: 0;
   margin-top: 1px;
 }
 
-/* Rich variants */
 .toast-info {
-  border-color: var(--c-rgba-14-165-233-0p35);
-  box-shadow: 0 10px 30px var(--c-rgba-0-0-0-0p6), 0 0 18px var(--c-rgba-14-165-233-0p15);
+  border-color: var(--info);
 }
 .toast-info .toast-severity {
-  background: var(--c-rgba-14-165-233-0p14);
-  color: var(--c-38bdf8);
-  border: 1px solid var(--c-rgba-14-165-233-0p25);
+  background: var(--tint-info);
+  color: var(--info);
+  border: 1px solid var(--info);
 }
 
 .toast-success {
-  border-color: var(--c-rgba-16-185-129-0p35);
-  box-shadow: 0 10px 30px var(--c-rgba-0-0-0-0p6), 0 0 20px var(--c-rgba-16-185-129-0p18);
+  border-color: var(--ok);
 }
 .toast-success .toast-severity {
-  background: var(--c-rgba-16-185-129-0p14);
-  color: var(--c-34d399);
-  border: 1px solid var(--c-rgba-16-185-129-0p28);
+  background: var(--tint-ok);
+  color: var(--ok);
+  border: 1px solid var(--ok);
 }
 
 .toast-warning {
-  border-color: var(--c-rgba-245-158-11-0p35);
-  box-shadow: 0 10px 30px var(--c-rgba-0-0-0-0p6), 0 0 20px var(--c-rgba-245-158-11-0p18);
+  border-color: var(--warn);
 }
 .toast-warning .toast-severity {
-  background: var(--c-rgba-245-158-11-0p14);
-  color: var(--c-fbbf24);
-  border: 1px solid var(--c-rgba-245-158-11-0p28);
+  background: var(--tint-warn);
+  color: var(--warn);
+  border: 1px solid var(--warn);
 }
 
 .toast-error {
-  border-color: var(--c-rgba-239-68-68-0p38);
-  box-shadow: 0 10px 30px var(--c-rgba-0-0-0-0p6), 0 0 22px var(--c-rgba-239-68-68-0p22);
+  border-color: var(--err);
 }
 .toast-error .toast-severity {
-  background: var(--c-rgba-239-68-68-0p14);
-  color: var(--c-f87171);
-  border: 1px solid var(--c-rgba-239-68-68-0p3);
+  background: var(--tint-err);
+  color: var(--err);
+  border: 1px solid var(--err);
 }
 
 .toast-text-area {
@@ -2208,37 +2169,37 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--c-9ca3af);
+  color: var(--fg-muted);
 }
 
 .toast-info .toast-type-pill {
-  color: var(--c-38bdf8);
+  color: var(--info);
 }
 
 .toast-success .toast-type-pill {
-  color: var(--c-34d399);
+  color: var(--ok);
 }
 
 .toast-warning .toast-type-pill {
-  color: var(--c-fbbf24);
+  color: var(--warn);
 }
 
 .toast-error .toast-type-pill {
-  color: var(--c-f87171);
+  color: var(--err);
 }
 
 .toast-message {
   margin: 0;
   font-size: 12.5px;
   line-height: 18px;
-  color: var(--c-f3f4f6);
+  color: var(--fg-default);
   word-break: break-word;
 }
 
 .toast-dismiss {
   width: 22px;
   height: 22px;
-  border-radius: 5px;
+  border-radius: var(--radius-1);
   background: transparent;
   border: none;
   display: grid;
@@ -2247,12 +2208,17 @@
   cursor: pointer;
   flex-shrink: 0;
   margin-top: 1px;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .toast-dismiss:hover {
-  background: var(--glow-accent);
-  color: var(--c-e5e7eb);
+  background: var(--surface-hover);
+  color: var(--fg-bright);
+}
+
+.toast-dismiss:active {
+  background: var(--surface-active);
 }
 
 /* Auto-dismiss progress timer bar */
@@ -2262,7 +2228,7 @@
   left: 0;
   right: 0;
   height: 2.5px;
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-2);
   overflow: hidden;
 }
 
@@ -2280,23 +2246,19 @@
 }
 
 .toast-progress-info {
-  background: var(--c-0284c7);
-  box-shadow: 0 0 6px var(--c-rgba-2-132-199-0p6);
+  background: var(--info);
 }
 
 .toast-progress-success {
-  background: var(--c-10b981);
-  box-shadow: 0 0 6px var(--c-rgba-16-185-129-0p7);
+  background: var(--ok);
 }
 
 .toast-progress-warning {
-  background: var(--c-f59e0b);
-  box-shadow: 0 0 6px var(--c-rgba-245-158-11-0p6);
+  background: var(--warn);
 }
 
 .toast-progress-error {
-  background: var(--c-ef4444);
-  box-shadow: 0 0 6px var(--c-rgba-239-68-68-0p7);
+  background: var(--err);
 }
 
 @keyframes toast-timer-shrink {
@@ -2308,7 +2270,7 @@
   }
 }
 
-/* --- 13. Boot screens -------------------------------------------------------- */
+/* --- 13. Boot screens --------------------------------------------------- */
 
 .boot-screen {
   height: 100%;
@@ -2342,7 +2304,7 @@
   justify-self: center;
 }
 
-/* --- 14. Utilities ------------------------------------------------------------ */
+/* --- 14. Utilities ------------------------------------------------------ */
 
 .visually-hidden {
   position: absolute;
@@ -2356,10 +2318,7 @@
   border: 0;
 }
 
-/* --- 15. Narrow-window collapse (titlebar + statusbar) --------------------- */
-/* Collapse order at 32px title bar: search kbd/text shrink then icon-only,
-   session badge and git pill hide, title truncates, menus compress. Bell +
-   window controls stay visible at every width. */
+/* --- 15. Narrow-window collapse (titlebar + statusbar) ------------------ */
 
 @media (max-width: 1100px) {
   .titlebar-title {
@@ -2450,7 +2409,7 @@
   }
 
   .titlebar-search-text {
-    display: none; /* pill collapses to icon-only */
+    display: none;
   }
 
   .titlebar-search-trigger {
@@ -2478,19 +2437,14 @@
   }
 }
 
-/* --- Phase 9e: completed-background badge + toast action --------------- */
-.activity-badge.is-success {
-  background: var(--ok);
-  color: var(--ink-canvas);
-  box-shadow: 0 0 6px var(--glow-green);
-}
+/* --- Phase 9e: background toast action + problem copy ------------------- */
 
 .toast-open {
   align-self: flex-start;
   border: 1px solid var(--hairline-active);
   background: transparent;
   color: var(--fg-default);
-  border-radius: 4px;
+  border-radius: var(--radius-1);
   font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
@@ -2500,20 +2454,21 @@
 .toast-open:focus-visible {
   background: var(--ink-hi);
 }
+
 .problem-copy-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 24px;
   height: 24px;
-  color: var(--fg-muted, var(--c-a1a1aa));
+  color: var(--fg-muted);
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
   cursor: pointer;
 }
 
 .problem-copy-btn:hover {
-  color: var(--fg-default, var(--c-e4e4e7));
-  background: var(--c-rgba-255-255-255-0p08);
+  color: var(--fg-default);
+  background: var(--surface-hover);
 }

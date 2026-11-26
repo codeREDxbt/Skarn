@@ -38,14 +38,7 @@ function ConnectionStatusView({
         type="button"
         className="statusbar-connection is-connected"
         onClick={onOpenConnect}
-        style={{
-          background: 'none',
-          border: 'none',
-          cursor: onOpenConnect ? 'pointer' : 'default',
-          padding: 0,
-          font: 'inherit',
-          color: 'inherit',
-        }}
+        disabled={!onOpenConnect}
         title={onOpenConnect ? 'Provider connected (click to manage API key / provider)' : undefined}
       >
         <span className="statusbar-radar-wrapper" aria-hidden="true">

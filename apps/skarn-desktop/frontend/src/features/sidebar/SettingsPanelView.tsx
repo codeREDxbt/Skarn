@@ -309,7 +309,7 @@ const restartServer = (language: string): void => {
               request.
             </p>
             {activeProviderDisabled && activeProviderPreset ? (
-              <p className="settings-card-hint" role="alert" style={{ color: 'var(--c-fbbf24)' }}>
+              <p className="settings-card-hint is-warning" role="alert">
                 {activeProviderPreset.name} is disabled but remains active for this session.
                 Current model {activeModelLabel} is unchanged. Choose another model to stop
                 using it.
@@ -324,19 +324,8 @@ const restartServer = (language: string): void => {
                 const isActive = activeProvider === preset.id;
                 return (
                   <li key={preset.id} className="settings-provider-item">
-                    <div
-                      style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 2,
-                        flex: 1,
-                        minWidth: 0,
-                      }}
-                    >
-                      <span
-                        className="settings-label"
-                        style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
+                    <div className="settings-provider-info">
+                      <span className="settings-label settings-provider-name">
                         {preset.name}
                         {isActive ? (
                           <span className="settings-status-pill is-connected">Active</span>

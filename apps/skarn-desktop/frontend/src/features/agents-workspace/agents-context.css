@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Selora IDE — Agents Workspace Context Pane (Files & Changes)
+   Skarn — Agents Workspace Context Pane (Files & Changes)
    Scoped strictly to .agents-context-pane (zero impact on editor)
    ========================================================================== */
 
@@ -9,11 +9,11 @@
   height: 100%;
   min-width: 0;
   overflow: hidden;
-  color: var(--fg-default, #e5e5e5);
-  background: var(--agents-surface-rail, var(--ink-low, #0d0d12));
+  color: var(--fg-default);
+  background: var(--agents-surface-rail);
   font-family: var(--font-sans);
-  font-size: var(--type-sm, 12px);
-  border-left: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  font-size: var(--type-sm);
+  border-left: 1px solid var(--agents-border-subtle);
 }
 
 .agents-context-pane button {
@@ -22,19 +22,26 @@
   cursor: pointer;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--agents-radius-sm, 4px);
-  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+  border-radius: var(--radius-1);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .agents-context-pane button:hover:not(:disabled) {
-  background: var(--agents-surface-hover, #1d1d27);
-  border-color: var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  background: var(--agents-surface-hover);
+  border-color: var(--agents-border-subtle);
+}
+
+.agents-context-pane button:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
 }
 
 .agents-context-pane button:focus-visible,
 .agents-context-pane pre:focus-visible,
 .agents-context-pane [role="region"]:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: var(--border-focus);
   outline-offset: -1px;
 }
 
@@ -42,10 +49,10 @@
 .agents-context-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px;
-  background: var(--agents-surface-header, #0e0e13);
-  border-bottom: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  gap: var(--space-1);
+  padding: var(--space-2);
+  background: var(--agents-surface-header);
+  border-bottom: 1px solid var(--agents-border-subtle);
 }
 
 .agents-context-tabs button[role="tab"] {
@@ -55,33 +62,32 @@
   height: 26px;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: var(--agents-radius-md, 6px);
+  border-radius: var(--radius-2);
   background: transparent;
-  color: var(--fg-muted, #8a8a8a);
-  font-size: var(--type-xs, 11px);
-  font-weight: var(--weight-medium, 500);
+  color: var(--fg-muted);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
 }
 
 .agents-context-tabs button[role="tab"]:hover {
-  color: var(--fg-default, #e5e5e5);
-  background: var(--agents-surface-hover, #1d1d27);
+  color: var(--fg-default);
+  background: var(--agents-surface-hover);
 }
 
 .agents-context-tabs button[role="tab"][aria-selected="true"] {
-  color: var(--fg-bright, #ffffff);
-  background: var(--agents-surface-active, #181820);
-  border-color: var(--agents-border-card, rgba(255, 255, 255, 0.09));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: var(--fg-bright);
+  background: var(--agents-surface-active);
+  border-color: var(--agents-border-active);
 }
 
 .agents-context-tab-counter {
   font-family: var(--font-mono);
   font-size: 9px;
   padding: 0 5px;
-  border-radius: var(--agents-radius-pill, 999px);
-  background: var(--agents-surface-card, #121218);
-  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
-  color: var(--fg-muted, #8a8a8a);
+  border-radius: var(--radius-pill);
+  background: var(--agents-surface-card);
+  border: 1px solid var(--agents-border-subtle);
+  color: var(--fg-muted);
 }
 
 .agents-context-tabs button:last-child {
@@ -92,11 +98,11 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  color: var(--fg-muted, #8a8a8a);
+  color: var(--fg-muted);
 }
 
 .agents-context-tabs button:last-child:hover {
-  color: var(--fg-bright, #ffffff);
+  color: var(--fg-bright);
 }
 
 .agents-context-pane [role="tabpanel"] {
@@ -123,20 +129,21 @@
   padding-block: 2px;
   text-align: start;
   white-space: nowrap;
-  border-radius: var(--agents-radius-sm, 4px);
-  color: var(--fg-default, #e5e5e5);
-  font-size: var(--type-xs, 11px);
+  border-radius: var(--radius-1);
+  border-left: 2px solid transparent;
+  color: var(--fg-default);
+  font-size: var(--type-xs);
 }
 
 .agents-tree-row:hover {
-  background: var(--agents-surface-hover, #1d1d27);
-  color: var(--fg-bright, #ffffff);
+  background: var(--agents-surface-hover);
+  color: var(--fg-bright);
 }
 
 .agents-tree-row[aria-selected="true"] {
-  background: var(--agents-surface-active, #181820);
-  color: var(--fg-bright, #ffffff);
-  box-shadow: inset 2px 0 0 var(--accent, #a78bfa);
+  background: var(--agents-surface-active);
+  color: var(--fg-bright);
+  border-left-color: var(--fg-default);
 }
 
 .agents-tree-row > span:last-child {
@@ -157,21 +164,21 @@
   justify-content: center;
   width: 14px;
   height: 14px;
-  color: var(--fg-muted, #8a8a8a);
-  transition: transform var(--dur-instant, 80ms) var(--ease-calm);
+  color: var(--fg-muted);
+  transition: transform var(--dur-instant) var(--ease-calm);
 }
 
-/* --- File Type Badges & Icons (Direct in-file styles) --- */
+/* --- File Type Badges & Icons --- */
 .agents-context-pane .file-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-family: var(--font-mono);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: var(--weight-semibold);
   letter-spacing: -0.02em;
-  padding: 1px 4px;
-  border-radius: 3px;
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-1);
   line-height: 1.2;
   flex: 0 0 auto;
 }
@@ -182,7 +189,8 @@
   border: 1px solid rgba(59, 130, 246, 0.35);
 }
 
-.agents-context-pane .tsx-badge {
+.agents-context-pane .tsx-badge,
+.agents-context-pane .jsx-badge {
   color: #38bdf8;
   background: rgba(6, 182, 212, 0.15);
   border: 1px solid rgba(6, 182, 212, 0.35);
@@ -194,19 +202,14 @@
   border: 1px solid rgba(234, 179, 8, 0.35);
 }
 
-.agents-context-pane .jsx-badge {
-  color: #38bdf8;
-  background: rgba(6, 182, 212, 0.15);
-  border: 1px solid rgba(6, 182, 212, 0.35);
-}
-
 .agents-context-pane .rust-badge {
   color: #fb923c;
   background: rgba(249, 115, 22, 0.15);
   border: 1px solid rgba(249, 115, 22, 0.35);
 }
 
-.agents-context-pane .py-badge {
+.agents-context-pane .py-badge,
+.agents-context-pane .css-badge {
   color: #38bdf8;
   background: rgba(56, 189, 248, 0.15);
   border: 1px solid rgba(56, 189, 248, 0.35);
@@ -218,12 +221,6 @@
   border: 1px solid rgba(245, 158, 11, 0.35);
 }
 
-.agents-context-pane .css-badge {
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-}
-
 .agents-context-pane .md-badge {
   color: #cbd5e1;
   background: rgba(148, 163, 184, 0.15);
@@ -231,7 +228,7 @@
 }
 
 .agents-context-pane .folder-icon {
-  color: var(--moonlight-400, #cdd6e4);
+  color: var(--mono-400);
   display: inline-flex;
   align-items: center;
 }
@@ -240,10 +237,10 @@
 .agents-context-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 6px 10px;
-  background: var(--agents-surface-card, #121218);
-  border-bottom: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  background: var(--agents-surface-card);
+  border-bottom: 1px solid var(--agents-border-subtle);
 }
 
 .agents-context-actions button {
@@ -251,18 +248,18 @@
   align-items: center;
   gap: 5px;
   height: 24px;
-  padding: 0 8px;
-  background: var(--agents-surface-card, #121218);
-  border: 1px solid var(--agents-border-card, rgba(255, 255, 255, 0.09));
-  border-radius: var(--agents-radius-sm, 4px);
-  color: var(--fg-default, #e5e5e5);
-  font-size: 11px;
+  padding: 0 var(--space-2);
+  background: var(--agents-surface-card);
+  border: 1px solid var(--agents-border-card);
+  border-radius: var(--radius-1);
+  color: var(--fg-default);
+  font-size: var(--type-xs);
 }
 
 .agents-context-actions button:hover:not(:disabled) {
-  background: var(--agents-surface-hover, #1d1d27);
-  border-color: var(--agents-border-hover, rgba(255, 255, 255, 0.18));
-  color: var(--fg-bright, #ffffff);
+  background: var(--agents-surface-hover);
+  border-color: var(--agents-border-hover);
+  color: var(--fg-bright);
 }
 
 /* --- File Preview & Diff Preview Containers --- */
@@ -272,8 +269,8 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
-  background: var(--agents-code-bg, #040405);
+  border-top: 1px solid var(--agents-border-subtle);
+  background: var(--agents-code-bg);
 }
 
 .agents-file-preview header,
@@ -281,17 +278,17 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--agents-surface-header, #0e0e13);
-  border-bottom: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--agents-surface-header);
+  border-bottom: 1px solid var(--agents-border-subtle);
 }
 
 .agents-file-preview header strong,
 .agents-diff-preview h3 {
-  font-size: var(--type-sm, 12px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--fg-bright, #ffffff);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-bright);
   overflow-wrap: anywhere;
   margin: 0;
 }
@@ -299,125 +296,124 @@
 .agents-file-preview header > span,
 .agents-diff-preview p,
 .agents-context-muted {
-  font-size: 11px;
-  color: var(--fg-muted, #8a8a8a);
+  font-size: var(--type-xs);
+  color: var(--fg-muted);
 }
 
 .agents-preview-source-badge {
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: var(--agents-radius-pill, 999px);
-  background: var(--agents-surface-card, #121218);
-  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
-  color: var(--fg-muted, #8a8a8a);
+  border-radius: var(--radius-pill);
+  background: var(--agents-surface-card);
+  border: 1px solid var(--agents-border-subtle);
+  color: var(--fg-muted);
 }
 
 .agents-preview-baseline-badge {
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: var(--weight-medium, 500);
+  font-weight: var(--weight-medium);
   padding: 1px 6px;
-  border-radius: var(--agents-radius-pill, 999px);
-  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--agents-border-subtle);
 }
 
 .agents-preview-baseline-badge--index {
-  color: var(--agents-staged-fg, #22c55e);
-  background: var(--agents-staged-bg, rgba(34, 197, 94, 0.12));
-  border-color: var(--agents-staged-border, rgba(34, 197, 94, 0.25));
+  color: var(--agents-staged-fg);
+  background: var(--agents-staged-bg);
+  border-color: var(--agents-staged-border);
 }
 
 .agents-preview-baseline-badge--worktree {
-  color: var(--agents-modified-fg, #d4a017);
-  background: var(--agents-modified-bg, rgba(212, 160, 23, 0.12));
-  border-color: var(--agents-modified-border, rgba(212, 160, 23, 0.25));
+  color: var(--agents-modified-fg);
+  background: var(--agents-modified-bg);
+  border-color: var(--agents-modified-border);
 }
 
 /* --- Code & Diff Viewers --- */
 .agents-context-pane pre {
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px var(--space-3);
   overflow: auto;
   max-height: 52vh;
   tab-size: 4;
   font: 11px/1.65 var(--font-mono);
-  background: var(--agents-code-bg, #040405);
-  color: var(--fg-default, #e5e5e5);
-  border-bottom: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
+  background: var(--agents-code-bg);
+  color: var(--fg-default);
+  border-bottom: 1px solid var(--agents-border-subtle);
 }
 
-/* Diff Line Tinting */
 .agents-diff-pre {
   white-space: pre;
 }
 
 .agents-diff-line {
   display: block;
-  padding: 0 4px;
+  padding: 0 var(--space-1);
 }
 
 .agents-diff-line--add {
-  background: var(--agents-diff-add-bg, rgba(34, 197, 94, 0.14));
-  color: var(--agents-diff-add-text, #4ade80);
-  border-left: 2px solid var(--agents-staged-fg, #22c55e);
+  background: var(--agents-diff-add-bg);
+  color: var(--agents-diff-add-text);
+  border-left: 2px solid var(--agents-staged-fg);
 }
 
 .agents-diff-line--del {
-  background: var(--agents-diff-del-bg, rgba(220, 38, 38, 0.14));
-  color: var(--agents-diff-del-text, #f87171);
-  border-left: 2px solid var(--agents-deleted-fg, #dc2626);
+  background: var(--agents-diff-del-bg);
+  color: var(--agents-diff-del-text);
+  border-left: 2px solid var(--agents-deleted-fg);
 }
 
 .agents-diff-line--hunk {
-  background: rgba(167, 139, 250, 0.08);
-  color: #a78bfa;
+  background: var(--tint-accent);
+  color: var(--fg-muted);
   font-style: italic;
-  padding-left: 4px;
+  padding-left: var(--space-1);
 }
 
 .agents-diff-line--meta {
-  color: var(--fg-faint, #5a5a5a);
+  color: var(--fg-faint);
 }
 
 /* --- Status Callouts & Badges --- */
 .agents-context-pane p {
-  padding: 4px 12px;
-  margin: 4px 0;
+  padding: var(--space-1) var(--space-3);
+  margin: var(--space-1) 0;
   overflow-wrap: anywhere;
-  font-size: var(--type-xs, 11px);
+  font-size: var(--type-xs);
 }
 
 .agents-context-pane [role="alert"] {
-  color: var(--agents-deleted-fg, #f87171);
-  background: var(--agents-deleted-bg, rgba(220, 38, 38, 0.12));
-  border: 1px solid var(--agents-deleted-border, rgba(220, 38, 38, 0.25));
-  border-radius: var(--agents-radius-sm, 4px);
+  color: var(--agents-deleted-fg);
+  background: var(--agents-deleted-bg);
+  border: 1px solid var(--agents-deleted-border);
+  border-radius: var(--radius-1);
   margin: 6px 10px;
   padding: 6px 10px;
 }
 
-.agents-context-dirty {
-  color: var(--agents-approval-fg, #fbbf24) !important;
-  font-weight: var(--weight-medium, 500);
+.agents-context-pane .agents-context-dirty {
+  color: var(--agents-approval-fg);
+  font-weight: var(--weight-medium);
 }
 
 .agents-context-empty {
-  padding: 24px 16px;
+  padding: var(--space-5) var(--space-4);
   text-align: center;
-  color: var(--fg-muted, #8a8a8a);
-  font-size: var(--type-sm, 12px);
+  color: var(--fg-muted);
+  font-size: var(--type-sm);
 }
 
 /* --- Changes View --- */
 .agents-changes-view {
-  padding: 4px 0 16px;
+  padding: var(--space-1) 0 var(--space-4);
   display: flex;
   flex-direction: column;
 }
 
 .agents-changes-view section {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
 }
 
 .agents-changes-view h3 {
@@ -425,11 +421,11 @@
   align-items: center;
   justify-content: space-between;
   font-size: 10px;
-  font-weight: var(--weight-semibold, 600);
-  letter-spacing: var(--tracking-wide, 0.04em);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
-  color: var(--fg-faint, #5a5a5a);
-  margin: 10px 10px 4px;
+  color: var(--fg-faint);
+  margin: 10px 10px var(--space-1);
   overflow-wrap: anywhere;
 }
 
@@ -438,10 +434,10 @@
   font-size: 9px;
   font-weight: normal;
   padding: 1px 5px;
-  border-radius: var(--agents-radius-pill, 999px);
-  background: var(--agents-surface-card, #121218);
-  border: 1px solid var(--agents-border-subtle, rgba(255, 255, 255, 0.07));
-  color: var(--fg-muted, #8a8a8a);
+  border-radius: var(--radius-pill);
+  background: var(--agents-surface-card);
+  border: 1px solid var(--agents-border-subtle);
+  color: var(--fg-muted);
 }
 
 .agents-change-row {
@@ -452,24 +448,25 @@
   padding: 6px 10px;
   text-align: start;
   overflow-wrap: anywhere;
-  color: var(--fg-default, #e5e5e5);
-  font-size: var(--type-xs, 11px);
-  border-radius: var(--agents-radius-sm, 4px);
+  color: var(--fg-default);
+  font-size: var(--type-xs);
+  border-radius: var(--radius-1);
+  border-left: 2px solid transparent;
 }
 
 .agents-change-row:hover {
-  background: var(--agents-surface-hover, #1d1d27);
-  color: var(--fg-bright, #ffffff);
+  background: var(--agents-surface-hover);
+  color: var(--fg-bright);
 }
 
 .agents-change-row[aria-pressed="true"] {
-  background: var(--agents-surface-active, #181820);
-  color: var(--fg-bright, #ffffff);
-  box-shadow: inset 2px 0 0 var(--accent, #a78bfa);
+  background: var(--agents-surface-active);
+  color: var(--fg-bright);
+  border-left-color: var(--fg-default);
 }
 
 .agents-change-filename {
-  font-weight: var(--weight-medium, 500);
+  font-weight: var(--weight-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -477,7 +474,7 @@
 
 .agents-change-dir {
   font-size: 10px;
-  color: var(--fg-faint, #5a5a5a);
+  color: var(--fg-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -488,33 +485,33 @@
 .agents-change-status-badge {
   font-family: var(--font-mono);
   font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 3px;
+  font-weight: var(--weight-semibold);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-1);
   flex: 0 0 auto;
 }
 
 .agents-change-status-badge.is-added {
-  color: var(--agents-staged-fg, #22c55e);
-  background: var(--agents-staged-bg, rgba(34, 197, 94, 0.12));
-  border: 1px solid var(--agents-staged-border, rgba(34, 197, 94, 0.25));
+  color: var(--agents-staged-fg);
+  background: var(--agents-staged-bg);
+  border: 1px solid var(--agents-staged-border);
 }
 
 .agents-change-status-badge.is-modified {
-  color: var(--agents-modified-fg, #d4a017);
-  background: var(--agents-modified-bg, rgba(212, 160, 23, 0.12));
-  border: 1px solid var(--agents-modified-border, rgba(212, 160, 23, 0.25));
+  color: var(--agents-modified-fg);
+  background: var(--agents-modified-bg);
+  border: 1px solid var(--agents-modified-border);
 }
 
 .agents-change-status-badge.is-conflict {
-  color: var(--agents-conflict-fg, #f97316);
-  background: var(--agents-conflict-bg, rgba(249, 115, 22, 0.14));
-  border: 1px solid var(--agents-conflict-border, rgba(249, 115, 22, 0.3));
+  color: var(--agents-conflict-fg);
+  background: var(--agents-conflict-bg);
+  border: 1px solid var(--agents-conflict-border);
 }
 
 .agents-context-unsaved {
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--agents-approval-fg, #fbbf24);
+  padding: var(--space-1) 10px;
+  font-size: var(--type-xs);
+  color: var(--agents-approval-fg);
   overflow-wrap: anywhere;
 }

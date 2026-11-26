@@ -1,15 +1,14 @@
-/* Selora IDE — title-bar subagent pet worlds.
+/* Skarn — title-bar subagent pet worlds.
    A pet is a 22px pill inside the 32px title bar: a small circular world
-   badge plus the child's session name. Motion is subtle and only running pets
-   animate. Honors prefers-reduced-motion and :root[data-reduced-motion]. */
+   badge plus the child's session name. Flat hairline + surface elevation,
+   zero glow/gradient/box-shadow. Honors prefers-reduced-motion and
+   :root[data-reduced-motion="true"]. */
 
 .subagent-pets {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   height: 22px;
-  /* Never collapse to zero: under pressure the strip shrinks to one 22px
-     badge and scrolls, so the first pet stays visible and clickable. */
   min-width: 28px;
   max-width: 360px;
   padding: 0 1px;
@@ -17,7 +16,6 @@
   overflow-y: hidden;
   flex: 0 1 auto;
   scrollbar-width: none;
-  /* Pets are controls: never a window-drag surface. */
   -webkit-app-region: no-drag;
 }
 
@@ -33,10 +31,9 @@
   height: 22px;
   max-width: 120px;
   padding: 0 7px 0 2px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hairline-faint);
   border-radius: var(--radius-pill);
-  background: var(--c-rgba-255-255-255-0p04);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  background: var(--surface-1);
   color: var(--fg-muted);
   font-family: inherit;
   font-size: 10px;
@@ -47,17 +44,23 @@
     background-color var(--dur-instant) var(--ease-calm),
     border-color var(--dur-instant) var(--ease-calm),
     color var(--dur-instant) var(--ease-calm),
-    box-shadow var(--dur-instant) var(--ease-calm),
-    transform var(--dur-instant) var(--ease-spring),
     opacity var(--dur-instant) var(--ease-calm);
 }
 
-.subagent-pet:hover {
-  background: var(--glow-accent);
-  border-color: rgba(255, 255, 255, 0.2);
+.subagent-pet:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
   color: var(--fg-bright);
-  transform: translateY(-0.5px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.subagent-pet:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.subagent-pet:disabled {
+  color: var(--fg-disabled);
+  border-color: var(--ink-hi);
+  cursor: default;
 }
 
 .subagent-pet:focus-visible {
@@ -68,14 +71,11 @@
 .subagent-pet.is-active {
   color: var(--fg-bright);
   background: var(--ink-mid);
-  border-color: var(--hairline-active);
-  box-shadow:
-    0 0 0 1px var(--c-rgba-255-255-255-0p18),
-    0 0 10px var(--glow-accent-strong);
+  border-color: var(--fg-default);
 }
 
 .subagent-pet.is-active .subagent-pet-world {
-  box-shadow: 0 0 0 1px var(--moonlight-400);
+  border-color: var(--mono-400);
 }
 
 .subagent-pet.is-done,
@@ -107,87 +107,36 @@
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.45) 0%, var(--world-color) 42%, rgba(10, 10, 16, 0.85) 85%, #000 100%);
-  box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.55),
-    inset 0 -1px 2px rgba(0, 0, 0, 0.65),
-    0 0 8px var(--world-glow);
-  transform-style: preserve-3d;
-  transition: transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-instant) var(--ease-calm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--hairline-faint);
+  background: var(--surface-3);
+  transition: transform var(--dur-instant) var(--ease-precise), border-color var(--dur-instant) var(--ease-calm);
 }
 
 .subagent-pet:hover .subagent-pet-world {
-  transform: scale(1.12) rotate(6deg);
-  box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.75),
-    0 0 12px var(--world-color),
-    0 0 20px var(--world-glow);
-}
-
-.subagent-pet.is-working .subagent-pet-world {
-  animation: float-subtle 2.5s ease-in-out infinite;
+  transform: scale(1.06);
+  border-color: var(--world-color, var(--mono-400));
 }
 
 .subagent-pet-art {
   width: 14px;
   height: 14px;
   fill: currentColor;
-  color: var(--world-color, var(--moonlight-400));
+  color: var(--world-color, var(--mono-400));
   overflow: visible;
   transform-origin: center;
 }
 
-.world-sun {
-  --world-color: #fbbf24;
-  --world-glow: color-mix(in srgb, #fbbf24 24%, transparent);
-}
-
-.world-moon {
-  --world-color: #c4e5f5;
-  --world-glow: color-mix(in srgb, var(--moonlight-400) 18%, transparent);
-}
-
-.world-star {
-  --world-color: var(--moonlight-300);
-  --world-glow: color-mix(in srgb, var(--moonlight-300) 20%, transparent);
-}
-
-.world-comet {
-  --world-color: var(--moonlight-600);
-  --world-glow: color-mix(in srgb, var(--moonlight-600) 20%, transparent);
-}
-
-.world-nebula {
-  --world-color: var(--moonlight-700);
-  --world-glow: color-mix(in srgb, var(--moonlight-700) 22%, transparent);
-}
-
-.world-orbit {
-  --world-color: var(--moonlight-500);
-  --world-glow: color-mix(in srgb, var(--moonlight-500) 18%, transparent);
-}
-
-.world-earth {
-  --world-color: #38bdf8;
-  --world-glow: color-mix(in srgb, #38bdf8 26%, transparent);
-}
-
-.world-mars {
-  --world-color: #fb7185;
-  --world-glow: color-mix(in srgb, #fb7185 24%, transparent);
-}
-
-.world-jupiter {
-  --world-color: #fb923c;
-  --world-glow: color-mix(in srgb, #fb923c 22%, transparent);
-}
-
-.world-saturn {
-  --world-color: #facc15;
-  --world-glow: color-mix(in srgb, #facc15 22%, transparent);
-}
+.world-sun { --world-color: #fbbf24; }
+.world-moon { --world-color: #c4e5f5; }
+.world-star { --world-color: var(--mono-300); }
+.world-comet { --world-color: var(--mono-600); }
+.world-nebula { --world-color: var(--mono-700); }
+.world-orbit { --world-color: var(--mono-500); }
+.world-earth { --world-color: #38bdf8; }
+.world-mars { --world-color: #fb7185; }
+.world-jupiter { --world-color: #fb923c; }
+.world-saturn { --world-color: #facc15; }
 
 .subagent-pet.is-companion {
   border-color: var(--hairline-faint);
@@ -195,7 +144,6 @@
 
 .subagent-pet.is-companion:hover {
   border-color: var(--world-color);
-  box-shadow: 0 0 10px var(--world-glow);
 }
 
 .pet-sun-rays,
@@ -220,7 +168,7 @@
   width: 9px;
   height: 9px;
   padding: 1px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: var(--ink-canvas);
   fill: none;
   stroke-width: 1.8;
@@ -228,104 +176,23 @@
   stroke-linejoin: round;
 }
 
-.subagent-pet-mark.mark-done {
-  stroke: var(--ok);
-}
+.subagent-pet-mark.mark-done { stroke: var(--ok); }
+.subagent-pet-mark.mark-failed { stroke: var(--err); }
+.subagent-pet-mark.mark-cancelled { stroke: var(--fg-muted); }
 
-.subagent-pet-mark.mark-failed {
-  stroke: var(--err);
-}
-
-.subagent-pet-mark.mark-cancelled {
-  stroke: var(--fg-muted);
-}
-
-/* --- Motion: running pets only ------------------------------------------- */
+/* --- Status motion (running pets only, <= 300ms) -------------------------- */
 
 .subagent-pet.is-working .subagent-pet-art {
-  animation: pet-breathe 2.8s var(--ease-calm) infinite;
-}
-
-.subagent-pet.is-working .pet-sun-rays {
-  animation: pet-spin 18s linear infinite;
-}
-
-.subagent-pet.is-working .pet-star {
-  animation: pet-twinkle 2.2s var(--ease-calm) infinite;
-}
-
-.subagent-pet.is-working .pet-comet-tail {
-  animation: pet-drift 2.6s var(--ease-calm) infinite;
-}
-
-.subagent-pet.is-working .pet-nebula {
-  animation: pet-bob 3.4s var(--ease-calm) infinite;
-}
-
-.subagent-pet.is-working .pet-orbit-ring {
-  animation: pet-orbit 6s linear infinite;
+  animation: pet-pulse var(--dur-max) var(--ease-calm) infinite;
 }
 
 .subagent-pet.is-idle .subagent-pet-art {
   opacity: 0.78;
 }
 
-@keyframes pet-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.06);
-  }
-}
-
-@keyframes pet-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes pet-orbit {
-  from {
-    transform: rotate(-24deg);
-  }
-  to {
-    transform: rotate(336deg);
-  }
-}
-
-@keyframes pet-twinkle {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.55;
-  }
-}
-
-@keyframes pet-drift {
-  0%,
-  100% {
-    transform: translate(0, 0);
-  }
-  50% {
-    transform: translate(0.6px, -0.6px);
-  }
-}
-
-@keyframes pet-bob {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-0.7px);
-  }
+@keyframes pet-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
 }
 
 /* --- Overflow count ------------------------------------------------------- */
@@ -337,7 +204,8 @@
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-pill);
-  background: var(--c-rgba-255-255-255-0p06);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-faint);
   color: var(--fg-faint);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -346,52 +214,29 @@
 /* --- Narrow widths: keep the icons, drop the labels ---------------------- */
 
 @media (max-width: 1100px) {
-  .subagent-pets {
-    max-width: 220px;
-  }
-
-  .subagent-pet {
-    max-width: 26px;
-    padding: 0 3px;
-  }
-
-  .subagent-pet-name {
-    display: none;
-  }
+  .subagent-pets { max-width: 220px; }
+  .subagent-pet { max-width: 26px; padding: 0 3px; }
+  .subagent-pet-name { display: none; }
 }
 
 @media (max-width: 900px) {
-  .subagent-pets {
-    max-width: 190px;
-  }
+  .subagent-pets { max-width: 190px; }
 }
 
 @media (max-width: 700px) {
-  .subagent-pets {
-    max-width: 132px;
-  }
+  .subagent-pets { max-width: 132px; }
 }
 
 /* --- Reduced motion ------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
   .subagent-pet-art,
-  .subagent-pet.is-working .subagent-pet-art,
-  .subagent-pet.is-working .pet-sun-rays,
-  .subagent-pet.is-working .pet-star,
-  .subagent-pet.is-working .pet-comet-tail,
-  .subagent-pet.is-working .pet-nebula,
-  .subagent-pet.is-working .pet-orbit-ring {
+  .subagent-pet.is-working .subagent-pet-art {
     animation: none;
   }
 }
 
 :root[data-reduced-motion='true'] .subagent-pet-art,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .subagent-pet-art,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .pet-sun-rays,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .pet-star,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .pet-comet-tail,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .pet-nebula,
-:root[data-reduced-motion='true'] .subagent-pet.is-working .pet-orbit-ring {
+:root[data-reduced-motion='true'] .subagent-pet.is-working .subagent-pet-art {
   animation: none;
 }

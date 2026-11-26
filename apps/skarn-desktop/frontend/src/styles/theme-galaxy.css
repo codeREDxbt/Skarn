@@ -1,18 +1,8 @@
 /* ==========================================================================
-   Selora IDE — "Galaxy" theme palette (optional, opt-in).
+   Skarn — "Galaxy" theme palette (optional, opt-in).
    --------------------------------------------------------------------------
-   Deep-space remap of the dark token ramp in tokens.css: a near-black indigo
-   base, violet and cyan accents, and soft starlight text. This file only
-   declares custom properties; it is not imported by a global entrypoint yet.
-   Wiring (`data-theme="galaxy"`, a settings option, Rust persistence) lands
-   separately.
-
-   Rules kept from tokens.css:
-   - one palette per selector; no gradients on chrome beyond the existing
-     documented gradient tokens;
-   - no pure-white text and no pure-black canvas (glare control);
-   - text/background pairs meet WCAG AA (>= 4.5:1 for body text, >= 3:1 for
-     focus rings and strong borders).
+   Near-black indigo remap of tokens.css. Keeps WCAG AA contrast and avoids
+   pure-white glare and pure-black canvas, with zero banned glow/glass/grad.
    ========================================================================== */
 
 [data-theme="galaxy"] {
@@ -59,58 +49,37 @@
   /* --- Overlay scrim ---------------------------------------------------- */
   --scrim: rgb(2 1 8 / 0.72);
 
-  /* --- Cosmic surface system -------------------------------------------- */
-  --space-deep: #030209;
-  --space-bg: #05040d;
-  --space-bg-alt: #08061a;
-  --space-mid: #0c0920;
-  --space-lift: #110d28;
-  --space-raised: #171232;
-
+  /* --- Surface & monochrome tone ramp ----------------------------------- */
+  --surface-canvas: #05040d;
+  --surface-sunken: #080614;
   --surface-1: #0a0819;
   --surface-2: #0f0c22;
   --surface-3: #15102c;
+  --surface-raised: #191435;
   --surface-hover: #1d1740;
+  --surface-active: #241d4a;
 
-  /* Starlight accents replace the moonlight ramp. */
-  --moonlight-200: #ece9ff;
-  --moonlight-300: #ddd8f5;
-  --moonlight-400: #c3bce0;
-  --moonlight-500: #e8e4ff;
-  --moonlight-600: #a49dc4;
-  --moonlight-700: #8a83ab;
+  --mono-100: #f4f1ff;
+  --mono-200: #ece9ff;
+  --mono-300: #ddd8f5;
+  --mono-400: #c3bce0;
+  --mono-500: #b3add0;
+  --mono-600: #9a93b8;
+  --mono-700: #7f789e;
 
+  --hairline-subtle: rgba(167, 139, 250, 0.09);
   --hairline-faint: rgba(167, 139, 250, 0.14);
   --hairline-active: rgba(167, 139, 250, 0.34);
 
-  /* --- Glow ------------------------------------------------------------- */
-  --glow-green: rgba(52, 211, 153, 0.28);
-  --glow-green-subtle: rgba(52, 211, 153, 0.14);
-  --glow-accent: rgba(139, 92, 246, 0.2);
-  --glow-accent-strong: rgba(34, 211, 238, 0.28);
-  --glow-warn: rgba(251, 191, 36, 0.26);
-  --glow-err: rgba(248, 113, 113, 0.28);
-  --glow-info: rgba(125, 211, 252, 0.22);
+  --tint-accent: rgba(139, 92, 246, 0.12);
+  --tint-accent-strong: rgba(139, 92, 246, 0.22);
+  --tint-ok: rgba(52, 211, 153, 0.14);
+  --tint-ok-strong: rgba(52, 211, 153, 0.24);
+  --tint-warn: rgba(251, 191, 36, 0.15);
+  --tint-err: rgba(248, 113, 113, 0.15);
+  --tint-info: rgba(125, 211, 252, 0.14);
 
-  --blur-surface: 12px;
-  --blur-popover: 16px;
-  --blur-scrim: 20px;
-
-  /* --- Glass ------------------------------------------------------------ */
-  --glass-bg: rgba(12, 9, 32, 0.72);
-  --glass-bg-subtle: rgba(5, 4, 13, 0.62);
-  --glass-bg-elevated: rgba(21, 16, 44, 0.84);
-  --glass-border: rgba(167, 139, 250, 0.16);
-  --glass-border-hover: rgba(34, 211, 238, 0.32);
-
-  /* --- Gradients -------------------------------------------------------- */
-  --grad-radial-subtle: radial-gradient(120% 120% at 50% 0%, rgba(139, 92, 246, 0.1) 0%, transparent 60%);
-  --grad-radial-accent: radial-gradient(circle at 50% 0%, rgba(34, 211, 238, 0.12) 0%, transparent 70%);
-  --grad-beam: linear-gradient(90deg, transparent 0%, rgba(167, 139, 250, 0.45) 50%, transparent 100%);
-  --grad-shimmer: linear-gradient(90deg, transparent 0%, rgba(34, 211, 238, 0.1) 50%, transparent 100%);
-
-  /* --- Typography (palette-independent; declared to keep the token set
-     complete under this selector, values identical to tokens.css) -------- */
+  /* --- Typography ------------------------------------------------------- */
   --font-scale: 1;
   --font-sans: "Space Grotesk", system-ui, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
@@ -154,23 +123,20 @@
   /* --- Borders ---------------------------------------------------------- */
   --hairline: 1px;
   --border-hairline: 1px solid var(--ink-hi);
-  --border-focus: 1px solid #a78bfa; /* violet ring, visible on every galaxy surface */
+  --border-focus: 1px solid #a78bfa;
   --border-error: 1px solid var(--err);
 
   /* --- Motion ----------------------------------------------------------- */
-  --ease-precise: cubic-bezier(0.2, 0, 0, 1);
-  --ease-calm: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-orbital: cubic-bezier(0.65, 0, 0.35, 1);
-  --ease-fade: cubic-bezier(0.4, 0, 0.6, 1);
-  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-precise: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-move: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-calm: ease;
+  --ease-linear: linear;
 
   --dur-instant: 80ms;
-  --dur-quick: 160ms;
+  --dur-quick: 150ms;
   --dur-base: 240ms;
-  --dur-loop: 1200ms;
-  --dur-long: 1800ms;
-  --dur-lap: 2400ms;
+  --dur-max: 300ms;
+  --dur-splash: 1800ms;
 
   --motion-loops: 1;
 
@@ -184,16 +150,13 @@
   --chrome-tabbar-h: 32px;
   --chrome-agent-header-h: 40px;
 
-  /* --- Galaxy-only extras (not part of tokens.css) ---------------------- */
+  /* --- Galaxy-only extras ----------------------------------------------- */
   --galaxy-accent-violet: #a78bfa;
   --galaxy-accent-cyan: #22d3ee;
   --galaxy-accent-indigo: #6366f1;
   --galaxy-nebula: rgba(139, 92, 246, 0.18);
   --galaxy-focus-ring: 0 0 0 1px rgba(167, 139, 250, 0.65);
 
-  /* Compatibility aliases consumed by the revamp components. They live in
-     palette.css for the other themes; galaxy keeps its own spelling here so
-     the palette stays self-contained without editing that file. */
   --accent: #a78bfa;
   --fg-normal: #e6e3f5;
   --fg-secondary: #b3add0;

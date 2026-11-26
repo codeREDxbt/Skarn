@@ -24,7 +24,6 @@ import { ThinkingOrb } from '../presence/ThinkingOrb';
 import { PromptSuggestions } from './PromptSuggestions';
 import { BotAvatar } from '../presence/BotAvatar';
 import { agentStore } from '../agent-store';
-import './agent-feed-polish.css';
 
 export type AgentExecutionFeedProps = {
   messages: ChatMessage[];
@@ -123,13 +122,13 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
   // If transcript is empty, show the hero welcome state
   if (messages.length === 0) {
     return (
-      <div className="agent-execution-feed is-empty agent-feed-root">
-        <div className="agent-welcome-hero agent-feed-empty-hero">
+      <div className="agent-execution-feed is-empty">
+        <div className="agent-welcome-hero">
           {/* 64px Breathing ThinkingOrb */}
           <ThinkingOrb state="breathing" size={64} isLive={true} />
 
-          <h2 className="welcome-heading agent-feed-empty-heading">Ask anything</h2>
-          <p className="welcome-subline agent-feed-empty-subline">
+          <h2 className="welcome-heading">Ask anything</h2>
+          <p className="welcome-subline">
             <em>Ask about the code, or tell Skarn what to change.</em>
           </p>
 
@@ -166,13 +165,13 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
 
   return (
     <div
-      className="agent-execution-feed agent-feed-root"
+      className="agent-execution-feed"
       role="log"
       aria-live="polite"
       aria-relevant="additions text"
       aria-label="Conversation Feed"
     >
-      <div ref={listRef} className="feed-messages-list agent-feed-list" onScroll={handleScroll}>
+      <div ref={listRef} className="feed-messages-list" onScroll={handleScroll}>
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
           const parsed = !isUser ? parseMessageContent(msg.content) : { mainContent: msg.content };
@@ -182,15 +181,15 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
           return (
             <div
               key={msg.id}
-              className={`feed-message-row agent-feed-turn ${
-                isUser ? 'row-user agent-feed-turn--user' : 'row-assistant agent-feed-turn--assistant'
+              className={`feed-message-row ${
+                isUser ? 'row-user' : 'row-assistant'
               }`}
             >
               {isUser ? (
                 /* --- USER MESSAGE CONTAINER WITH MICRO-ACTION TOOLBAR --- */
-                <div className="user-bubble-wrapper agent-feed-user-block">
+                <div className="user-bubble-wrapper">
                   <div
-                    className={`message-bubble bubble-user agent-feed-user-bubble ${
+                    className={`message-bubble bubble-user ${
                       msg.isSteer ? 'is-steer-prompt' : ''
                     } ${editingId === msg.id ? 'is-editing' : ''}`}
                   >
@@ -339,15 +338,15 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                 </div>
               ) : (
                 /* --- ASSISTANT MESSAGE CONTAINER --- */
-                <div className="message-bubble bubble-assistant agent-feed-assistant">
-                  <div className="assistant-bubble-meta agent-feed-meta">
+                <div className="message-bubble bubble-assistant">
+                  <div className="assistant-bubble-meta">
                     <BotAvatar
                       role="orchestrator"
                       status={msg.status === 'streaming' ? 'working' : 'default'}
                       size={16}
                       name="Skarn Coding Agent"
                     />
-                    <span className="assistant-meta-label agent-feed-role-label">Skarn Agent</span>
+                    <span className="assistant-meta-label">Skarn Agent</span>
                   </div>
 
                   {/* 1. Reasoning Accordion (Cursor/Windsurf parity) */}
@@ -373,10 +372,10 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
 
                   {/* 3. Message Text Content or Streaming Indicator */}
                   {contentToShow ? (
-                    <div className="assistant-content-wrap agent-feed-prose">
+                    <div className="assistant-content-wrap">
                       <MarkdownMessage content={contentToShow} />
                       {(contentToShow.toLowerCase().includes('api key') || msg.status === 'error') && (
-                        <div style={{ marginTop: '10px' }}>
+                        <div className="feed-connect-key-row">
                           <button
                             type="button"
                             className="feed-connect-key-btn"
@@ -388,7 +387,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                       )}
                     </div>
                   ) : msg.status === 'streaming' ? (
-                    <div className="agent-thinking-stream-indicator agent-feed-stream-cue">
+                    <div className="agent-thinking-stream-indicator">
                       <span className="typing-dot" />
                       <span className="typing-dot" />
                       <span className="typing-dot" />
@@ -398,7 +397,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                       <p className="message-paragraph text-error">
                         Encountered an issue executing request. Check model provider or API key.
                       </p>
-                      <div style={{ marginTop: '8px' }}>
+                      <div className="feed-connect-key-row">
                         <button
                           type="button"
                           className="feed-connect-key-btn"
@@ -410,7 +409,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                     </div>
                   ) : !thoughtToShow ? (
                     <div className="message-text-content">
-                      <p className="message-paragraph text-muted" style={{ fontStyle: 'italic', opacity: 0.8 }}>
+                      <p className="message-paragraph text-muted is-placeholder">
                         {msg.toolCalls && msg.toolCalls.length > 0 ? 'Executed tools successfully.' : 'Ready for your next instruction.'}
                       </p>
                     </div>
@@ -499,7 +498,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
         {/* 5. Active Status Line (when in flight) */}
         {inFlight && (
           <div className="agent-active-status-line">
-            <div className="status-line-left agent-feed-status-left">
+            <div className="status-line-left">
               <ThinkingOrb state={thinkingState} size={20} />
               <BotAvatar role="orchestrator" status="working" size={20} name="Skarn Orchestrator" />
               <span className="status-text">{getStatusText()}</span>

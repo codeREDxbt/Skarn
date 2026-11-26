@@ -1,133 +1,46 @@
 /* ==========================================================================
-   Selora IDE — Animations, Keyframes & Motion Utilities
+   Skarn — Animations, Keyframes & Motion Utilities
    --------------------------------------------------------------------------
-   Ultra-smooth, hardware-accelerated CSS animations and utility classes
-   anchored to the Selora design token layer (tokens.css).
-
+   Capped at <= 300ms for all non-splash UI transitions and disclosures.
+   Uses only the 4 canonical easing roles (zero ease-in).
    Honors reduced-motion preferences via prefers-reduced-motion: reduce
    and data-reduced-motion="true".
    ========================================================================== */
 
 /* --- 1. Core Keyframes ---------------------------------------------------- */
 
-/* 1.1 Pulse Glow: subtle pulsing glow for active badges, status dots, and live agents */
-@keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 0 0 var(--glow-pulse-color, var(--c-rgba-34-197-94-0p45));
-    opacity: 1;
-  }
-  50% {
-    box-shadow: 0 0 10px 3px var(--glow-pulse-color, var(--c-rgba-34-197-94-0p18));
-    opacity: 0.88;
-  }
-}
-
-/* 1.2 Shimmer: sleek light sweep across cards, chips, and skeleton states */
-@keyframes shimmer {
-  0% {
-    background-position: -200% 0;
-  }
-  100% {
-    background-position: 200% 0;
-  }
-}
-
-@keyframes shimmer-sweep {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-/* 1.3 Border Travel: smooth gradient travel for border beams */
-@keyframes border-travel {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
-}
-
-@keyframes border-beam-travel {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
-}
-
-/* 1.4 Float Subtle: micro-levitation for cards and modals */
-@keyframes float-subtle {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-3px);
-  }
-}
-
-/* 1.5 Ripple Ring: expanding radar ring for live connections and notifications */
-@keyframes ripple-ring {
-  0% {
-    transform: scale(0.9);
-    opacity: 0.85;
-  }
-  75% {
-    opacity: 0.2;
-  }
-  100% {
-    transform: scale(2.4);
-    opacity: 0;
-  }
-}
-
-/* 1.6 Accordion Down & Up: spring-like slide-down and collapse */
+/* 1.1 Disclosure Slide-Down & Collapse */
 @keyframes accordion-down {
   from {
-    height: 0;
     max-height: 0;
     opacity: 0;
-    transform: translateY(-4px) scaleY(0.97);
-    transform-origin: top;
+    transform: translateY(-4px);
   }
   to {
-    height: var(--radix-accordion-content-height, auto);
     max-height: var(--accordion-max-height, 1200px);
     opacity: 1;
-    transform: translateY(0) scaleY(1);
-    transform-origin: top;
+    transform: translateY(0);
   }
 }
 
 @keyframes accordion-up {
   from {
-    height: var(--radix-accordion-content-height, auto);
     max-height: var(--accordion-max-height, 1200px);
     opacity: 1;
-    transform: translateY(0) scaleY(1);
-    transform-origin: top;
+    transform: translateY(0);
   }
   to {
-    height: 0;
     max-height: 0;
     opacity: 0;
-    transform: translateY(-4px) scaleY(0.97);
-    transform-origin: top;
+    transform: translateY(-4px);
   }
 }
 
-/* 1.7 Fade Slides: for toasts, popovers, drawers, and menus */
+/* 1.2 Fade Slides: for popovers, drawers, and menus */
 @keyframes fade-slide-up {
   0% {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   100% {
     opacity: 1;
@@ -138,7 +51,7 @@
 @keyframes fade-slide-down {
   0% {
     opacity: 0;
-    transform: translateY(-8px);
+    transform: translateY(-6px);
   }
   100% {
     opacity: 1;
@@ -149,7 +62,7 @@
 @keyframes fade-slide-left {
   0% {
     opacity: 0;
-    transform: translateX(12px);
+    transform: translateX(8px);
   }
   100% {
     opacity: 1;
@@ -160,7 +73,7 @@
 @keyframes fade-slide-right {
   0% {
     opacity: 0;
-    transform: translateX(-12px);
+    transform: translateX(-8px);
   }
   100% {
     opacity: 1;
@@ -168,7 +81,7 @@
   }
 }
 
-/* 1.8 Spin Smooth: 360-degree rotation with calm ease for sync/loading indicators */
+/* 1.3 Spin Smooth: 360-degree rotation for loading indicators */
 @keyframes spin-smooth {
   0% {
     transform: rotate(0deg);
@@ -178,7 +91,7 @@
   }
 }
 
-/* 1.9 Blink Cursor: smooth terminal/editor cursor blink */
+/* 1.4 Blink Cursor: terminal/editor cursor blink */
 @keyframes blink-cursor {
   0%, 100% {
     opacity: 1;
@@ -188,194 +101,53 @@
   }
 }
 
-/* 1.10 Badge Pop: scale pop on count changes */
-@keyframes badge-pop {
-  0% {
-    transform: scale(0.72);
-    opacity: 0.6;
-  }
-  65% {
-    transform: scale(1.18);
-  }
-  100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
-
-/* 1.14 Aurora Flow: undulating cosmic starlight wave for thinking states */
-@keyframes aurora-flow {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
-}
-
-/* 1.15 Pipeline Flow: directional packet pulse travelling down connectors */
-@keyframes pipeline-flow {
-  0% {
-    background-position: 0% -100%;
-  }
-  100% {
-    background-position: 0% 200%;
-  }
-}
-
-/* 1.16 3D Gyroscope Equatorial & Polar Orbit Keyframes */
-@keyframes gyro-orbit-equator {
-  0% {
-    transform: rotateX(68deg) rotateY(18deg) rotateZ(0deg);
-  }
-  100% {
-    transform: rotateX(68deg) rotateY(18deg) rotateZ(360deg);
-  }
-}
-
-@keyframes gyro-orbit-polar {
-  0% {
-    transform: rotateX(46deg) rotateY(-42deg) rotateZ(360deg);
-  }
-  100% {
-    transform: rotateX(46deg) rotateY(-42deg) rotateZ(0deg);
-  }
-}
-
-/* 1.17 Satellite Pulse & Starlight Twinkle */
-@keyframes satellite-pulse {
+/* 1.5 Status Pulse: flat opacity pulse for active status dot (zero box-shadow) */
+@keyframes status-dot-pulse {
   0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 6px 1px var(--fg-bright);
-    opacity: 0.95;
-  }
-  50% {
-    transform: scale(1.35);
-    box-shadow: 0 0 12px 3px var(--glow-green);
     opacity: 1;
   }
-}
-
-@keyframes tab-glow-pulse {
-  0%, 100% {
-    opacity: 0.75;
-    box-shadow: 0 0 8px rgba(255, 255, 255, 0.4), 0 0 16px rgba(255, 255, 255, 0.15);
-  }
   50% {
-    opacity: 1;
-    box-shadow: 0 0 14px rgba(255, 255, 255, 0.65), 0 0 24px rgba(56, 189, 248, 0.3);
+    opacity: 0.45;
   }
 }
 
 /* --- 2. Animation Utility Classes ----------------------------------------- */
 
-.animate-pulse-glow {
-  animation: pulse-glow var(--dur-loop, 1200ms) var(--ease-orbital, cubic-bezier(0.65, 0, 0.35, 1)) infinite;
-}
-
-.animate-pulse-subtle {
-  animation: pulse-glow var(--dur-long, 1800ms) var(--ease-calm, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
-}
-
-.animate-aurora-flow {
-  background-size: 200% 200%;
-  animation: aurora-flow 5s var(--ease-calm) infinite;
-}
-
-.animate-pipeline-flow {
-  background-size: 100% 200%;
-  animation: pipeline-flow 2s linear infinite;
-}
-
-.animate-tab-glow {
-  animation: tab-glow-pulse 2.4s ease-in-out infinite;
-}
-
-.animate-shimmer {
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--c-rgba-255-255-255-0p08) 50%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: shimmer var(--dur-long, 1800ms) linear infinite;
-}
-
-.animate-border-travel {
-  background-size: 200% 200%;
-  animation: border-travel var(--dur-lap, 2400ms) var(--ease-calm, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
-}
-
-.animate-float-subtle {
-  animation: float-subtle 3s var(--ease-calm, cubic-bezier(0.4, 0, 0.2, 1)) infinite ease-in-out;
-}
-
-.animate-ripple-ring {
-  position: relative;
-}
-
-.animate-ripple-ring::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  border: 1px solid var(--glow-pulse-color, var(--ok));
-  animation: ripple-ring var(--dur-long, 1800ms) cubic-bezier(0.2, 0.8, 0.4, 1) infinite;
-  pointer-events: none;
-}
-
 .animate-accordion-down {
-  animation: accordion-down var(--dur-base, 240ms) var(--ease-smooth, cubic-bezier(0.16, 1, 0.3, 1));
+  animation: accordion-down var(--dur-base, 240ms) var(--ease-precise);
 }
 
 .animate-accordion-up {
-  animation: accordion-up var(--dur-base, 240ms) var(--ease-smooth, cubic-bezier(0.16, 1, 0.3, 1));
+  animation: accordion-up var(--dur-quick, 150ms) var(--ease-precise);
 }
 
 .animate-fade-slide-up {
-  animation: fade-slide-up var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
+  animation: fade-slide-up var(--dur-base, 240ms) var(--ease-precise) forwards;
 }
 
 .animate-fade-slide-down {
-  animation: fade-slide-down var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
+  animation: fade-slide-down var(--dur-base, 240ms) var(--ease-precise) forwards;
 }
 
 .animate-fade-slide-left {
-  animation: fade-slide-left var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
+  animation: fade-slide-left var(--dur-base, 240ms) var(--ease-precise) forwards;
 }
 
 .animate-fade-slide-right {
-  animation: fade-slide-right var(--dur-base, 240ms) var(--ease-precise, cubic-bezier(0.2, 0, 1)) forwards;
+  animation: fade-slide-right var(--dur-base, 240ms) var(--ease-precise) forwards;
 }
 
 .animate-spin-smooth {
-  animation: spin-smooth var(--dur-loop, 1200ms) linear infinite;
+  animation: spin-smooth var(--dur-max, 300ms) var(--ease-linear) infinite;
 }
 
 .animate-blink-cursor {
-  animation: blink-cursor 1s steps(2, start) infinite;
-}
-
-.animate-badge-pop {
-  animation: badge-pop var(--dur-quick, 160ms) var(--ease-spring, cubic-bezier(0.175, 0.885, 0.32, 1.275)) forwards;
+  animation: blink-cursor var(--dur-max, 300ms) steps(2, start) infinite;
 }
 
 /* --- 3. Reduced Motion Overrides ------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-glow,
-  .animate-pulse-subtle,
-  .animate-aurora-flow,
-  .animate-pipeline-flow,
-  .animate-tab-glow,
-  .animate-shimmer,
-  .animate-border-travel,
-  .animate-float-subtle,
-  .animate-ripple-ring::after,
   .animate-spin-smooth,
   .animate-blink-cursor {
     animation-iteration-count: 1 !important;
@@ -386,21 +158,11 @@
   .animate-fade-slide-up,
   .animate-fade-slide-down,
   .animate-fade-slide-left,
-  .animate-fade-slide-right,
-  .animate-badge-pop {
+  .animate-fade-slide-right {
     animation-duration: 0.01ms !important;
   }
 }
 
-:root[data-reduced-motion="true"] .animate-pulse-glow,
-:root[data-reduced-motion="true"] .animate-pulse-subtle,
-:root[data-reduced-motion="true"] .animate-aurora-flow,
-:root[data-reduced-motion="true"] .animate-pipeline-flow,
-:root[data-reduced-motion="true"] .animate-tab-glow,
-:root[data-reduced-motion="true"] .animate-shimmer,
-:root[data-reduced-motion="true"] .animate-border-travel,
-:root[data-reduced-motion="true"] .animate-float-subtle,
-:root[data-reduced-motion="true"] .animate-ripple-ring::after,
 :root[data-reduced-motion="true"] .animate-spin-smooth,
 :root[data-reduced-motion="true"] .animate-blink-cursor {
   animation-iteration-count: 1 !important;
@@ -411,7 +173,6 @@
 :root[data-reduced-motion="true"] .animate-fade-slide-up,
 :root[data-reduced-motion="true"] .animate-fade-slide-down,
 :root[data-reduced-motion="true"] .animate-fade-slide-left,
-:root[data-reduced-motion="true"] .animate-fade-slide-right,
-:root[data-reduced-motion="true"] .animate-badge-pop {
+:root[data-reduced-motion="true"] .animate-fade-slide-right {
   animation-duration: 0.01ms !important;
 }

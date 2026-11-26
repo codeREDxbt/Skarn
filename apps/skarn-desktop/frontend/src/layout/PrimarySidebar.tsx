@@ -101,7 +101,6 @@ function WorkflowsPanelLoading() {
       role="status"
       aria-live="polite"
       data-workflow-panel="loading"
-      style={{ color: 'var(--fg-muted)', fontSize: 'var(--type-sm)', lineHeight: 'var(--type-sm-lh)' }}
     >
       Loading workflow runs…
     </div>
@@ -126,13 +125,12 @@ function WorkflowsPanelUnavailable({
       className="workflows-panel-fallback"
       role="status"
       data-workflow-panel="unavailable"
-      style={{ color: 'var(--fg-muted)', fontSize: 'var(--type-sm)', lineHeight: 'var(--type-sm-lh)' }}
     >
-      <p style={{ margin: '0 0 var(--space-2)', color: 'var(--fg-default)' }}>
+      <p className="workflows-panel-fallback-title">
         Workflows could not be loaded right now.
       </p>
       {detail ? (
-        <p style={{ margin: '0 0 var(--space-2)' }} data-workflow-panel-detail="">
+        <p className="workflows-panel-fallback-detail" data-workflow-panel-detail="">
           {detail}
         </p>
       ) : null}

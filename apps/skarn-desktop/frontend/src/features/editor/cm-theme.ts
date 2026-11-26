@@ -112,7 +112,7 @@ export function createSkarnTheme(theme: ResolvedTheme = currentTheme()): Extensi
         backgroundColor: token('--ink-hi'),
       },
       '.cm-searchMatch': {
-        backgroundColor: token('--glow-accent'),
+        backgroundColor: token('--tint-accent'),
         outline: `1px solid ${token('--ink-rule')}`,
       },
       '.cm-searchMatch.cm-searchMatch-selected': {

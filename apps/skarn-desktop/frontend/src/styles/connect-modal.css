@@ -1,26 +1,20 @@
-/* Selora IDE — Provider & API Key Connection Modal Styles */
+/* Skarn — Provider & API Key Connection Modal Styles */
 
 .connect-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: var(--c-rgba-0-0-0-0p78);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 9999;
-  padding: 16px;
-  animation: modal-fade-in 0.2s ease-out;
+  padding: var(--space-4);
+  animation: modal-fade-in var(--dur-quick) var(--ease-precise);
 }
 
 @keyframes modal-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .connect-modal-card {
@@ -28,20 +22,19 @@
   max-width: 660px;
   background: var(--c-0f1217);
   border: 1px solid var(--c-rgba-255-255-255-0p12);
-  border-radius: 12px;
-  box-shadow: 0 32px 80px var(--c-rgba-0-0-0-0p85), 0 0 0 1px var(--c-rgba-255-255-255-0p06), 0 0 40px var(--c-rgba-16-185-129-0p1);
+  border-radius: var(--radius-2);
   display: flex;
   flex-direction: column;
   max-height: 90vh;
   overflow-y: auto;
-  animation: modal-scale-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: modal-scale-in var(--dur-base) var(--ease-precise);
   position: relative;
 }
 
 @keyframes modal-scale-in {
   from {
     opacity: 0;
-    transform: scale(0.97) translateY(6px);
+    transform: scale(0.98) translateY(4px);
   }
   to {
     opacity: 1;
@@ -53,7 +46,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 20px 24px 16px;
+  padding: 20px var(--space-5) var(--space-4);
   border-bottom: 1px solid var(--c-rgba-255-255-255-0p06);
 }
 
@@ -66,7 +59,7 @@
 .connect-modal-icon-badge {
   width: 38px;
   height: 38px;
-  border-radius: 9px;
+  border-radius: var(--radius-2);
   background: var(--c-rgba-16-185-129-0p12);
   border: 1px solid var(--c-rgba-16-185-129-0p25);
   color: var(--c-10b981);
@@ -78,46 +71,51 @@
 
 .connect-modal-title {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
   color: var(--c-f3f4f6);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-tight);
 }
 
 .connect-modal-subtitle {
-  margin: 4px 0 0;
-  font-size: 12px;
+  margin: var(--space-1) 0 0;
+  font-size: var(--type-sm);
   color: var(--c-9ca3af);
   line-height: 1.4;
 }
 
 .connect-modal-close-btn {
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: var(--info);
   cursor: pointer;
   padding: 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-1);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-modal-close-btn:hover {
   background: var(--c-rgba-255-255-255-0p06);
+  border-color: var(--hairline-faint);
   color: var(--c-e5e7eb);
 }
 
 /* Status Banner */
 .connect-status-banner {
-  margin: 16px 24px 0;
+  margin: var(--space-4) var(--space-5) 0;
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-2);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--type-sm);
 }
 
 .connect-status-banner.is-connected {
@@ -135,49 +133,45 @@
 .connect-status-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .connect-status-dot {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 
-.is-connected .connect-status-dot {
-  box-shadow: 0 0 8px var(--c-10b981);
-}
-
 .connect-status-label {
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .connect-key-hint {
-  font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
   color: var(--c-9ca3af);
   background: var(--c-rgba-0-0-0-0p3);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
 }
 
 .connect-active-model {
-  font-size: 11px;
+  font-size: var(--type-xs);
   color: var(--c-9ca3af);
 }
 
 .connect-active-model code {
   color: var(--c-e5e7eb);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
 }
 
 /* Form */
 .connect-modal-form {
-  padding: 16px 24px 20px;
+  padding: var(--space-4) var(--space-5) 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .connect-field {
@@ -195,22 +189,22 @@
 .connect-label-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .connect-label {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
   color: var(--c-d1d5db);
 }
 
 .connect-field-hint {
-  font-size: 11px;
+  font-size: var(--type-xs);
   color: var(--info);
 }
 
 .connect-docs-link {
-  font-size: 11px;
+  font-size: var(--type-xs);
   color: var(--c-10b981);
   text-decoration: none;
   display: inline-flex;
@@ -226,19 +220,20 @@
 .connect-format-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   font-size: 10.5px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   padding: 1px 7px;
-  border-radius: 4px;
-  transition: all 0.15s ease;
+  border-radius: var(--radius-1);
+  transition: color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-format-badge.badge-valid {
   background: var(--c-rgba-16-185-129-0p14);
   color: var(--c-34d399);
   border: 1px solid var(--c-rgba-16-185-129-0p3);
-  box-shadow: 0 0 8px var(--c-rgba-16-185-129-0p18);
 }
 
 .connect-format-badge.badge-warning {
@@ -259,37 +254,36 @@
   border: 1px solid var(--c-rgba-255-255-255-0p08);
 }
 
-/* Preset Grid & Modern Cards */
+/* Preset Grid & Cards */
 .connect-preset-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .connect-preset-card {
   background: var(--c-141820);
   border: 1px solid var(--c-rgba-255-255-255-0p08);
-  border-radius: 8px;
+  border-radius: var(--radius-2);
   padding: 9px 11px;
   text-align: left;
   cursor: pointer;
-  transition: all 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   position: relative;
 }
 
 .connect-preset-card:hover {
   background: var(--c-19202a);
   border-color: var(--c-rgba-255-255-255-0p18);
-  transform: translateY(-1px);
 }
 
 .connect-preset-card.is-selected {
   background: var(--c-rgba-16-185-129-0p1);
   border-color: var(--c-10b981);
-  box-shadow: 0 0 16px var(--c-rgba-16-185-129-0p22), inset 0 0 10px var(--c-rgba-16-185-129-0p05);
 }
 
 .connect-preset-top {
@@ -302,12 +296,13 @@
 .connect-preset-icon-wrapper {
   width: 24px;
   height: 24px;
-  border-radius: 5px;
+  border-radius: var(--radius-1);
   background: var(--c-rgba-255-255-255-0p05);
   display: grid;
   place-items: center;
   color: var(--c-9ca3af);
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-preset-card.is-selected .connect-preset-icon-wrapper {
@@ -317,11 +312,11 @@
 
 .connect-preset-badge {
   font-size: 9px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: 1.5px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
 }
 
 .connect-preset-badge.tag-recommended {
@@ -356,7 +351,7 @@
 
 .connect-preset-name {
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--c-f3f4f6);
   display: flex;
   align-items: center;
@@ -385,18 +380,17 @@
   align-items: center;
   background: var(--c-141820);
   border: 1px solid var(--c-rgba-255-255-255-0p1);
-  border-radius: 8px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  border-radius: var(--radius-2);
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-input-wrapper:focus-within {
   border-color: var(--fg-default);
-  box-shadow: 0 0 0 2px var(--c-rgba-16-185-129-0p18);
 }
 
 .connect-input-icon {
   position: absolute;
-  left: 12px;
+  left: var(--space-3);
   color: var(--info);
   pointer-events: none;
 }
@@ -406,10 +400,10 @@
   background: transparent;
   border: none;
   outline: none;
-  padding: 9px 12px 9px 36px;
+  padding: 9px var(--space-3) 9px 36px;
   font-size: 12.5px;
   color: var(--c-f3f4f6);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
 }
 
 .connect-input::placeholder {
@@ -422,11 +416,11 @@
   border: none;
   color: var(--info);
   cursor: pointer;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.12s;
+  transition: color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-toggle-eye:hover {
@@ -435,12 +429,12 @@
 
 /* Alerts */
 .connect-alert {
-  padding: 10px 12px;
-  border-radius: 8px;
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-2);
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  font-size: 12px;
+  font-size: var(--type-sm);
   line-height: 1.4;
 }
 
@@ -470,7 +464,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
   padding-top: 14px;
   border-top: 1px solid var(--c-rgba-255-255-255-0p06);
 }
@@ -479,7 +475,7 @@
 .connect-footer-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .connect-btn-cancel {
@@ -487,11 +483,12 @@
   border: 1px solid var(--c-rgba-255-255-255-0p08);
   color: var(--c-d1d5db);
   font-size: 12.5px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   padding: 7px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-btn-cancel:hover:not(:disabled) {
@@ -499,19 +496,25 @@
   color: var(--c-f3f4f6);
 }
 
+.connect-btn-cancel:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
 .connect-btn-disconnect {
   background: transparent;
   border: 1px solid var(--c-rgba-239-68-68-0p3);
   color: var(--c-f87171);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 12px;
-  border-radius: 6px;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+  padding: 6px var(--space-3);
+  border-radius: var(--radius-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-btn-disconnect:hover:not(:disabled) {
@@ -520,47 +523,43 @@
   color: var(--c-ef4444);
 }
 
-/* Animated Test Connection Button */
 .connect-btn-submit {
   background: var(--c-10b981);
-  border: none;
+  border: 1px solid var(--c-10b981);
   color: var(--c-042517);
   font-size: 12.5px;
-  font-weight: 600;
-  padding: 7px 16px;
-  border-radius: 6px;
+  font-weight: var(--weight-semibold);
+  padding: 7px var(--space-4);
+  border-radius: var(--radius-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.15s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-btn-submit:hover:not(:disabled) {
   background: var(--c-34d399);
-  box-shadow: 0 0 14px var(--c-rgba-16-185-129-0p45);
 }
 
 .connect-btn-submit.is-success {
   background: var(--c-059669);
   color: var(--fg-bright);
-  box-shadow: 0 0 16px var(--c-rgba-16-185-129-0p5);
 }
 
 .connect-btn-check {
-  animation: check-pop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: check-pop var(--dur-quick) var(--ease-precise);
 }
 
 @keyframes check-pop {
-  from {
-    transform: scale(0.6);
-  }
-  to {
-    transform: scale(1);
-  }
+  from { transform: scale(0.75); }
+  to { transform: scale(1); }
 }
 
-.connect-btn-submit:disabled {
+.connect-btn-submit:disabled,
+.connect-btn-cancel:disabled,
+.connect-btn-disconnect:disabled {
   background: transparent;
   border: var(--border-hairline);
   color: var(--fg-disabled);
@@ -569,15 +568,18 @@
 }
 
 .connect-spinner {
-  animation: spin 0.8s linear infinite;
+  animation: spin var(--dur-max) var(--ease-linear) infinite;
 }
 
-/* Focus and ARIA state (Z6 a11y pass). All values are existing tokens; the
-   global :focus-visible ring in base.css supplies the visible outline. */
 .connect-modal-close-btn:focus-visible,
 .connect-toggle-eye:focus-visible,
-.connect-tab-btn:focus-visible {
-  color: var(--fg-default);
+.connect-tab-btn:focus-visible,
+.connect-btn-cancel:focus-visible,
+.connect-btn-disconnect:focus-visible,
+.connect-btn-submit:focus-visible,
+.connect-refresh-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
 }
 
 .connect-preset-card:focus-visible,
@@ -594,19 +596,15 @@
 }
 
 @keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Tabs Navigation */
 .connect-tabs-nav {
   display: flex;
   gap: 6px;
-  padding: 12px 24px 0;
+  padding: var(--space-3) var(--space-5) 0;
   border-bottom: 1px solid var(--c-rgba-255-255-255-0p08);
 }
 
@@ -615,14 +613,13 @@
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--c-9ca3af);
-  font-size: 13px;
-  font-weight: 500;
-  padding: 8px 12px;
+  font-size: var(--type-md);
+  font-weight: var(--weight-medium);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  transition: all 0.15s ease;
 }
 
 .connect-tab-btn:hover {
@@ -636,7 +633,7 @@
 
 /* Model & Reasoning Settings Tab */
 .connect-settings-tab {
-  padding: 20px 24px;
+  padding: 20px var(--space-5);
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -646,7 +643,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .connect-refresh-btn {
@@ -654,14 +651,16 @@
   border: 1px solid var(--c-rgba-255-255-255-0p12);
   color: var(--c-d1d5db);
   font-size: 11.5px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   padding: 5px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-refresh-btn:hover:not(:disabled) {
@@ -683,12 +682,12 @@
   background: var(--c-141820);
   border: 1px solid var(--c-rgba-255-255-255-0p12);
   color: var(--c-f3f4f6);
-  font-size: 13px;
-  padding: 9px 12px;
-  border-radius: 7px;
+  font-size: var(--type-md);
+  padding: 9px var(--space-3);
+  border-radius: var(--radius-2);
   outline: none;
   cursor: pointer;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-select:focus-visible {
@@ -703,230 +702,22 @@
 .connect-effort-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  gap: var(--space-2);
 }
 
-.connect-effort-card {
-  background: var(--c-141820);
-  border: 1px solid var(--c-rgba-255-255-255-0p08);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.12s ease;
-}
-
-.connect-effort-card:hover {
-  border-color: var(--c-rgba-255-255-255-0p18);
-  background: var(--c-181d26);
-}
-
-.connect-effort-card.is-selected {
-  border-color: var(--c-10b981);
-  background: var(--c-rgba-16-185-129-0p08);
-}
-
-.connect-effort-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--c-f3f4f6);
-  margin-bottom: 4px;
-}
-
-.connect-effort-desc {
-  font-size: 11px;
-  color: var(--c-9ca3af);
-  line-height: 1.35;
-}
-
-.connect-slider-container {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.connect-slider-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.connect-slider-val {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--c-10b981);
-  background: var(--c-rgba-16-185-129-0p1);
-  padding: 2px 7px;
-  border-radius: 4px;
-}
-
-.connect-slider {
-  width: 100%;
-  accent-color: var(--c-10b981);
-  cursor: pointer;
-}
-
-.connect-slider-ticks {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10.5px;
-  color: var(--info);
-}
-
-.connect-textarea {
-  width: 100%;
-  min-height: 90px;
-  background: var(--c-141820);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
-  color: var(--c-f3f4f6);
-  font-size: 12.5px;
-  font-family: inherit;
-  padding: 10px 12px;
-  border-radius: 7px;
-  outline: none;
-  resize: vertical;
-  line-height: 1.45;
-  transition: border-color 0.12s ease;
-}
-
-.connect-textarea:focus-visible {
-  border-color: var(--fg-default);
-}
-
-/* Small windows: let footer/banner rows wrap and effort cards reflow so the
-   660px modal keeps fitting inside narrow viewports without clipping. */
-.connect-modal-footer {
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.connect-status-banner {
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-/* Scoped to the settings tab so this survives the duplicated rule blocks
-   below: wins on specificity instead of source order. */
 .connect-settings-tab .connect-effort-grid {
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
 }
 
-/* Tabs Navigation */
-.connect-tabs-nav {
-  display: flex;
-  gap: 6px;
-  padding: 12px 24px 0;
-  border-bottom: 1px solid var(--c-rgba-255-255-255-0p08);
-}
-
-.connect-tab-btn {
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--c-9ca3af);
-  font-size: 13px;
-  font-weight: 500;
-  padding: 8px 12px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  transition: all 0.15s ease;
-}
-
-.connect-tab-btn:hover {
-  color: var(--c-f3f4f6);
-}
-
-.connect-tab-btn.is-active {
-  color: var(--c-10b981);
-  border-bottom-color: var(--c-10b981);
-}
-
-/* Model & Reasoning Settings Tab */
-.connect-settings-tab {
-  padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.connect-field-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.connect-refresh-btn {
-  background: var(--c-rgba-255-255-255-0p05);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
-  color: var(--c-d1d5db);
-  font-size: 11.5px;
-  font-weight: 500;
-  padding: 5px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transition: all 0.12s ease;
-}
-
-.connect-refresh-btn:hover:not(:disabled) {
-  background: var(--c-rgba-255-255-255-0p1);
-  color: var(--c-f3f4f6);
-  border-color: var(--c-rgba-255-255-255-0p2);
-}
-
-.connect-refresh-btn:disabled {
-  background: transparent;
-  border: var(--border-hairline);
-  color: var(--fg-disabled);
-  cursor: default;
-  opacity: 1;
-}
-
-.connect-select {
-  width: 100%;
-  background: var(--c-141820);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
-  color: var(--c-f3f4f6);
-  font-size: 13px;
-  padding: 9px 12px;
-  border-radius: 7px;
-  outline: none;
-  cursor: pointer;
-  transition: border-color 0.12s ease;
-}
-
-.connect-select:focus-visible {
-  border-color: var(--fg-default);
-}
-
-.connect-select option {
-  background: var(--c-141820);
-  color: var(--c-f3f4f6);
-}
-
-.connect-effort-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
 .connect-effort-card {
   background: var(--c-141820);
   border: 1px solid var(--c-rgba-255-255-255-0p08);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: var(--radius-2);
+  padding: 10px var(--space-3);
   cursor: pointer;
   text-align: left;
-  transition: all 0.12s ease;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-effort-card:hover {
@@ -944,13 +735,13 @@
   align-items: center;
   justify-content: space-between;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--c-f3f4f6);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .connect-effort-desc {
-  font-size: 11px;
+  font-size: var(--type-xs);
   color: var(--c-9ca3af);
   line-height: 1.35;
 }
@@ -958,7 +749,7 @@
 .connect-slider-container {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .connect-slider-header {
@@ -968,13 +759,13 @@
 }
 
 .connect-slider-val {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
   color: var(--c-10b981);
   background: var(--c-rgba-16-185-129-0p1);
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--radius-1);
 }
 
 .connect-slider {
@@ -998,12 +789,12 @@
   color: var(--c-f3f4f6);
   font-size: 12.5px;
   font-family: inherit;
-  padding: 10px 12px;
-  border-radius: 7px;
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-2);
   outline: none;
   resize: vertical;
   line-height: 1.45;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--dur-instant) var(--ease-calm);
 }
 
 .connect-textarea:focus-visible {

@@ -42,7 +42,7 @@
   background: transparent;
   color: var(--fg-faint);
   cursor: pointer;
-  transition: color var(--dur-instant) ease, background var(--dur-instant) ease;
+  transition: color var(--dur-instant) var(--ease-calm), background-color var(--dur-instant) var(--ease-calm);
 }
 
 .agent-attach-chip-remove:hover,
