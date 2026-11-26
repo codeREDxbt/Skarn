@@ -1,4 +1,4 @@
-# cargo-deny configuration for Selora IDE.
+# cargo-deny configuration for Skarn.
 # NOTE: the file name `deny.toml` is what cargo-deny auto-discovers (not
 # `cargo-deny.toml`).
 # The license gate is part of the merge gate: any crate with a
@@ -44,7 +44,7 @@ allow = [
 # Multiple versions of the same crate are noisy but not fatal; duplicates = warn.
 multiple-versions = "warn"
 # Wildcards are versionless deps — in this workspace that means ONLY the
-# `selora-*` path dependencies (verified: every wildcard above resolves to a
+# `skarn-*` path dependencies (verified: every wildcard above resolves to a
 # crates/ path). External deps all carry versions, so the protection holds.
 wildcards = "allow"
 

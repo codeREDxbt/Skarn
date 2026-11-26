@@ -1,0 +1,22 @@
+[package]
+name = "skarn-ui"
+description = "egui chrome: design tokens, fonts, brand mark, panels, palette, modals (see PLAN.md §5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+egui.workspace = true
+
+skarn-tokens.workspace = true
+skarn-editor.workspace = true
+skarn-fs.workspace = true
+skarn-ai.workspace = true
+skarn-settings.workspace = true
+skarn-git.workspace = true
+skarn-lsp.workspace = true
+nucleo-matcher = "0.3.1"
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

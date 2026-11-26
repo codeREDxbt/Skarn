@@ -26,7 +26,7 @@
     in docs/WALKTHROUGH.md.
 
 .PARAMETER Mode
-    release (default) uses target\release\selora-desktop.exe with the embedded
+    release (default) uses target\release\skarn-desktop.exe with the embedded
     frontend. dev uses the Vite dev server on port 1420 plus target\debug,
     matching `npm run dev` + `cargo run` work. dev starts and stops its own Vite
     process.
@@ -78,7 +78,7 @@
       1 = a walkthrough step failed
       2 = environment/launch/attach failure (nothing was driven)
 
-    Safety: refuses to start when another selora-desktop process is running
+    Safety: refuses to start when another skarn-desktop process is running
     (the Tauri single-instance plugin would forward to it). Kills only the
     process tree it started. The app gets SELORA_SETTINGS_DIR pointing inside
     the artifact directory, so settings/layout writes are isolated. No API key
@@ -203,10 +203,10 @@ function Assert-Preconditions {
     if ($null -eq $node) {
         Fail-Launch 'node is not on PATH; the walkthrough driver needs Node 22 or newer'
     }
-    $existing = @(Get-Process -Name 'selora-desktop' -ErrorAction SilentlyContinue)
+    $existing = @(Get-Process -Name 'skarn-desktop' -ErrorAction SilentlyContinue)
     if ($existing.Count -gt 0) {
         $ids = ($existing | ForEach-Object { $_.Id }) -join ', '
-        Fail-Launch ("selora-desktop is already running (pid " + $ids + "). Close it first: the Tauri single-instance plugin would forward the new launch to that process, which has no CDP port.")
+        Fail-Launch ("skarn-desktop is already running (pid " + $ids + "). Close it first: the Tauri single-instance plugin would forward the new launch to that process, which has no CDP port.")
     }
     $listener = $null
     try {
@@ -285,18 +285,18 @@ function Resolve-Exe {
         $targetDir = Join-Path $RepoRoot $targetDir
     }
     if ($Mode -eq 'release') {
-        $script:exePath = Join-Path $targetDir 'release\selora-desktop.exe'
+        $script:exePath = Join-Path $targetDir 'release\skarn-desktop.exe'
     }
     else {
-        $script:exePath = Join-Path $targetDir 'debug\selora-desktop.exe'
+        $script:exePath = Join-Path $targetDir 'debug\skarn-desktop.exe'
     }
     return $script:exePath
 }
 
 function Install-FrontendDeps {
-    $nodeModules = Join-Path $RepoRoot 'apps\selora-desktop\frontend\node_modules'
+    $nodeModules = Join-Path $RepoRoot 'apps\skarn-desktop\frontend\node_modules'
     if (-not (Test-Path -LiteralPath $nodeModules)) {
-        Invoke-BuildStep 'npm ci (frontend dependencies)' 'cmd.exe' @('/c', 'npm.cmd --prefix apps\selora-desktop\frontend ci --no-audit --no-fund')
+        Invoke-BuildStep 'npm ci (frontend dependencies)' 'cmd.exe' @('/c', 'npm.cmd --prefix apps\skarn-desktop\frontend ci --no-audit --no-fund')
     }
 }
 
@@ -305,7 +305,7 @@ function Start-Vite {
     $viteLog = Join-Path $ArtifactsDir 'vite-dev.log'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'cmd.exe'
-    $psi.Arguments = '/c npm.cmd --prefix apps\selora-desktop\frontend run dev > "' + $viteLog + '" 2>&1'
+    $psi.Arguments = '/c npm.cmd --prefix apps\skarn-desktop\frontend run dev > "' + $viteLog + '" 2>&1'
     $psi.WorkingDirectory = $RepoRoot
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -339,7 +339,7 @@ function Start-App {
     Write-Phase ("Launching " + $Mode + " app: " + $script:exePath)
     if (-not (Test-Path -LiteralPath $script:exePath)) {
         if ($Mode -eq 'release') {
-            Fail-Launch ("release binary missing: " + $script:exePath + ". Build it with:`n  npm.cmd --prefix apps\selora-desktop\frontend run build`n  cargo build --release -p selora-desktop`nor rerun with -Build.")
+            Fail-Launch ("release binary missing: " + $script:exePath + ". Build it with:`n  npm.cmd --prefix apps\skarn-desktop\frontend run build`n  cargo build --release -p skarn-desktop`nor rerun with -Build.")
         }
         Fail-Launch ("debug binary missing: " + $script:exePath + ". Rerun with -Build.")
     }
@@ -383,13 +383,13 @@ function Start-App {
             Start-Sleep -Seconds (3 * $attempt)
             continue
         }
-        Fail-Launch ("selora-desktop exited during startup on all " + $attempts + " attempts (last exit " + $proc.ExitCode + "). See " + $attemptLog + " and app-panic.log.")
+        Fail-Launch ("skarn-desktop exited during startup on all " + $attempts + " attempts (last exit " + $proc.ExitCode + "). See " + $attemptLog + " and app-panic.log.")
     }
 
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
         if ($proc.HasExited) {
-            Fail-Launch ("selora-desktop exited before CDP attached (exit " + $proc.ExitCode + "). Check app-boot.log.")
+            Fail-Launch ("skarn-desktop exited before CDP attached (exit " + $proc.ExitCode + "). Check app-boot.log.")
         }
         try {
             $targets = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $Port + '/json/list') -TimeoutSec 2
@@ -609,21 +609,21 @@ try {
         if ($Build) {
             Write-Phase 'Building release artifacts'
             Install-FrontendDeps
-            Invoke-BuildStep 'npm run build (frontend)' 'cmd.exe' @('/c', 'npm.cmd --prefix apps\selora-desktop\frontend run build')
+            Invoke-BuildStep 'npm run build (frontend)' 'cmd.exe' @('/c', 'npm.cmd --prefix apps\skarn-desktop\frontend run build')
             # Force the binary to re-embed frontend\dist; an up-to-date cargo
             # artifact can otherwise keep the previous asset bundle.
-            Invoke-BuildStep 'cargo clean -p selora-desktop --release' 'cargo.exe' @('clean', '-p', 'selora-desktop', '--release')
-            Invoke-BuildStep 'cargo build --release -p selora-desktop' 'cargo.exe' @('build', '--release', '-p', 'selora-desktop', '--locked')
+            Invoke-BuildStep 'cargo clean -p skarn-desktop --release' 'cargo.exe' @('clean', '-p', 'skarn-desktop', '--release')
+            Invoke-BuildStep 'cargo build --release -p skarn-desktop' 'cargo.exe' @('build', '--release', '-p', 'skarn-desktop', '--locked')
         }
         if (-not (Test-Path -LiteralPath $exe)) {
-            Fail-Launch ('release binary missing: ' + $exe + ". Build it with:`n  npm.cmd --prefix apps\selora-desktop\frontend run build`n  cargo build --release -p selora-desktop`nor rerun with -Build.")
+            Fail-Launch ('release binary missing: ' + $exe + ". Build it with:`n  npm.cmd --prefix apps\skarn-desktop\frontend run build`n  cargo build --release -p skarn-desktop`nor rerun with -Build.")
         }
     }
     else {
         Install-FrontendDeps
         if ($Build -or -not (Test-Path -LiteralPath (Resolve-Exe))) {
             Write-Phase 'Building debug binary'
-            Invoke-BuildStep 'cargo build -p selora-desktop' 'cargo.exe' @('build', '-p', 'selora-desktop', '--locked')
+            Invoke-BuildStep 'cargo build -p skarn-desktop' 'cargo.exe' @('build', '-p', 'skarn-desktop', '--locked')
         }
         $null = Resolve-Exe
         Start-Vite

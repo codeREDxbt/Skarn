@@ -77,9 +77,9 @@ if (-not (Test-Path -LiteralPath $RepoRoot)) {
     exit 1
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-$frontend = Join-Path $RepoRoot 'apps\selora-desktop\frontend'
-$debugExe = Join-Path $RepoRoot 'target\debug\selora-desktop.exe'
-$releaseExe = Join-Path $RepoRoot 'target\release\selora-desktop.exe'
+$frontend = Join-Path $RepoRoot 'apps\skarn-desktop\frontend'
+$debugExe = Join-Path $RepoRoot 'target\debug\skarn-desktop.exe'
+$releaseExe = Join-Path $RepoRoot 'target\release\skarn-desktop.exe'
 $bootLog = Join-Path $env:TEMP 'selora_boot.log'
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -159,14 +159,14 @@ function Stop-PortOwner {
 }
 
 function Stop-SeloraProcesses {
-    Get-Process -Name 'selora-desktop' -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-Process -Name 'skarn-desktop' -ErrorAction SilentlyContinue | ForEach-Object {
         Stop-Tree -ProcessId $_.Id
     }
     # A WebView2 profile is shared by every instance; wait for the tree to die
     # so the next launch really is a cold process start.
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
-        $left = @(Get-Process -Name 'selora-desktop' -ErrorAction SilentlyContinue)
+        $left = @(Get-Process -Name 'skarn-desktop' -ErrorAction SilentlyContinue)
         if ($left.Count -eq 0) { return }
         Start-Sleep -Milliseconds 200
     }
@@ -360,17 +360,17 @@ try {
         }
 
         Write-Host 'Building debug binary ...'
-        & cargo build -p selora-desktop 2>&1 | Tee-Object -FilePath (Join-Path $ResultsDir 'cargo-build-debug.log')
+        & cargo build -p skarn-desktop 2>&1 | Tee-Object -FilePath (Join-Path $ResultsDir 'cargo-build-debug.log')
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 
         Write-Host 'Building release binary (thin LTO, codegen-units=1) ...'
-        & cargo build -p selora-desktop --release 2>&1 | Tee-Object -FilePath (Join-Path $ResultsDir 'cargo-build-release.log')
+        & cargo build -p skarn-desktop --release 2>&1 | Tee-Object -FilePath (Join-Path $ResultsDir 'cargo-build-release.log')
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed ($LASTEXITCODE)" }
         Add-Stage -Name 'build' -Status 'PASS' -Detail 'frontend dist + debug + release'
     } else {
         $missing = @()
-        if (-not (Test-Path -LiteralPath $debugExe)) { $missing += 'target\debug\selora-desktop.exe' }
-        if (-not (Test-Path -LiteralPath $releaseExe)) { $missing += 'target\release\selora-desktop.exe' }
+        if (-not (Test-Path -LiteralPath $debugExe)) { $missing += 'target\debug\skarn-desktop.exe' }
+        if (-not (Test-Path -LiteralPath $releaseExe)) { $missing += 'target\release\skarn-desktop.exe' }
         if (-not (Test-Path -LiteralPath (Join-Path $frontend 'dist\index.html'))) { $missing += 'frontend\dist' }
         if ($missing.Count -gt 0) { throw ('missing build artifacts: ' + ($missing -join ', ')) }
         Add-Stage -Name 'build' -Status 'SKIP' -Detail 'existing artifacts (-SkipBuild)'
@@ -481,9 +481,9 @@ try {
     if (-not $SkipRust) {
         Write-Host 'Running Rust performance tests (release, ignored suite) ...'
         $eventLog = Join-Path $ResultsDir 'cargo-test-perf-desktop.log'
-        & cargo test -p selora-desktop --release --bin selora-desktop perf_ -- --ignored --nocapture 2>&1 |
+        & cargo test -p skarn-desktop --release --bin skarn-desktop perf_ -- --ignored --nocapture 2>&1 |
             Tee-Object -FilePath $eventLog
-        if ($LASTEXITCODE -ne 0) { throw "selora-desktop perf tests failed ($LASTEXITCODE)" }
+        if ($LASTEXITCODE -ne 0) { throw "skarn-desktop perf tests failed ($LASTEXITCODE)" }
 
         $workflowLog = Join-Path $ResultsDir 'cargo-test-perf-workflow.log'
         & cargo test -p selora-workflow --release --test perf_overhead -- --ignored --nocapture 2>&1 |

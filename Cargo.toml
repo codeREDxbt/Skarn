@@ -1,19 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/selora-core",
-    "crates/selora-fs",
-    "crates/selora-editor",
-    "crates/selora-lsp",
-    "crates/selora-git",
-    "crates/selora-ai",
-    "crates/selora-settings",
-    "crates/selora-tokens",
-    "crates/selora-ui",
-    "crates/selora-app",
-    "crates/selora-protocol",
-    "crates/selora-workflow",
-    "apps/selora-desktop/src-tauri",
+    "crates/skarn-core",
+    "crates/skarn-fs",
+    "crates/skarn-editor",
+    "crates/skarn-lsp",
+    "crates/skarn-git",
+    "crates/skarn-ai",
+    "crates/skarn-settings",
+    "crates/skarn-tokens",
+    "crates/skarn-ui",
+    "crates/skarn-app",
+    "crates/skarn-protocol",
+    "crates/skarn-workflow",
+    "apps/skarn-desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -26,49 +26,49 @@ homepage = "https://github.com/codeREDxbt/Skarn"
 [workspace.dependencies]
 egui = "0.36"
 eframe = "0.36"
-# Buffer rope + shared types (selora-core).
+# Buffer rope + shared types (skarn-core).
 ropey = "1.6"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-selora-protocol = { path = "crates/selora-protocol" }
-# Networking (selora-ai): reqwest with rustls only — no OpenSSL on Windows (PLAN.md §4.7).
+skarn-protocol = { path = "crates/skarn-protocol" }
+# Networking (skarn-ai): reqwest with rustls only — no OpenSSL on Windows (PLAN.md §4.7).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
-# Installer download verification (selora-ai::updates): the published
-# `Selora-IDE-Setup-<version>.exe.sha256` is checked before the updater
+# Installer download verification (skarn-ai::updates): the published
+# `Skarn-Setup-<version>.exe.sha256` is checked before the updater
 # hands the file to the OS. A pure-Rust digest keeps the Windows build
 # free of native crypto dependencies.
 sha2 = "0.10"
-# LSP client types (selora-lsp): PLAN.md §4.5 — thin client, no tower-lsp.
+# LSP client types (skarn-lsp): PLAN.md §4.5 — thin client, no tower-lsp.
 lsp-types = "0.97"
-# Git bindings (selora-git): PLAN.md §4.6 — vendored libgit2 so Windows
+# Git bindings (skarn-git): PLAN.md §4.6 — vendored libgit2 so Windows
 # builds don't need a system libgit2.
 git2 = { version = "0.21", features = ["vendored-libgit2"] }
-# OS keyring (selora-settings): the API key's only home (PLAN.md §4.8 —
+# OS keyring (skarn-settings): the API key's only home (PLAN.md §4.8 —
 # never a file). Windows Credential Manager behind the platform-agnostic API.
 keyring = "3"
-# Dev-only: mock gateway for selora-ai tests (ROADMAP.md Phase 1b).
+# Dev-only: mock gateway for skarn-ai tests (ROADMAP.md Phase 1b).
 wiremock = "0.6"
 # Embedded terminal (desktop shell): Windows ConPTY through the same crate
 # WezTerm uses, so the pty semantics (resize, EOF, exit code) are the
 # battle-tested ones rather than a hand-rolled CreatePseudoConsole wrapper.
 portable-pty = "0.9"
 
-selora-core = { path = "crates/selora-core" }
-selora-fs = { path = "crates/selora-fs" }
-selora-editor = { path = "crates/selora-editor" }
-selora-lsp = { path = "crates/selora-lsp" }
-selora-git = { path = "crates/selora-git" }
-selora-ai = { path = "crates/selora-ai" }
-selora-settings = { path = "crates/selora-settings" }
-selora-tokens = { path = "crates/selora-tokens" }
-selora-ui = { path = "crates/selora-ui" }
-selora-app = { path = "crates/selora-app" }
-selora-workflow = { path = "crates/selora-workflow" }
+skarn-core = { path = "crates/skarn-core" }
+skarn-fs = { path = "crates/skarn-fs" }
+skarn-editor = { path = "crates/skarn-editor" }
+skarn-lsp = { path = "crates/skarn-lsp" }
+skarn-git = { path = "crates/skarn-git" }
+skarn-ai = { path = "crates/skarn-ai" }
+skarn-settings = { path = "crates/skarn-settings" }
+skarn-tokens = { path = "crates/skarn-tokens" }
+skarn-ui = { path = "crates/skarn-ui" }
+skarn-app = { path = "crates/skarn-app" }
+skarn-workflow = { path = "crates/skarn-workflow" }
 
 # Release profile per ARCHITECTURE.md §14.
 [profile.release]

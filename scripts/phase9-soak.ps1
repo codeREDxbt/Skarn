@@ -8,7 +8,7 @@
 
     The Rust tests use scripted gateways and real process-kill harnesses. They
     do not need a key, a gateway, or a visible window. Frontend coverage runs
-    only when apps/selora-desktop/frontend/node_modules exists; otherwise that
+    only when apps/skarn-desktop/frontend/node_modules exists; otherwise that
     row is PENDING (run `npm install` in the frontend directory to enable it).
 
     PENDING rows are features whose APIs are not on `integration` yet. They are
@@ -132,7 +132,7 @@ try {
         Add-Check -Id 'durable-replay-regression' -Status SKIP -Detail 'use -Full'
     }
 
-    $frontend = Join-Path $RepoRoot 'apps/selora-desktop/frontend'
+    $frontend = Join-Path $RepoRoot 'apps/skarn-desktop/frontend'
     $agentsTest = 'src/features/agent/agent-store.test.ts'
     if (-not (Test-Path -LiteralPath (Join-Path $frontend 'node_modules'))) {
         Add-Check -Id 'auto-approve-restart' -Status SKIP -Detail 'frontend node_modules missing; run npm install (row stays PENDING)'

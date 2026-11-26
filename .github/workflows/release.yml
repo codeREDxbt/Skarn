@@ -121,28 +121,28 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: apps/selora-desktop/frontend/package-lock.json
+          cache-dependency-path: apps/skarn-desktop/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm ci
 
       - name: Typecheck frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm run typecheck
 
       - name: Test frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm test
 
       - name: Build frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm run build
 
       - name: Verify frontend bundle
         shell: pwsh
         run: |
-          $index = 'apps\selora-desktop\frontend\dist\index.html'
+          $index = 'apps\skarn-desktop\frontend\dist\index.html'
           if (-not (Test-Path -LiteralPath $index)) {
             throw "Frontend build did not produce $index; tauri-build embeds this directory."
           }
@@ -185,12 +185,12 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build release binary
-        run: cargo build --release -p selora-desktop --locked
+        run: cargo build --release -p skarn-desktop --locked
 
       - name: Verify release binary
         shell: pwsh
         run: |
-          $exe = 'target\release\selora-desktop.exe'
+          $exe = 'target\release\skarn-desktop.exe'
           if (-not (Test-Path -LiteralPath $exe)) {
             throw "Release binary not found at $exe."
           }
@@ -256,7 +256,7 @@ jobs:
             throw "dumpbin.exe not found at $dumpbin."
           }
 
-          $exe = 'target\release\selora-desktop.exe'
+          $exe = 'target\release\skarn-desktop.exe'
           $imports = (& $dumpbin /nologo /dependents $exe) -join "`n"
           if ($LASTEXITCODE -ne 0) {
             throw "dumpbin failed on $exe with $LASTEXITCODE."
@@ -383,7 +383,7 @@ jobs:
               Select-Object -First 1
             if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
 
-            $target = 'target\release\selora-desktop.exe'
+            $target = 'target\release\skarn-desktop.exe'
             & $signtool.FullName sign /f $pfx /p $env:SIGNING_CERT_PASSWORD `
               /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 `
               /d 'Selora IDE' /du "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `

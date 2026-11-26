@@ -1,6 +1,6 @@
 // Native WebView2 smoke checks. This driver never sends model requests or edits user workspaces.
 // Build the frontend and desktop binary first, then run:
-// node scripts/agents-window-smoke.mjs --exe target/debug/selora-desktop.exe
+// node scripts/agents-window-smoke.mjs --exe target/debug/skarn-desktop.exe
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
@@ -12,7 +12,7 @@ const argument = (name, fallback) => {
   const index = process.argv.indexOf(name);
   return index < 0 ? fallback : process.argv[index + 1];
 };
-const executable = resolve(root, argument('--exe', 'target/debug/selora-desktop.exe'));
+const executable = resolve(root, argument('--exe', 'target/debug/skarn-desktop.exe'));
 const port = Number(argument('--port', '9347'));
 const artifacts = resolve(argument('--artifacts', join(process.env.LOCALAPPDATA ?? process.env.TEMP,
   'Temp', 'opencode', `selora-agents-smoke-${Date.now()}`)));
@@ -132,8 +132,8 @@ async function check(name, run) {
 
 try {
   assert(process.platform === 'win32', 'Native smoke requires Windows/WebView2.');
-  const processes = execFileSync('tasklist', ['/FI', 'IMAGENAME eq selora-desktop.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8' });
-  assert(!processes.toLowerCase().includes('"selora-desktop.exe"'), 'Close existing Selora processes before isolated smoke checks.');
+  const processes = execFileSync('tasklist', ['/FI', 'IMAGENAME eq skarn-desktop.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8' });
+  assert(!processes.toLowerCase().includes('"skarn-desktop.exe"'), 'Close existing Selora processes before isolated smoke checks.');
   await mkdir(artifacts, { recursive: true });
   const settings = join(artifacts, 'settings');
   const workspace = join(artifacts, 'workspace');

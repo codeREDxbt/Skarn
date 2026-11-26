@@ -140,8 +140,8 @@ else {
     Add-Pass "Cargo.toml [workspace.package].version is $cargoVersion"
 }
 
-$tauri = Read-JsonFile 'apps\selora-desktop\src-tauri\tauri.conf.json'
-$frontend = Read-JsonFile 'apps\selora-desktop\frontend\package.json'
+$tauri = Read-JsonFile 'apps\skarn-desktop\src-tauri\tauri.conf.json'
+$frontend = Read-JsonFile 'apps\skarn-desktop\frontend\package.json'
 
 if ($null -ne $tauri) {
     if ($tauri.version -eq $cargoVersion -and $cargoVersion) {
@@ -209,7 +209,7 @@ if (-not $cargoRepo) {
 
 $frontendRepo = Get-RepositoryUrl -Document $frontend
 if (-not $frontendRepo) {
-    Add-Fail 'apps/selora-desktop/frontend/package.json has no repository URL'
+    Add-Fail 'apps/skarn-desktop/frontend/package.json has no repository URL'
 }
 
 $issPath = Join-Path $RepoRoot 'installer\selora-ide.iss'
@@ -284,10 +284,10 @@ $updatesPath = Join-Path $RepoRoot 'crates\selora-ai\src\updates.rs'
 if (Test-Path -LiteralPath $updatesPath -PathType Leaf) {
     $updatesText = Get-Content -LiteralPath $updatesPath -Raw
     if ($updatesText -match 'env!\("CARGO_PKG_REPOSITORY"\)') {
-        Add-Pass 'crates/selora-ai update check derives its slug from CARGO_PKG_REPOSITORY'
+        Add-Pass 'crates/skarn-ai update check derives its slug from CARGO_PKG_REPOSITORY'
     }
     else {
-        Add-Fail 'crates/selora-ai/src/updates.rs hard-codes the repository; use env!("CARGO_PKG_REPOSITORY")'
+        Add-Fail 'crates/skarn-ai/src/updates.rs hard-codes the repository; use env!("CARGO_PKG_REPOSITORY")'
     }
 }
 
@@ -295,21 +295,21 @@ $aboutRustPath = Join-Path $RepoRoot 'crates\selora-ui\src\dialogs\about.rs'
 if (Test-Path -LiteralPath $aboutRustPath -PathType Leaf) {
     $aboutRustText = Get-Content -LiteralPath $aboutRustPath -Raw
     if ($aboutRustText -match 'env!\("CARGO_PKG_REPOSITORY"\)') {
-        Add-Pass 'crates/selora-ui About dialog derives its repo URL from CARGO_PKG_REPOSITORY'
+        Add-Pass 'crates/skarn-ui About dialog derives its repo URL from CARGO_PKG_REPOSITORY'
     }
     else {
-        Add-Fail 'crates/selora-ui/src/dialogs/about.rs hard-codes the repository URL'
+        Add-Fail 'crates/skarn-ui/src/dialogs/about.rs hard-codes the repository URL'
     }
 }
 
-$aboutTsxPath = Join-Path $RepoRoot 'apps\selora-desktop\frontend\src\components\AboutDialog.tsx'
+$aboutTsxPath = Join-Path $RepoRoot 'apps\skarn-desktop\frontend\src\components\AboutDialog.tsx'
 if (Test-Path -LiteralPath $aboutTsxPath -PathType Leaf) {
     $aboutTsxText = Get-Content -LiteralPath $aboutTsxPath -Raw
     if ($aboutTsxText -match '__REPOSITORY_URL__') {
         Add-Pass 'frontend About dialog derives its repo URL from package.json (Vite __REPOSITORY_URL__)'
     }
     else {
-        Add-Fail 'apps/selora-desktop/frontend/src/components/AboutDialog.tsx hard-codes the repository URL'
+        Add-Fail 'apps/skarn-desktop/frontend/src/components/AboutDialog.tsx hard-codes the repository URL'
     }
 }
 

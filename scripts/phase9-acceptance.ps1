@@ -6,7 +6,7 @@
     Runs the Phase 9 checks that do not need a live key, a window, or a human:
 
       * the deterministic acceptance suite in
-        crates/selora-ai/tests/phase9_acceptance.rs (planned diff/write,
+        crates/skarn-ai/tests/phase9_acceptance.rs (planned diff/write,
         manage_todo substrate, the 80% context budget, turn-scoped
         auto-approve);
       * the existing desktop agent tests for the approval card, auto mode,
@@ -265,10 +265,10 @@ function Test-CapabilityFilter {
     $passed = $aiTotals.Passed
     $failed = $aiTotals.Failed
 
-    $desktopDir = Join-Path $RepoRoot 'apps\selora-desktop\frontend\dist'
+    $desktopDir = Join-Path $RepoRoot 'apps\skarn-desktop\frontend\dist'
     if (Test-Path -LiteralPath $desktopDir) {
         $desktop = Invoke-Native -FilePath 'cargo' `
-            -Arguments @('test', '-p', 'selora-desktop', '--locked', $Filter) `
+            -Arguments @('test', '-p', 'skarn-desktop', '--locked', $Filter) `
             -WorkingDirectory $RepoRoot -LogName ("capability-desktop-" + $Filter + ".log")
         $desktopTotals = Get-RustTestTotals -Lines $desktop.Lines
         $passed += $desktopTotals.Passed
@@ -362,7 +362,7 @@ Write-Host ''
 # ---------------------------------------------------------------------------
 # 0. Optional frontend bootstrap. The Tauri test binary embeds frontend/dist.
 # ---------------------------------------------------------------------------
-$frontendDir = Join-Path $RepoRoot 'apps\selora-desktop\frontend'
+$frontendDir = Join-Path $RepoRoot 'apps\skarn-desktop\frontend'
 $distDir = Join-Path $frontendDir 'dist'
 $nodeModules = Join-Path $frontendDir 'node_modules'
 
@@ -449,7 +449,7 @@ Add-CapabilityRow -Id 'sessions.resume' -Branch 'selora-p3-sessions' -Filter 're
             Pattern = 'agent-sessions|resume_session|ResumeSession'
         },
         [pscustomobject]@{
-            Path = 'apps\selora-desktop\src-tauri\src\sessions.rs'
+            Path = 'apps\skarn-desktop\src-tauri\src\sessions.rs'
             Pattern = 'agent-sessions|resume_session|ResumeSession|agent_sessions'
         }
     )
@@ -462,7 +462,7 @@ Add-CapabilityRow -Id 'compaction.at80' -Branch 'selora-p3-sessions' -Filter 'co
             Pattern = 'compaction|summarize_round|summarise_round|compact_round'
         },
         [pscustomobject]@{
-            Path = 'apps\selora-desktop\src-tauri\src\sessions.rs'
+            Path = 'apps\skarn-desktop\src-tauri\src\sessions.rs'
             Pattern = 'compaction|summarize_round|summarise_round|compact_round'
         }
     )
@@ -475,7 +475,7 @@ Add-CapabilityRow -Id 'auto.session-flag' -Branch 'integration' -Filter '' `
             Pattern = 'auto_approve_writes'
         },
         [pscustomobject]@{
-            Path = 'apps\selora-desktop\src-tauri\src\sessions.rs'
+            Path = 'apps\skarn-desktop\src-tauri\src\sessions.rs'
             Pattern = 'AgentModeDto::Auto'
         }
     )
@@ -501,7 +501,7 @@ Add-CapabilityRow -Id 'plan.write-rejection' -Branch 'selora-p3-plan' -Filter 'p
             Pattern = 'plan_mode|PlanMode|plan_only'
         },
         [pscustomobject]@{
-            Path = 'apps\selora-desktop\src-tauri\src\sessions.rs'
+            Path = 'apps\skarn-desktop\src-tauri\src\sessions.rs'
             Pattern = 'PlanMode|plan_mode|plan_only'
         }
     )
@@ -562,13 +562,13 @@ Add-RustFilterCheck -Id 'test.protocol-agent' -Package 'selora-protocol' -Filter
     -LogName 'test-protocol-agent.log' -Label 'protocol agent wire defaults'
 
 if (Test-Path -LiteralPath $distDir) {
-    Add-RustFilterCheck -Id 'test.desktop-write-gate' -Package 'selora-desktop' `
+    Add-RustFilterCheck -Id 'test.desktop-write-gate' -Package 'skarn-desktop' `
         -Filter 'agent_turn_streams_tools_approvals_and_completes' `
         -LogName 'test-desktop-write-gate.log' -Label 'desktop agent approval vertical'
-    Add-RustFilterCheck -Id 'test.desktop-auto' -Package 'selora-desktop' `
+    Add-RustFilterCheck -Id 'test.desktop-auto' -Package 'skarn-desktop' `
         -Filter 'auto_mode_applies_file_writes_without_an_approval_card' `
         -LogName 'test-desktop-auto.log' -Label 'desktop auto mode'
-    Add-RustFilterCheck -Id 'test.desktop-explore' -Package 'selora-desktop' `
+    Add-RustFilterCheck -Id 'test.desktop-explore' -Package 'skarn-desktop' `
         -Filter 'explore_mode_arms_the_read_only_manifest' `
         -LogName 'test-desktop-explore.log' -Label 'desktop Explore read-only manifest'
 }

@@ -9,7 +9,7 @@ until the owner supplies a certificate.
 `.github/workflows/release.yml` signs two files with `signtool.exe` when
 signing is enabled:
 
-1. `target/release/selora-desktop.exe`, before the installer is compiled.
+1. `target/release/skarn-desktop.exe`, before the installer is compiled.
 2. `installer/output/Selora-IDE-Setup-<version>.exe`, after the installer is
    compiled.
 

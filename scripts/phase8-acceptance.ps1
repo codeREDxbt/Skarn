@@ -362,7 +362,7 @@ Write-Host ''
 # ---------------------------------------------------------------------------
 # Optional build (the same commands RELEASE.md documents).
 # ---------------------------------------------------------------------------
-$frontendDir = Join-Path $RepoRoot 'apps\selora-desktop\frontend'
+$frontendDir = Join-Path $RepoRoot 'apps\skarn-desktop\frontend'
 
 if ($Build) {
     Write-Host 'Build: npm run build (frontend)' -ForegroundColor Cyan
@@ -373,14 +373,14 @@ if ($Build) {
         Get-Tail -Lines $front.Lines -Count 20 | ForEach-Object { Write-Host ("       " + $_) }
     }
 
-    Write-Host 'Build: cargo clean -p selora-desktop --release (re-embed current dist)' -ForegroundColor Cyan
-    $clean = Invoke-Native -FilePath 'cargo' -Arguments @('clean', '-p', 'selora-desktop', '--release') `
+    Write-Host 'Build: cargo clean -p skarn-desktop --release (re-embed current dist)' -ForegroundColor Cyan
+    $clean = Invoke-Native -FilePath 'cargo' -Arguments @('clean', '-p', 'skarn-desktop', '--release') `
         -WorkingDirectory $RepoRoot -LogName 'release-clean.log'
     Write-Host ("       exit {0}, {1}s" -f $clean.ExitCode, $clean.Seconds)
 
-    Write-Host 'Build: cargo build --release -p selora-desktop --locked' -ForegroundColor Cyan
+    Write-Host 'Build: cargo build --release -p skarn-desktop --locked' -ForegroundColor Cyan
     $release = Invoke-Native -FilePath 'cargo' `
-        -Arguments @('build', '--release', '-p', 'selora-desktop', '--locked') `
+        -Arguments @('build', '--release', '-p', 'skarn-desktop', '--locked') `
         -WorkingDirectory $RepoRoot -LogName 'release-build.log'
     Write-Host ("       exit {0}, {1}s, log release-build.log" -f $release.ExitCode, $release.Seconds)
     if ($release.ExitCode -ne 0) {
@@ -401,7 +401,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
     }
 }
 $releaseDir = Join-Path $targetRoot 'release'
-$exePath = Join-Path $releaseDir 'selora-desktop.exe'
+$exePath = Join-Path $releaseDir 'skarn-desktop.exe'
 
 if (Test-Path -LiteralPath $exePath) {
     $exe = Get-Item -LiteralPath $exePath
@@ -413,7 +413,7 @@ if (Test-Path -LiteralPath $exePath) {
 }
 else {
     Add-Check -Id 'release-exe' -Status 'FAIL' `
-        -Detail ("missing " + $exePath + " - run with -Build or: npm.cmd --prefix apps\selora-desktop\frontend run build; cargo build --release -p selora-desktop --locked")
+        -Detail ("missing " + $exePath + " - run with -Build or: npm.cmd --prefix apps\skarn-desktop\frontend run build; cargo build --release -p skarn-desktop --locked")
 }
 
 # ---------------------------------------------------------------------------
@@ -448,16 +448,16 @@ else {
     Get-Tail -Lines $protocol.Lines -Count 20 | ForEach-Object { Write-Host ("       " + $_) }
 }
 
-$desktop = Invoke-Native -FilePath 'cargo' -Arguments @('test', '-p', 'selora-desktop', '--locked', 'workflow') `
+$desktop = Invoke-Native -FilePath 'cargo' -Arguments @('test', '-p', 'skarn-desktop', '--locked', 'workflow') `
     -WorkingDirectory $RepoRoot -LogName 'test-desktop.log'
 $desktopTotals = Get-RustTestTotals -Lines $desktop.Lines
 if ($desktop.ExitCode -eq 0 -and $desktopTotals.Failed -eq 0 -and $desktopTotals.Passed -gt 0) {
     Add-Check -Id 'test.desktop' -Status 'PASS' `
-        -Detail ("cargo test -p selora-desktop workflow: {0} passed, {1} failed, {2}s" -f $desktopTotals.Passed, $desktopTotals.Failed, $desktop.Seconds)
+        -Detail ("cargo test -p skarn-desktop workflow: {0} passed, {1} failed, {2}s" -f $desktopTotals.Passed, $desktopTotals.Failed, $desktop.Seconds)
 }
 else {
     Add-Check -Id 'test.desktop' -Status 'FAIL' `
-        -Detail ("cargo test -p selora-desktop workflow exit {0}: {1} passed, {2} failed; see test-desktop.log" -f $desktop.ExitCode, $desktopTotals.Passed, $desktopTotals.Failed)
+        -Detail ("cargo test -p skarn-desktop workflow exit {0}: {1} passed, {2} failed; see test-desktop.log" -f $desktop.ExitCode, $desktopTotals.Passed, $desktopTotals.Failed)
     Get-Tail -Lines $desktop.Lines -Count 25 | ForEach-Object { Write-Host ("       " + $_) }
 }
 
@@ -497,7 +497,7 @@ else {
 # Every check selects an exact test name. A name that no longer exists matches
 # zero tests and is reported PENDING, so a renamed/removed test cannot look
 # green. The engine matrix lives in
-# crates/selora-workflow/tests/phase8_matrix.rs; approval, process-tree,
+# crates/skarn-workflow/tests/phase8_matrix.rs; approval, process-tree,
 # resume-shell and history evidence lives in the desktop suite.
 # ---------------------------------------------------------------------------
 Write-Host ''
@@ -516,15 +516,15 @@ Add-NamedFrontendTestCheck -Id 'test.workflow-card' `
 # Step 2 - approve -> phase graph + agent dispatch.
 Add-NamedRustTestCheck -Id 'evidence.step2.dispatch' -Crate 'selora-workflow' `
     -Target 'phase8_matrix' -Test 'phase8_step2_approval_starts_the_phase_graph_and_agent_dispatch'
-Add-NamedRustTestCheck -Id 'evidence.step2.shell-stream' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step2.shell-stream' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_run_streams_started_then_phase_step_finished'
 
 # Step 3 - approval parks the run; deny continues; approve writes once.
-Add-NamedRustTestCheck -Id 'evidence.step3.deny' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step3.deny' -Crate 'skarn-desktop' `
     -Test 'proposed_write_parks_deny_does_not_write_and_wrong_ids_reject'
-Add-NamedRustTestCheck -Id 'evidence.step3.approve' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step3.approve' -Crate 'skarn-desktop' `
     -Test 'explicit_approve_writes_once_and_rejects_duplicate_and_stale_ids'
-Add-NamedRustTestCheck -Id 'evidence.step3.decision' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step3.decision' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_approval_maps_exact_diff_and_consumes_only_matching_id'
 
 # Step 4 - resume safe / unsafe / partial effects.
@@ -536,7 +536,7 @@ Add-NamedRustTestCheck -Id 'evidence.step4.unsafe-resume' -Crate 'selora-workflo
 Add-NamedRustTestCheck -Id 'evidence.step4.partial-effects' -Crate 'selora-workflow' `
     -Target 'persisted_execution' `
     -Test 'interrupted_ask_redispatches_but_ambiguous_command_never_does'
-Add-NamedRustTestCheck -Id 'evidence.step4.shell-consent' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step4.shell-consent' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_resume_refuses_until_incomplete_asks_are_confirmed'
 Add-Check -Id 'evidence.step4.exactly-once-effects' -Status 'PENDING' `
     -Detail 'Resume re-dispatches unfinished asks; tools in the interrupted turn may already have applied effects. Safe/unsafe/partial policy is automated; exactly-once subagent effects are not claimed (STATUS.md gap 2).'
@@ -550,11 +550,11 @@ Add-NamedRustTestCheck -Id 'evidence.step5.gate-exit-code' -Crate 'selora-workfl
 # Step 6 - stop + process-tree death.
 Add-NamedRustTestCheck -Id 'evidence.step6.stop-engine' -Crate 'selora-workflow' `
     -Target 'phase8_matrix' -Test 'phase8_step6_stop_before_the_next_effect_ends_the_run_stopped'
-Add-NamedRustTestCheck -Id 'evidence.step6.stop-shell' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step6.stop-shell' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_stop_flips_the_active_host_cancel'
-Add-NamedRustTestCheck -Id 'evidence.step6.process-tree-cancel' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step6.process-tree-cancel' -Crate 'skarn-desktop' `
     -Test 'world_run_cancel_kills_detached_grandchildren'
-Add-NamedRustTestCheck -Id 'evidence.step6.process-tree-timeout' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step6.process-tree-timeout' -Crate 'skarn-desktop' `
     -Test 'world_run_timeout_kills_detached_grandchildren'
 Add-Check -Id 'evidence.step6.job-startup-race' -Status 'PENDING' `
     -Detail 'Job assignment follows CreateProcess; a descendant spawned in that sub-startup window can escape. Kill-after-assignment is test-covered; the race is a documented limit (STATUS.md gap 1).'
@@ -562,9 +562,9 @@ Add-Check -Id 'evidence.step6.job-startup-race' -Status 'PENDING' `
 # Step 7 - cost/tokens + known per-phase gap.
 Add-NamedRustTestCheck -Id 'evidence.step7.usage' -Crate 'selora-workflow' `
     -Target 'phase8_matrix' -Test 'phase8_step7_cost_and_tokens_match_every_ask'
-Add-NamedRustTestCheck -Id 'evidence.step7.shell-summary' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step7.shell-summary' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_completed_run_is_durable_and_resume_never_reexecutes_it'
-Add-NamedRustTestCheck -Id 'evidence.step7.host-receipts' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step7.host-receipts' -Crate 'skarn-desktop' `
     -Test 'reports_artifacts_logs_and_cost_are_collected'
 Add-Check -Id 'evidence.step7.per-phase-cost' -Status 'PENDING' `
     -Detail 'Run totals (tokens + USD + cap) are automated; the protocol DTO carries no per-phase USD, so ROADMAP step 7 per-phase cost is not implemented in this tree.'
@@ -572,9 +572,9 @@ Add-Check -Id 'evidence.step7.per-phase-cost' -Status 'PENDING' `
 # Step 8 - journal path/gitignore + completed history.
 Add-NamedRustTestCheck -Id 'evidence.step8.journal-path' -Crate 'selora-workflow' `
     -Target 'phase8_matrix' -Test 'phase8_step8_journal_lands_in_the_gitignored_workspace_path'
-Add-NamedRustTestCheck -Id 'evidence.step8.history' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step8.history' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_completed_run_history_reconstructs_from_the_journal'
-Add-NamedRustTestCheck -Id 'evidence.step8.multi-phase-history' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.step8.multi-phase-history' -Crate 'skarn-desktop' `
     -Test 'p8_workflow_multi_phase_history_keeps_reports_phases_and_artifact_content'
 
 # Step 9 - facade fetch/fs/process denial.
@@ -590,7 +590,7 @@ Add-NamedRustTestCheck -Id 'evidence.budget.matrix' -Crate 'selora-workflow' `
     -Target 'phase8_matrix' -Test 'phase8_budget_cap_stops_the_run_between_steps'
 Add-NamedRustTestCheck -Id 'evidence.budget.engine' -Crate 'selora-workflow' `
     -Test 'budget_violation_is_checked_between_steps'
-Add-NamedRustTestCheck -Id 'evidence.budget.shell' -Crate 'selora-desktop' `
+Add-NamedRustTestCheck -Id 'evidence.budget.shell' -Crate 'skarn-desktop' `
     -Test 'p9_workflow_budget_exhausted_resume_is_refused_before_worker'
 
 # ---------------------------------------------------------------------------
@@ -762,7 +762,7 @@ $steps = @(
         Number   = 4
         Title    = 'Kill the app mid-run; relaunch offers Resume and finishes'
         Requires = @('evidence.step4.safe-resume', 'evidence.step4.unsafe-resume', 'evidence.step4.partial-effects', 'evidence.step4.shell-consent', 'evidence.step4.exactly-once-effects', 'journal.path-constants')
-        Owner    = 'Kill selora-desktop.exe mid-run, relaunch, use Resume, confirm the run finishes with earlier asks not re-billed.'
+        Owner    = 'Kill skarn-desktop.exe mid-run, relaunch, use Resume, confirm the run finishes with earlier asks not re-billed.'
     },
     [pscustomobject]@{
         Number   = 5

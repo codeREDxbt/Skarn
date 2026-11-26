@@ -2,9 +2,9 @@
 #
 # Signing requirements: see SIGNING.md at the repository root.
 #
-# apps/selora-desktop/frontend/dist is gitignored and tauri-build embeds it
+# apps/skarn-desktop/frontend/dist is gitignored and tauri-build embeds it
 # at compile time, so the frontend is installed, checked, and built before
-# any cargo step that compiles selora-desktop.
+# any cargo step that compiles skarn-desktop.
 #
 # Tags are covered too: a release tag is a commit anyone can push, so the
 # same lane runs on v*.*.* tags. release.yml repeats these checks as its own
@@ -54,28 +54,28 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: apps/selora-desktop/frontend/package-lock.json
+          cache-dependency-path: apps/skarn-desktop/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm ci
 
       - name: Typecheck frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm run typecheck
 
       - name: Test frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm test
 
       - name: Build frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm run build
 
       - name: Verify frontend bundle
         shell: pwsh
         run: |
-          $index = 'apps\selora-desktop\frontend\dist\index.html'
+          $index = 'apps\skarn-desktop\frontend\dist\index.html'
           if (-not (Test-Path -LiteralPath $index)) {
             throw "Frontend build did not produce $index; tauri-build embeds this directory."
           }
@@ -135,15 +135,15 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: apps/selora-desktop/frontend/package-lock.json
+          cache-dependency-path: apps/skarn-desktop/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm ci
 
       # tauri-build embeds frontend/dist at compile time.
       - name: Build frontend
-        working-directory: apps/selora-desktop/frontend
+        working-directory: apps/skarn-desktop/frontend
         run: npm run build
 
       - name: Install Rust toolchain
@@ -161,10 +161,10 @@ jobs:
       # must be rejected with file_too_large, and binary files with
       # binary_file. This needs no window or WebView2.
       - name: Large-file open guard
-        run: cargo test -p selora-desktop --bin selora-desktop --locked binary_and_oversized_files_are_rejected
+        run: cargo test -p skarn-desktop --bin skarn-desktop --locked binary_and_oversized_files_are_rejected
 
       - name: Build release binary
-        run: cargo build --release -p selora-desktop --locked
+        run: cargo build --release -p skarn-desktop --locked
 
       # Measures spawn -> the Rust-side "Window shown & focused!" boot marker
       # in %TEMP%\selora_boot.log. A missing marker inside the timeout fails
@@ -176,7 +176,7 @@ jobs:
           STARTUP_TIMEOUT_SECONDS: '60'
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = 'target\release\selora-desktop.exe'
+          $exe = 'target\release\skarn-desktop.exe'
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
             throw "Release binary not found at $exe."
           }
@@ -214,7 +214,7 @@ jobs:
             if (-not $proc.HasExited) {
               & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
             }
-            Get-Process -Name 'selora-desktop' -ErrorAction SilentlyContinue |
+            Get-Process -Name 'skarn-desktop' -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
           }
 
