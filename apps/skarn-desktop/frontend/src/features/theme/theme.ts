@@ -1,21 +1,21 @@
-// Selora IDE — appearance (theme + reduced motion) applied at runtime.
+// Skarn — appearance (theme + reduced motion) applied at runtime.
 //
 // Rust owns the persisted values (`ui.theme`, `ui.reduce_motion`); this module
 // maps them onto the document root. A theme is a token remap, never a CSS
 // filter: `data-theme="light"` swaps the palette in palette.css and
 // `data-theme="dark"` keeps the default ink ramp.
-export const THEME_VALUES = ['selora-dark', 'galaxy', 'dark', 'space-black', 'light', 'system'] as const;
+export const THEME_VALUES = ['skarn-dark', 'galaxy', 'dark', 'space-black', 'light', 'system'] as const;
 
 export type ThemeValue = (typeof THEME_VALUES)[number];
 export type ResolvedTheme = 'dark' | 'light' | 'galaxy';
 
-export const DEFAULT_THEME: ThemeValue = 'selora-dark';
+export const DEFAULT_THEME: ThemeValue = 'skarn-dark';
 
 export const THEME_OPTIONS: ReadonlyArray<{ value: ThemeValue; label: string }> = [
-  { value: 'selora-dark', label: 'Selora Cosmic Dark' },
-  { value: 'galaxy', label: 'Selora Galaxy' },
+  { value: 'skarn-dark', label: 'Skarn Dark' },
+  { value: 'galaxy', label: 'Skarn Galaxy' },
   { value: 'dark', label: 'Dark (alias)' },
-  { value: 'light', label: 'Selora Moonlight (Light)' },
+  { value: 'light', label: 'Skarn Daylight (Light)' },
   { value: 'system', label: 'System' },
 ];
 
@@ -26,6 +26,7 @@ export function isThemeValue(value: string): value is ThemeValue {
 
 /** Keep a stored accepted value, otherwise fall back to the documented default. */
 export function normalizeThemeValue(value: string | null | undefined): ThemeValue {
+  if (value === 'selora-dark') return 'skarn-dark'; // skarn-v1-migration-compat
   return value && isThemeValue(value) ? value : DEFAULT_THEME;
 }
 
@@ -43,8 +44,8 @@ function prefersDarkScheme(): boolean {
 }
 
 /**
- * The two real palettes. `dark`, `selora-dark` and `space-black` are aliases
- * for the ink ramp; `light` is Selora Moonlight.
+ * The two real palettes. `dark`, `skarn-dark` (and legacy `selora-dark` alias) and `space-black` // skarn-v1-migration-compat
+ * are aliases for the ink ramp; `light` is Skarn Daylight.
  */
 export function resolveTheme(
   value: string | null | undefined,

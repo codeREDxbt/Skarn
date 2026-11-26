@@ -579,7 +579,8 @@ mod tests {
     fn s17_5_env_allowlist_contains_no_secrets() {
         for key in ENV_ALLOWLIST {
             assert!(
-                !key.contains("SELORA")
+                !key.contains("SKARN")
+                    && !key.contains("SELORA") // skarn-v1-migration-compat
                     && !key.contains("KEY")
                     && !key.contains("TOKEN")
                     && !key.contains("SECRET"),
@@ -589,20 +590,22 @@ mod tests {
     }
 
     #[test]
-    fn s17_5_env_stripping_excludes_selora_and_app_secrets() {
-        // The Selora key and app secrets live in this process's env…
-        std::env::set_var("SELORA_API_KEY", "sk-live-do-not-leak");
-        std::env::set_var("SELORA_TEST_SECRET", "app-secret");
+    fn s17_5_env_stripping_excludes_skarn_and_selora_secrets() { // skarn-v1-migration-compat
+        // Both SKARN_* and legacy SELORA_* secrets live in this process's env… // skarn-v1-migration-compat
+        std::env::set_var("SKARN_API_KEY", "sk-live-skarn-do-not-leak");
+        std::env::set_var("SKARN_TEST_SECRET", "skarn-app-secret");
+        std::env::set_var("SELORA_API_KEY", "sk-live-do-not-leak"); // skarn-v1-migration-compat
+        std::env::set_var("SELORA_TEST_SECRET", "app-secret"); // skarn-v1-migration-compat
         let child_env = build_child_env();
         for (key, _) in &child_env {
             assert!(
-                !key.starts_with("SELORA"),
+                !key.starts_with("SKARN") && !key.starts_with("SELORA"), // skarn-v1-migration-compat
                 "the child env must never carry `{key}` (§17.5/§17.2: the API key never leaves the client)"
             );
         }
         assert!(
-            !child_env.iter().any(|(k, _)| k == "SELORA_API_KEY"),
-            "the Selora key leaked into the bash child env"
+            !child_env.iter().any(|(k, _)| k == "SKARN_API_KEY" || k == "SELORA_API_KEY"), // skarn-v1-migration-compat
+            "the gateway key leaked into the bash child env"
         );
         if cfg!(windows) {
             assert!(
@@ -610,26 +613,30 @@ mod tests {
                 "PowerShell needs SystemRoot — the allowlist is not a full env_clear"
             );
         }
-        std::env::remove_var("SELORA_API_KEY");
-        std::env::remove_var("SELORA_TEST_SECRET");
+        std::env::remove_var("SKARN_API_KEY");
+        std::env::remove_var("SKARN_TEST_SECRET");
+        std::env::remove_var("SELORA_API_KEY"); // skarn-v1-migration-compat
+        std::env::remove_var("SELORA_TEST_SECRET"); // skarn-v1-migration-compat
     }
 
     #[tokio::test]
     #[cfg(windows)]
     async fn s17_5_env_stripping_holds_in_the_real_child() {
         // End-to-end: the child itself reports what it can see.
-        std::env::set_var("SELORA_TEST_SECRET", "app-secret");
+        std::env::set_var("SKARN_TEST_SECRET", "skarn-secret");
+        std::env::set_var("SELORA_TEST_SECRET", "app-secret"); // skarn-v1-migration-compat
         let root = temp_root("bash-env");
         let ctx = ctx(&root, &[]);
         let result = run_bash(
             &ctx,
             "call_1",
-            "(Get-ChildItem env: | Where-Object { $_.Name -like 'SELORA*' }).Count",
+            "(Get-ChildItem env: | Where-Object { $_.Name -like 'SKARN*' -or $_.Name -like 'SELORA*' }).Count", // skarn-v1-migration-compat
             Some(30),
             None,
         )
         .await;
-        std::env::remove_var("SELORA_TEST_SECRET");
+        std::env::remove_var("SKARN_TEST_SECRET");
+        std::env::remove_var("SELORA_TEST_SECRET"); // skarn-v1-migration-compat
         assert!(result.ok, "{}", result.content);
         assert!(
             result.content.contains("(exit code 0)"),
@@ -641,7 +648,7 @@ mod tests {
         let body = result.content.replace("(exit code 0)\n", "");
         assert!(
             body.trim() == "0",
-            "the child must see zero SELORA_* variables, saw: {body:?}"
+            "the child must see zero SKARN_*/SELORA_* variables, saw: {body:?}" // skarn-v1-migration-compat
         );
     }
 

@@ -1,24 +1,26 @@
-﻿# Selora IDE
+﻿# Skarn
 
-Selora IDE is a Windows desktop code editor with a workspace explorer, Git tools, an embedded terminal, language intelligence, and an AI agent workbench.
+Skarn is a Windows desktop code editor with a workspace explorer, Git tools, an embedded terminal, language intelligence, and an AI agent workbench.
+
+This project began as Selora IDE.
 
 ## Download
 
 <https://github.com/codeREDxbt/Skarn/releases/latest>
 
-Run `Selora-IDE-Setup-0.1.0.exe`. The installer is per-user and does not need
+Run `Skarn-Setup-1.0.0.exe`. The installer is per-user and does not need
 administrator access. It installs WebView2 when Windows does not already have it.
 
 ## First run
 
-1. Open Selora IDE.
+1. Open Skarn.
 2. Choose **Open Folder** and select a project.
 3. Open a file from the **Files** sidebar.
 4. Press `Ctrl+S` to save, or `Ctrl+L` to open the agent dock.
 
 AI features need a provider key. Open **Settings > AI Gateway** or **Connect**,
 choose a provider, enter the gateway URL and key, then test the connection.
-Presets cover the Selora gateway, Anthropic, OpenAI, DeepSeek, OpenRouter, GLM,
+Presets cover Anthropic, OpenAI, DeepSeek, OpenRouter, GLM,
 Ollama, and custom OpenAI-compatible gateways.
 
 ## Features
@@ -78,8 +80,8 @@ which filters by severity and text. Clicking a problem opens the file at its lin
 
 ### Settings and themes
 
-Settings sections: AI Gateway, Editor, Theme, and Keybindings. Themes are Selora
-Cosmic Dark, Selora Moonlight Light, and System. Settings also cover reduced
+Settings sections: AI Gateway, Editor, Theme, and Keybindings. Themes are Skarn
+Dark, Skarn Galaxy, Skarn Daylight (Light), and System. Settings also cover reduced
 motion, automatic update checks, editor preferences, and LSP restarts. Four
 shortcuts are rebindable, with conflict warnings and a searchable shortcut table.
 
@@ -102,9 +104,9 @@ Requirements: Windows 10 or 11 (64-bit) with WebView2, Rust stable with the MSVC
 toolchain, Node.js 22, and Inno Setup 6.3 or newer for the installer.
 
 ```powershell
-npm --prefix apps/selora-desktop/frontend ci
-npm --prefix apps/selora-desktop/frontend run build
-cargo build --release -p selora-desktop --locked
+npm --prefix apps/skarn-desktop/frontend ci
+npm --prefix apps/skarn-desktop/frontend run build
+cargo build --release -p skarn-desktop --locked
 ```
 
 Run the built app with `start.bat`. Build the installer with
@@ -112,7 +114,7 @@ Run the built app with `start.bat`. Build the installer with
 
 ## Privacy and credentials
 
-Do not commit API keys or `.env` files. Selora stores provider credentials in
+Do not commit API keys or `.env` files. Skarn stores provider credentials in
 Windows Credential Manager when available.
 
 ## License

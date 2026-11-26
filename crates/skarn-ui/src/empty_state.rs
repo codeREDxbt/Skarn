@@ -45,7 +45,7 @@ pub fn no_folder(ui: &mut Ui) -> Option<EmptyStateEvent> {
 
         ui.add_space(space::S3);
         ui.label(
-            egui::RichText::new("Selora IDE")
+            egui::RichText::new("Skarn")
                 .color(color::FG_DEFAULT)
                 .font(egui::FontId::new(type_scale::XL, font::FAMILY_SANS)),
         );

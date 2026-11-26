@@ -16,7 +16,13 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Directory under `%APPDATA%` (PLAN.md §7).
-pub const CONFIG_DIR: &str = "selora-ide";
+pub const CONFIG_DIR: &str = "skarn";
+
+/// Legacy v0.1.0 directory under `%APPDATA%`, kept read-only after migration.
+pub const LEGACY_CONFIG_DIR: &str = "selora-ide"; // skarn-v1-migration-compat
+
+/// Marker written atomically to `%APPDATA%\skarn` once legacy settings are copied.
+pub const MIGRATION_MARKER_FILE: &str = "migrated_from.json";
 
 /// File name inside the settings directory.
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -25,7 +31,10 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// tests and sandboxed shells, so neither has to touch the real `%APPDATA%`.
 /// The parallel-safe API for tests is [`Settings::load_from`] /
 /// [`Settings::save_to`], which take explicit paths.
-pub const SETTINGS_DIR_ENV: &str = "SELORA_SETTINGS_DIR";
+pub const SETTINGS_DIR_ENV: &str = "SKARN_SETTINGS_DIR";
+
+/// Legacy v0.1.0 settings directory override environment variable.
+pub const LEGACY_SETTINGS_DIR_ENV: &str = "SELORA_SETTINGS_DIR"; // skarn-v1-migration-compat
 
 // ---------------------------------------------------------------------------
 // Defaults (ARCHITECTURE.md §8.1 — every value in the schema's example JSON).
@@ -52,7 +61,7 @@ fn default_line_numbers() -> bool {
 }
 
 fn default_theme() -> String {
-    "selora-dark".into()
+    "skarn-dark".into()
 }
 
 fn default_sidebar_width() -> u32 {
@@ -84,7 +93,7 @@ fn default_save() -> String {
 }
 
 /// The provider ids the desktop's Connect modal offers, in display order.
-/// `selora.disabled_providers` is validated against this list: an unknown id
+/// `skarn.disabled_providers` is validated against this list: an unknown id
 /// is a client bug, not a future provider the shell can guess.
 pub const KNOWN_PROVIDER_IDS: [&str; 7] = [
     "anthropic",
@@ -130,8 +139,8 @@ pub struct Settings {
     #[serde(default)]
     pub lsp: LspSettings,
 
-    #[serde(default)]
-    pub selora: SkarnSettings,
+    #[serde(default, alias = "selora")] // skarn-v1-migration-compat
+    pub skarn: SkarnSettings,
 
     #[serde(default)]
     pub keybinds: KeybindsSettings,
@@ -180,7 +189,7 @@ pub struct EditorSettings {
     pub word_wrap: bool,
 }
 
-/// `ui.*` (ARCHITECTURE.md §8.1). `theme` is `"selora-dark"` by default;
+/// `ui.*` (ARCHITECTURE.md §8.1). `theme` is `"skarn-dark"` by default;
 /// `"light"` selects the Moonlight palette. `"dark"` and `"space-black"`
 /// are accepted aliases for the ink ramp. `"system"` follows OS appearance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,7 +259,7 @@ impl Default for LspSettings {
     }
 }
 
-/// `selora.*` (ARCHITECTURE.md §8.1). The API key is NOT here — it lives in
+/// `skarn.*` (ARCHITECTURE.md §8.1). The API key is NOT here — it lives in
 /// the OS keyring (Phase 4) and never in a file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkarnSettings {
@@ -334,7 +343,7 @@ pub struct AgentSettings {
     /// `X-Subscription-Token` header.
     ///
     /// Follow-up (post-Phase-5, owner decision): OS keyring storage like
-    /// the Selora key, plus a settings-dialog field so it stays
+    /// the Skarn key, plus a settings-dialog field so it stays
     /// configurable.
     #[serde(default)]
     pub brave_search_api_key: Option<String>,
@@ -517,7 +526,7 @@ impl Default for Settings {
             editor: EditorSettings::default(),
             ui: UiSettings::default(),
             lsp: LspSettings::default(),
-            selora: SkarnSettings::default(),
+            skarn: SkarnSettings::default(),
             keybinds: KeybindsSettings::default(),
             layout: LayoutSettings::default(),
             agent: Box::new(AgentSettings::default()),
@@ -590,13 +599,16 @@ impl Default for AgentSettings {
 // ---------------------------------------------------------------------------
 
 impl Settings {
-    /// Load from `%APPDATA%\selora-ide\settings.json`.
+    /// Load from `%APPDATA%\skarn\settings.json`, falling back read-only to
+    /// the legacy directory when `%APPDATA%\skarn\settings.json` is absent.
     ///
     /// A missing file yields the defaults (first run). A `_v` mismatch wipes
     /// the file (see [`Settings::load_from`]) and returns the `Config` error
     /// the caller should toast.
     pub fn load() -> Result<Settings, SkarnError> {
-        Settings::load_from(&Settings::default_path())
+        let new_path = Settings::default_path();
+        let old_path = legacy_settings_dir_if_active().map(|dir| dir.join(SETTINGS_FILE_NAME));
+        load_from_with_legacy_fallback(&new_path, old_path.as_deref())
     }
 
     /// Load from an explicit path. Hermetic — this is the variant tests (and
@@ -643,7 +655,7 @@ impl Settings {
         }
     }
 
-    /// Save to `%APPDATA%\selora-ide\settings.json` (atomic).
+    /// Save to `%APPDATA%\skarn\settings.json` (atomic).
     pub fn save(&self) -> Result<(), SkarnError> {
         self.save_to(&Settings::default_path())
     }
@@ -657,9 +669,9 @@ impl Settings {
         write_atomic(path, json.as_bytes())
     }
 
-    /// `%APPDATA%\selora-ide\settings.json` (PLAN.md §7). Honors
+    /// `%APPDATA%\skarn\settings.json` (PLAN.md §7). Honors
     /// [`SETTINGS_DIR_ENV`] as an override. When neither is set this returns
-    /// the relative fallback `selora-ide/settings.json` rather than panic;
+    /// the relative fallback `skarn/settings.json` rather than panic;
     /// [`Settings::load`] / [`Settings::save`] route through
     /// [`settings_dir`] and error cleanly instead of ever writing there.
     pub fn default_path() -> PathBuf {
@@ -670,11 +682,51 @@ impl Settings {
     }
 
     /// The directory holding `settings.json`:
-    /// `$SELORA_SETTINGS_DIR` if set, else `%APPDATA%\selora-ide`. Errors
+    /// `$SKARN_SETTINGS_DIR` (or legacy fallback) if set, else `%APPDATA%\skarn`. Errors
     /// cleanly when APPDATA is not set and no override is configured.
     pub fn settings_dir() -> Result<PathBuf, SkarnError> {
         settings_dir()
     }
+}
+
+/// Read `path` without ever modifying or wiping it (used for read-only legacy fallback).
+fn load_from_readonly(path: &Path) -> Result<Option<Settings>, SkarnError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(SkarnError::Io(e)),
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| SkarnError::Config(format!("settings file is not valid JSON: {e}")))?;
+    let version = value
+        .get("_v")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if version != u64::from(SCHEMA_VERSION) {
+        return Err(SkarnError::Config(format!(
+            "settings schema version {version} is unsupported"
+        )));
+    }
+    let settings = serde_json::from_value(value).map_err(|e| {
+        SkarnError::Config(format!("settings file does not match the schema: {e}"))
+    })?;
+    Ok(Some(settings))
+}
+
+/// Load settings from `new_path`, falling back read-only to `old_path` if `new_path` is absent.
+pub fn load_from_with_legacy_fallback(
+    new_path: &Path,
+    old_path: Option<&Path>,
+) -> Result<Settings, SkarnError> {
+    if new_path.exists() {
+        return Settings::load_from(new_path);
+    }
+    if let Some(legacy) = old_path {
+        if let Some(settings) = load_from_readonly(legacy)? {
+            return Ok(settings);
+        }
+    }
+    Ok(Settings::default())
 }
 
 /// Persist `bytes` to `path` atomically: create missing parent directories,
@@ -694,7 +746,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SkarnError> {
     std::fs::create_dir_all(parent)?;
 
     let mut temp = tempfile::Builder::new()
-        .prefix(".selora-tmp-")
+        .prefix(".skarn-tmp-")
         .tempfile_in(parent)?;
     temp.as_file_mut().write_all(bytes)?;
     temp.as_file().sync_all()?;
@@ -718,6 +770,98 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SkarnError> {
     unreachable!("loop returns on Ok or Err")
 }
 
+static WARNED_LEGACY_ENVS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<&'static str>>,
+> = std::sync::OnceLock::new();
+
+fn warn_legacy_env_once(primary: &'static str, legacy: &'static str) {
+    let set =
+        WARNED_LEGACY_ENVS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.insert(legacy) {
+        eprintln!("[skarn-env] {legacy} is deprecated; use {primary} instead.");
+    }
+}
+
+/// Pure env-var pair resolver (`primary` wins over `legacy`), parameterized for tests.
+pub(crate) fn resolve_env_pair(
+    primary_val: Option<String>,
+    legacy_val: Option<String>,
+    primary_name: &'static str,
+    legacy_name: &'static str,
+) -> Option<(String, &'static str)> {
+    if let Some(val) = primary_val.filter(|v| !v.trim().is_empty()) {
+        return Some((val, primary_name));
+    }
+    if let Some(val) = legacy_val.filter(|v| !v.trim().is_empty()) {
+        warn_legacy_env_once(primary_name, legacy_name);
+        return Some((val, legacy_name));
+    }
+    None
+}
+
+/// Read `primary` env var, falling back to `legacy` with a deduplicated deprecation warning.
+pub fn env_var_with_legacy_fallback(
+    primary: &'static str,
+    legacy: &'static str,
+) -> Option<String> {
+    env_var_with_legacy_source(primary, legacy).map(|(val, _)| val)
+}
+
+/// Read `primary` or `legacy` env var, returning `(value, var_name)`.
+pub fn env_var_with_legacy_source(
+    primary: &'static str,
+    legacy: &'static str,
+) -> Option<(String, &'static str)> {
+    resolve_env_pair(
+        std::env::var(primary).ok(),
+        std::env::var(legacy).ok(),
+        primary,
+        legacy,
+    )
+}
+
+fn copy_dir_no_overwrite(src: &Path, dst: &Path) -> Result<(), SkarnError> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_no_overwrite(&src_path, &dst_path)?;
+        } else if file_type.is_file() && !dst_path.exists() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy `old_dir` (`%APPDATA%\selora-ide`) into `new_dir` (`%APPDATA%\skarn`) once, // skarn-v1-migration-compat
+/// without overwriting any pre-existing files in `new_dir`, and write `migrated_from.json`.
+pub fn migrate_legacy_settings_dir(old_dir: &Path, new_dir: &Path) -> Result<bool, SkarnError> {
+    if !old_dir.is_dir() {
+        return Ok(false);
+    }
+    if new_dir.join(MIGRATION_MARKER_FILE).exists() || new_dir.join(SETTINGS_FILE_NAME).exists() {
+        return Ok(false);
+    }
+    copy_dir_no_overwrite(old_dir, new_dir)?;
+    let migrated_at_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let marker = serde_json::json!({
+        "migrated_from": "selora-ide", // skarn-v1-migration-compat
+        "migrated_at_unix_secs": migrated_at_unix_secs,
+    });
+    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| {
+        SkarnError::Config(format!("failed to serialize migration marker: {e}"))
+    })?;
+    write_atomic(&new_dir.join(MIGRATION_MARKER_FILE), &bytes)?;
+    Ok(true)
+}
+
 /// Pure resolution of the settings directory, parameterized for tests (env
 /// vars are process-global and tests run in parallel threads, so the pure
 /// form takes both inputs explicitly).
@@ -727,7 +871,7 @@ fn settings_dir_from(
 ) -> Result<PathBuf, SkarnError> {
     // Test / embedding override wins over %APPDATA%.
     if let Some(dir) = override_dir {
-        if !dir.is_empty() {
+        if !dir.trim().is_empty() {
             return Ok(PathBuf::from(dir));
         }
     }
@@ -740,11 +884,33 @@ fn settings_dir_from(
         })
 }
 
+/// Returns `%APPDATA%\selora-ide` only when no env override is active (safe for production fallback). // skarn-v1-migration-compat
+pub fn legacy_settings_dir_if_active() -> Option<PathBuf> {
+    if env_var_with_legacy_fallback(SETTINGS_DIR_ENV, LEGACY_SETTINGS_DIR_ENV).is_some() {
+        return None;
+    }
+    std::env::var("APPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|base| Path::new(&base).join(LEGACY_CONFIG_DIR))
+}
+
 fn settings_dir() -> Result<PathBuf, SkarnError> {
-    settings_dir_from(
-        std::env::var(SETTINGS_DIR_ENV).ok(),
-        std::env::var("APPDATA").ok(),
-    )
+    static MIGRATED_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let override_dir = env_var_with_legacy_fallback(SETTINGS_DIR_ENV, LEGACY_SETTINGS_DIR_ENV);
+    let appdata = std::env::var("APPDATA").ok();
+    let dir = settings_dir_from(override_dir.clone(), appdata.clone())?;
+    if override_dir.is_none() {
+        if let Some(base) = appdata.filter(|v| !v.trim().is_empty()) {
+            let old_dir = Path::new(&base).join(LEGACY_CONFIG_DIR);
+            MIGRATED_ONCE.get_or_init(|| {
+                if let Err(err) = migrate_legacy_settings_dir(&old_dir, &dir) {
+                    eprintln!("[skarn-settings] legacy settings migration failed: {err}");
+                }
+            });
+        }
+    }
+    Ok(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -765,7 +931,7 @@ pub(crate) mod tests {
     pub(crate) fn temp_settings_dir(label: &str) -> PathBuf {
         let n = TEST_DIR_SEQ.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!(
-            "selora-settings-test-{label}-{}-{}",
+            "skarn-settings-test-{label}-{}-{}",
             std::process::id(),
             n
         ))
@@ -781,7 +947,7 @@ pub(crate) mod tests {
         assert!(s.editor.line_numbers);
         assert!(!s.editor.minimap);
         assert!(!s.editor.word_wrap);
-        assert_eq!(s.ui.theme, "selora-dark");
+        assert_eq!(s.ui.theme, "skarn-dark");
         assert_eq!(s.ui.sidebar_width, 240);
         assert_eq!(s.ui.chat_sidebar_width, 360);
         assert_eq!(s.lsp.rust_analyzer_path, None);
@@ -789,9 +955,9 @@ pub(crate) mod tests {
         assert!(s.lsp.rust_analyzer_args.is_empty());
         assert!(s.lsp.typescript_server_args.is_empty());
         assert!(s.lsp.enabled, "language servers default on");
-        assert_eq!(s.selora.base_url, "");
-        assert_eq!(s.selora.active_model, None);
-        assert!(s.selora.disabled_providers.is_empty());
+        assert_eq!(s.skarn.base_url, "");
+        assert_eq!(s.skarn.active_model, None);
+        assert!(s.skarn.disabled_providers.is_empty());
         assert_eq!(s.keybinds.command_palette, "Ctrl+Shift+P");
         assert_eq!(s.keybinds.fuzzy_find, "Ctrl+P");
         assert_eq!(s.keybinds.toggle_chat, "Ctrl+L");
@@ -808,7 +974,7 @@ pub(crate) mod tests {
         let dir = temp_settings_dir("ui-theme-round-trip");
         let path = dir.join(SETTINGS_FILE_NAME);
 
-        for theme in ["selora-dark", "dark", "space-black", "light", "system"] {
+        for theme in ["skarn-dark", "dark", "space-black", "light", "system"] {
             let mut settings = Settings::default();
             settings.ui.theme = theme.to_owned();
             settings.save_to(&path).expect("save theme");
@@ -833,7 +999,7 @@ pub(crate) mod tests {
         settings.lsp.rust_analyzer_args = vec!["--log-file".into(), "ra.log".into()];
         settings.lsp.typescript_server_args = vec!["--stdio".into()];
         settings.lsp.enabled = false;
-        settings.selora.active_model = Some("glm-5.3".into());
+        settings.skarn.active_model = Some("glm-5.3".into());
         // Phase 5d: the agent Brave key and the reduced-motion flag.
         settings.agent.brave_search_api_key = Some("brave-test-key".into());
         settings.ui.reduce_motion = true;
@@ -943,7 +1109,7 @@ pub(crate) mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".selora-tmp-"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".skarn-tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
 
@@ -969,7 +1135,7 @@ pub(crate) mod tests {
         // Old/partial file: `_v` present, most fields missing.
         std::fs::write(
             &path,
-            br#"{"_v":1,"editor":{"font_size":18},"ui":{"theme":"selora-dark"}}"#,
+            br#"{"_v":1,"editor":{"font_size":18},"ui":{"theme":"skarn-dark"}}"#,
         )
         .expect("write partial file");
 
@@ -981,35 +1147,35 @@ pub(crate) mod tests {
         assert_eq!(s.editor.tab_size, 4);
         assert!(s.editor.line_numbers);
         assert_eq!(s.ui.sidebar_width, 240);
-        assert_eq!(s.selora.base_url, "");
+        assert_eq!(s.skarn.base_url, "");
         assert_eq!(s.keybinds.save, "Ctrl+S");
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// `selora.disabled_providers` is additive: a pre-feature file (no key)
+    /// `skarn.disabled_providers` is additive: a pre-feature file (no key)
     /// loads with an empty list, and a file that sets it round-trips.
     #[test]
     fn disabled_providers_default_empty_and_round_trip() {
-        assert!(Settings::default().selora.disabled_providers.is_empty());
+        assert!(Settings::default().skarn.disabled_providers.is_empty());
 
         let dir = temp_settings_dir("disabled-providers");
         let path = dir.join(SETTINGS_FILE_NAME);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             &path,
-            br#"{"_v":1,"selora":{"base_url":"https://api.openai.com/v1"}}"#,
+            br#"{"_v":1,"skarn":{"base_url":"https://api.openai.com/v1"}}"#,
         )
         .expect("write pre-feature file");
         let s = Settings::load_from(&path).expect("pre-feature file must load");
-        assert!(s.selora.disabled_providers.is_empty());
+        assert!(s.skarn.disabled_providers.is_empty());
 
         let mut s = s;
-        s.selora.disabled_providers = vec!["deepseek".into(), "ollama".into()];
+        s.skarn.disabled_providers = vec!["deepseek".into(), "ollama".into()];
         s.save_to(&path).expect("save");
         let reloaded = Settings::load_from(&path).expect("reload");
         assert_eq!(
-            reloaded.selora.disabled_providers,
+            reloaded.skarn.disabled_providers,
             vec!["deepseek".to_string(), "ollama".to_string()]
         );
 
@@ -1032,7 +1198,7 @@ pub(crate) mod tests {
                 "glm"
             ]
         );
-        assert!(!is_known_provider("selora"));
+        assert!(!is_known_provider("skarn"));
         assert!(is_known_provider("anthropic"));
         assert!(is_known_provider("custom"));
         assert!(!is_known_provider(""));
@@ -1049,7 +1215,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             &path,
-            br#"{"_v":1,"agent":{"max_iterations":3},"ui":{"theme":"selora-dark"}}"#,
+            br#"{"_v":1,"agent":{"max_iterations":3},"ui":{"theme":"skarn-dark"}}"#,
         )
         .expect("write pre-5d file");
 
@@ -1166,7 +1332,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             &path,
-            r#"{
+            concat!(
+                r#"{
   "_v": 1,
   "editor": {
     "font_family": "JetBrains Mono",
@@ -1177,7 +1344,8 @@ pub(crate) mod tests {
     "word_wrap": false
   },
   "ui": {
-    "theme": "selora-dark",
+    "theme": "selora-dark","#, // skarn-v1-migration-compat
+                r#"
     "sidebar_width": 240,
     "chat_sidebar_width": 360
   },
@@ -1185,7 +1353,8 @@ pub(crate) mod tests {
     "rust_analyzer_path": null,
     "typescript_server_path": null
   },
-  "selora": {
+  "selora": {"#, // skarn-v1-migration-compat
+                r#"
     "base_url": "https://api.openai.com/v1",
     "active_model": null
   },
@@ -1196,6 +1365,7 @@ pub(crate) mod tests {
     "save": "Ctrl+S"
   }
 }"#,
+            ),
         )
         .expect("write pre-Z2 file");
 
@@ -1323,7 +1493,7 @@ pub(crate) mod tests {
         let json = serde_json::json!({
             "_v": SCHEMA_VERSION,
             "editor": { "font_size": 15 },
-            "selora": { "base_url": "https://api.openai.com/v1" }
+            "skarn": { "base_url": "https://api.openai.com/v1" }
         });
         std::fs::write(&path, serde_json::to_string(&json).unwrap()).expect("write");
 
@@ -1385,5 +1555,143 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn serde_alias_selora_deserializes_and_writes_skarn() { // skarn-v1-migration-compat
+        let dir = temp_settings_dir("serde-alias-selora"); // skarn-v1-migration-compat
+        let path = dir.join(SETTINGS_FILE_NAME);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let legacy_json = serde_json::json!({
+            "_v": SCHEMA_VERSION,
+            "selora": { // skarn-v1-migration-compat
+                "base_url": "https://api.openai.com/v1",
+                "active_model": "m",
+                "disabled_providers": ["ollama"]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy_json).unwrap()).expect("write");
+
+        let loaded = Settings::load_from(&path).expect("legacy selora root key loads"); // skarn-v1-migration-compat
+        assert_eq!(loaded.skarn.base_url, "https://api.openai.com/v1");
+        assert_eq!(loaded.skarn.active_model.as_deref(), Some("m"));
+        assert_eq!(loaded.skarn.disabled_providers, vec!["ollama".to_string()]);
+
+        loaded.save_to(&path).expect("resave");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert!(saved.get("skarn").is_some(), "saved JSON must contain skarn root key");
+        assert!(saved.get("selora").is_none(), "saved JSON must have zero selora root key"); // skarn-v1-migration-compat
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_dir_migrates_once_and_writes_marker() {
+        let root = temp_settings_dir("dir-migrate-once");
+        let old_dir = root.join(LEGACY_CONFIG_DIR);
+        let new_dir = root.join(CONFIG_DIR);
+        std::fs::create_dir_all(old_dir.join("hot-exit")).expect("mkdir old");
+        std::fs::write(old_dir.join(SETTINGS_FILE_NAME), br#"{"_v":1}"#).expect("settings");
+        std::fs::write(old_dir.join("agent-preferences.json"), br#"{"revision":2}"#).expect("prefs");
+        std::fs::write(old_dir.join("hot-exit").join("buf.json"), br#"{"text":"hi"}"#).expect("hot");
+        std::fs::write(old_dir.join(".api_key"), b"sk-test").expect("api key");
+
+        let migrated = migrate_legacy_settings_dir(&old_dir, &new_dir).expect("migrate");
+        assert!(migrated);
+        assert!(new_dir.join(SETTINGS_FILE_NAME).is_file());
+        assert!(new_dir.join("agent-preferences.json").is_file());
+        assert!(new_dir.join("hot-exit").join("buf.json").is_file());
+        assert!(new_dir.join(".api_key").is_file());
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(new_dir.join(MIGRATION_MARKER_FILE)).expect("marker"),
+        )
+        .expect("marker json");
+        assert_eq!(marker["migrated_from"], "selora-ide"); // skarn-v1-migration-compat
+        assert!(marker["migrated_at_unix_secs"].as_u64().is_some());
+        // Old dir remains intact as read-only fallback.
+        assert!(old_dir.join(SETTINGS_FILE_NAME).is_file());
+
+        // Second run is idempotent.
+        let second = migrate_legacy_settings_dir(&old_dir, &new_dir).expect("second run");
+        assert!(!second);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_dir_migration_skips_when_old_missing_and_preserves_existing_new() {
+        let root = temp_settings_dir("dir-migrate-skip");
+        let missing_old = root.join("missing-old");
+        let new_dir_a = root.join("new-a");
+        assert!(!migrate_legacy_settings_dir(&missing_old, &new_dir_a).expect("missing old ok"));
+        assert!(!new_dir_a.exists());
+
+        let old_dir = root.join(LEGACY_CONFIG_DIR);
+        let new_dir_b = root.join(CONFIG_DIR);
+        std::fs::create_dir_all(&old_dir).expect("mkdir old");
+        std::fs::create_dir_all(&new_dir_b).expect("mkdir new");
+        std::fs::write(old_dir.join(SETTINGS_FILE_NAME), br#"{"_v":1,"editor":{"font_size":12}}"#)
+            .expect("old settings");
+        std::fs::write(new_dir_b.join(SETTINGS_FILE_NAME), br#"{"_v":1,"editor":{"font_size":20}}"#)
+            .expect("new settings");
+
+        assert!(!migrate_legacy_settings_dir(&old_dir, &new_dir_b).expect("skip existing"));
+        let loaded = Settings::load_from(&new_dir_b.join(SETTINGS_FILE_NAME)).expect("load");
+        assert_eq!(loaded.editor.font_size, 20, "existing new settings must never be overwritten");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_load_falls_back_read_only_when_new_missing() {
+        let root = temp_settings_dir("load-readonly-fallback");
+        let old_dir = root.join(LEGACY_CONFIG_DIR);
+        let new_dir = root.join(CONFIG_DIR);
+        std::fs::create_dir_all(&old_dir).expect("mkdir old");
+        let old_path = old_dir.join(SETTINGS_FILE_NAME);
+        let new_path = new_dir.join(SETTINGS_FILE_NAME);
+        let raw = r#"{"_v":1,"editor":{"font_size":19},"selora":{"base_url":"https://legacy.example/v1"}}"#; // skarn-v1-migration-compat
+        std::fs::write(&old_path, raw).expect("write old");
+
+        let loaded =
+            load_from_with_legacy_fallback(&new_path, Some(&old_path)).expect("fallback load");
+        assert_eq!(loaded.editor.font_size, 19);
+        assert_eq!(loaded.skarn.base_url, "https://legacy.example/v1");
+        assert!(!new_path.exists(), "read-only fallback must not fabricate new file");
+        assert_eq!(
+            std::fs::read_to_string(&old_path).expect("old unchanged"),
+            raw,
+            "old dir must remain untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn env_override_prefers_skarn_and_falls_back_to_selora() { // skarn-v1-migration-compat
+        let resolved = resolve_env_pair(
+            Some("C:\\skarn-dir".into()),
+            Some("C:\\selora-dir".into()), // skarn-v1-migration-compat
+            SETTINGS_DIR_ENV,
+            LEGACY_SETTINGS_DIR_ENV,
+        );
+        assert_eq!(
+            resolved,
+            Some(("C:\\skarn-dir".into(), SETTINGS_DIR_ENV)),
+            "SKARN_SETTINGS_DIR must win over SELORA_SETTINGS_DIR" // skarn-v1-migration-compat
+        );
+
+        let fallback = resolve_env_pair(
+            None,
+            Some("C:\\selora-dir".into()), // skarn-v1-migration-compat
+            SETTINGS_DIR_ENV,
+            LEGACY_SETTINGS_DIR_ENV,
+        );
+        assert_eq!(
+            fallback,
+            Some(("C:\\selora-dir".into(), LEGACY_SETTINGS_DIR_ENV)), // skarn-v1-migration-compat
+            "SELORA_SETTINGS_DIR must work as fallback" // skarn-v1-migration-compat
+        );
     }
 }

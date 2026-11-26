@@ -3,7 +3,7 @@
 //! Owns the chat/agent sessions behind the dock: the in-memory transcripts
 //! (the bootstrap's `chat` snapshot), the in-flight requests keyed by
 //! `RequestId`, the single-use approval slots, and the two relays that turn
-//! `selora-ai`'s event streams into protocol events on `selora://event`
+//! `skarn-ai`'s event streams into protocol events on `skarn://event`
 //! through [`crate::state::EventLog`].
 //!
 //! The routing vocabulary is the four `FrontendCommand` arms this slice
@@ -59,8 +59,8 @@ use skarn_protocol::{
     MessageRole, ModelDto, ModelsDto, PlanApprovalDto, PlanPhaseDto, PlanStateDto,
     ProtocolErrorDto, QuestionPromptOptionDto, RequestId, SkarnStatusDto, SessionDto, SessionId,
     SubagentActivityDto, SubagentArtifactDto, SubagentCancelledDto, SubagentCompletedDto,
-    SubagentPolicyDto, SubagentRunState, TodoDto, TodoStatusDto, TodosDto, ToolCallStartedDto,
-    ToolCapabilityDto, ToolResultDto, TurnId, WorkflowApprovalDto,
+    SubagentPolicyDto, SubagentRunState, ToastDto, ToastSeverity, TodoDto, TodoStatusDto, TodosDto,
+    ToolCallStartedDto, ToolCapabilityDto, ToolResultDto, TurnId, WorkflowApprovalDto,
 };
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -152,7 +152,10 @@ impl ApiKeySource {
                         });
                     }
                 }
-                if let Ok(key) = std::env::var("SELORA_API_KEY") {
+                if let Some(key) = skarn_settings::env_var_with_legacy_fallback(
+                    "SKARN_API_KEY",
+                    "SELORA_API_KEY", // skarn-v1-migration-compat
+                ) {
                     let trimmed = key.trim();
                     if !trimmed.is_empty() {
                         return Ok(Some(trimmed.to_string()));
@@ -2220,7 +2223,7 @@ impl SessionEngine {
 
     /// Phase 9e: start one background child and emit its single typed
     /// completion event. The runtime outlives the parent turn; the relay
-    /// only maps the one accepted result onto `selora://event`. A cancelled
+    /// only maps the one accepted result onto `skarn://event`. A cancelled
     /// child emits nothing, and a late result is discarded by the runtime.
     ///
     /// The host-facing spawn tool (Phase 9c) calls this seam; keeping the
@@ -2769,6 +2772,7 @@ impl SessionEngine {
         let key = match self.fetch_api_key() {
             Ok(key) => key,
             Err(err) => {
+                let is_keyring_err = err.code == "keyring_unavailable";
                 let reason = if err.code == "not_connected" {
                     None
                 } else {
@@ -2788,6 +2792,16 @@ impl SessionEngine {
                     status_changed_with_error(ConnectionStatus::Disconnected, &active, reason),
                     None,
                 );
+                if is_keyring_err {
+                    log.record(
+                        &app,
+                        FrontendEvent::Toast(ToastDto {
+                            severity: ToastSeverity::Warning,
+                            message: "Saved API key could not be read from Windows Credential Manager — click Connect to re-enter it.".into(),
+                        }),
+                        None,
+                    );
+                }
                 return;
             }
         };
@@ -2975,7 +2989,7 @@ impl SessionEngine {
         let key = self.config.key_source.get().and_then(|key| {
             key.ok_or_else(|| ProtocolErrorDto {
                 code: "not_connected".into(),
-                message: "No Selora API key is stored — connect first.".into(),
+                message: "No API key is stored — connect first.".into(),
                 retryable: true,
             })
         })?;
@@ -5408,7 +5422,7 @@ mod tests {
 
     fn gateway_settings(base_url: String) -> skarn_settings::Settings {
         let mut settings = skarn_settings::Settings::default();
-        settings.selora.base_url = base_url;
+        settings.skarn.base_url = base_url;
         settings
     }
 

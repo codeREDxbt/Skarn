@@ -178,7 +178,7 @@ impl HotExitWriter {
         self.started.get_or_init(|| {
             let worker = Arc::clone(self);
             let _ = std::thread::Builder::new()
-                .name("selora-hot-exit".into())
+                .name("skarn-hot-exit".into())
                 .spawn(move || worker.run());
         });
     }
@@ -937,10 +937,15 @@ fn workflow_has_ambiguous_command(journal: &skarn_workflow::journal::LoadedJourn
 /// The wire view of the settings the web shell consumes. Kept in one place so
 /// the startup bootstrap and a persisted `SettingsUpdate` cannot drift.
 fn settings_view(settings: &skarn_settings::Settings) -> SettingsViewDto {
+    let theme = if settings.ui.theme == "selora-dark" { // skarn-v1-migration-compat
+        "skarn-dark".to_owned()
+    } else {
+        settings.ui.theme.clone()
+    };
     SettingsViewDto {
         reduced_motion: settings.ui.reduce_motion,
-        theme: settings.ui.theme.clone(),
-        // Ã‚Â§5.1: the rebindable set, populated from settings.keybinds so a
+        theme,
+        // Â§5.1: the rebindable set, populated from settings.keybinds so a
         // user's egui-side rebind carries into the web shell.
         keybind_command_palette: settings.keybinds.command_palette.clone(),
         keybind_toggle_chat: settings.keybinds.toggle_chat.clone(),
@@ -950,7 +955,7 @@ fn settings_view(settings: &skarn_settings::Settings) -> SettingsViewDto {
         editor_tab_size: settings.editor.tab_size,
         editor_word_wrap: settings.editor.word_wrap,
         check_for_updates: settings.ui.check_for_updates,
-        disabled_providers: known_disabled_providers(&settings.selora.disabled_providers),
+        disabled_providers: known_disabled_providers(&settings.skarn.disabled_providers),
         workspace_trusted: settings.agent.workspace_trusted,
     }
 }
@@ -1158,7 +1163,7 @@ impl LayoutStore {
     }
 }
 
-/// The monotonic event log behind `selora://event` (Ã‚Â§2.4/Ã‚Â§3.4): one global
+/// The monotonic event log behind `skarn://event` (§2.4/§3.4): one global
 /// sequence, the 1024-event replay ring, and the emit path. Extracted in
 /// Z3 so the session relays ([`crate::sessions`]) record through the same
 /// seam the layout commands do Ã¢â‚¬â€ every event, layout or agent, rides one
@@ -1268,7 +1273,7 @@ impl EventLog {
             .lock()
             .expect("emitted lock")
             .push(event.sequence);
-        let _ = app.emit("selora://event", &event);
+        let _ = app.emit("skarn://event", &event);
     }
 
     /// Record without emitting Ã¢â‚¬â€ the Ã‚Â§4.4 boot toast is recorded during
@@ -1444,7 +1449,7 @@ struct ActiveRun {
     token: Uuid,
 }
 
-/// The bridge from the engine's blocking progress events to `selora://event`.
+/// The bridge from the engine's blocking progress events to `skarn://event`.
 ///
 /// It owns the per-run protocol context (request id, cost cap, latest phase)
 /// and the exactly-once guard for `WorkflowFinished`. The sink is an `Fn`, so
@@ -2138,21 +2143,22 @@ enum WorkflowLaunch {
 }
 
 impl DesktopState {
-    /// The production constructor: `%APPDATA%\selora-ide\settings.json` (or
-    /// the `SELORA_SETTINGS_DIR` override).
+    /// The production constructor: `%APPDATA%\skarn\settings.json` (or
+    /// the `SKARN_SETTINGS_DIR` / legacy override).
     pub fn new() -> Self {
-        let state = Self::from_settings_path(skarn_settings::Settings::default_path());
-        // Z3's stand-in for the Z4 folder picker: point the agent's tools at
-        // a real tree via `SELORA_WORKSPACE_ROOT` (an existing directory).
-        // Without it `SendAgent` answers the typed `no_workspace` error.
-        // Z4: attach a real workspace at boot Ã¢â‚¬â€ `SELORA_WORKSPACE_ROOT` when
-        // set, otherwise the process working directory. The explorer, editor
-        // and the agent's tools all read through this one Workspace.
-        let boot_root = std::env::var("SELORA_WORKSPACE_ROOT")
-            .ok()
-            .map(|root| PathBuf::from(root.trim()))
-            .filter(|root| !root.as_os_str().is_empty() && root.is_dir())
-            .or_else(|| std::env::current_dir().ok());
+        let new_path = skarn_settings::Settings::default_path();
+        let old_path = skarn_settings::legacy_settings_dir_if_active()
+            .map(|dir| dir.join(skarn_settings::SETTINGS_FILE_NAME));
+        let state = Self::from_settings_path_with_fallback(new_path, old_path);
+        // Z4: attach a real workspace at boot — `SKARN_WORKSPACE_ROOT` (with
+        // legacy fallback) when set, otherwise the process working directory.
+        let boot_root = skarn_settings::env_var_with_legacy_fallback(
+            "SKARN_WORKSPACE_ROOT",
+            "SELORA_WORKSPACE_ROOT", // skarn-v1-migration-compat
+        )
+        .map(|root| PathBuf::from(root.trim()))
+        .filter(|root| !root.as_os_str().is_empty() && root.is_dir())
+        .or_else(|| std::env::current_dir().ok());
         if let Some(root) = boot_root {
             if state.attach_workspace(root).is_ok() {
                 // Recover unsaved edits before the window asks for its first
@@ -2180,8 +2186,16 @@ impl DesktopState {
     /// `AppHandle` exists yet, so it is recorded, not emitted; the replay
     /// flow (Ã‚Â§3.4) delivers it, and its sequence is Ã¢â€°Â¤ the bootstrap's
     /// `snapshot_sequence`.
+    #[cfg(test)]
     pub fn from_settings_path(settings_path: PathBuf) -> Self {
-        Self::from_settings_path_with_key(settings_path, ApiKeySource::Keyring)
+        Self::from_settings_path_with_key(settings_path, None, ApiKeySource::Keyring)
+    }
+
+    pub fn from_settings_path_with_fallback(
+        settings_path: PathBuf,
+        legacy_settings_path: Option<PathBuf>,
+    ) -> Self {
+        Self::from_settings_path_with_key(settings_path, legacy_settings_path, ApiKeySource::Keyring)
     }
 
     #[cfg(test)]
@@ -2189,14 +2203,18 @@ impl DesktopState {
         settings_path: PathBuf,
         key: Arc<Mutex<Result<Option<String>, ProtocolErrorDto>>>,
     ) -> Self {
-        Self::from_settings_path_with_key(settings_path, ApiKeySource::Mutable(key))
+        Self::from_settings_path_with_key(settings_path, None, ApiKeySource::Mutable(key))
     }
 
-    fn from_settings_path_with_key(settings_path: PathBuf, key_source: ApiKeySource) -> Self {
+    fn from_settings_path_with_key(
+        settings_path: PathBuf,
+        legacy_settings_path: Option<PathBuf>,
+        key_source: ApiKeySource,
+    ) -> Self {
         let layout_store = Arc::new(LayoutStore::new(settings_path.clone()));
         // Hot-exit snapshots live beside `settings.json` in the app-data
         // root (`<app-data>/hot-exit`); the settings path is the one place
-        // that already resolves `SELORA_SETTINGS_DIR` and `%APPDATA%`.
+        // that already resolves `SKARN_SETTINGS_DIR` and `%APPDATA%`.
         let parent_dir = settings_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2205,7 +2223,10 @@ impl DesktopState {
         let preferences_path = parent_dir.map(|dir| dir.join("agent-preferences.json"));
         // Same semantics as `Settings::load_or_default`: fall back to the
         // defaults and keep the error for the caller to toast.
-        let (mut settings, load_error) = match skarn_settings::Settings::load_from(&settings_path) {
+        let (mut settings, load_error) = match skarn_settings::load_from_with_legacy_fallback(
+            &settings_path,
+            legacy_settings_path.as_deref(),
+        ) {
             Ok(settings) => (settings, None),
             Err(error) => (skarn_settings::Settings::default(), Some(error)),
         };
@@ -2254,7 +2275,7 @@ impl DesktopState {
     /// default path is never written; the round-trip tests use
     /// [`DesktopState::from_settings_path`] with a tempdir instead. The
     /// session engine gets a fixed test key (and the gateway follows
-    /// `settings.selora.base_url`, so a loopback mock gateway is just a
+    /// `settings.skarn.base_url`, so a loopback mock gateway is just a
     /// settings field) Ã¢â‚¬â€ no test ever touches the real Credential Manager.
     #[cfg(test)]
     pub fn with_settings(settings: skarn_settings::Settings) -> Self {
@@ -2297,8 +2318,8 @@ impl DesktopState {
             layout: Arc::new(Mutex::new(LayoutStore::load_layout(&settings))),
             layout_store,
             sessions: Arc::new(SessionEngine::new(EngineConfig {
-                base_url: settings.selora.base_url.clone(),
-                active_model: settings.selora.active_model.clone(),
+                base_url: settings.skarn.base_url.clone(),
+                active_model: settings.skarn.active_model.clone(),
                 agent: (*settings.agent).clone(),
                 key_source,
             })),
@@ -3105,7 +3126,7 @@ impl DesktopState {
                 retryable: true,
             }
         })?;
-        settings.selora.active_model = canonical.clone();
+        settings.skarn.active_model = canonical.clone();
         self.layout_store.save_settings(&settings).map_err(|error| {
             ProtocolErrorDto {
                 code: "model_selection_failed".into(),
@@ -3146,8 +3167,8 @@ impl DesktopState {
         active_model: Option<String>,
     ) -> Result<(), skarn_settings::SkarnError> {
         let mut settings = self.layout_store.load_settings().unwrap_or_default();
-        settings.selora.base_url = base_url.to_owned();
-        settings.selora.active_model = active_model;
+        settings.skarn.base_url = base_url.to_owned();
+        settings.skarn.active_model = active_model;
         self.layout_store.save_settings(&settings)
     }
 
@@ -3166,6 +3187,9 @@ impl DesktopState {
     }
 
     pub(crate) async fn run_boot_probe<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+        if !self.sessions.key_source().is_test_override() {
+            let _ = skarn_settings::keyring::brave_key_get();
+        }
         let previous = self.sessions.active_model_id();
         self.sessions
             .connect_probe(self.event_log(), app.clone())
@@ -3223,13 +3247,14 @@ impl DesktopState {
             Some(raw) => {
                 let theme = raw.trim();
                 match theme {
-                    "selora-dark" | "galaxy" | "dark" | "space-black" | "light" | "system" => {
+                    "skarn-dark" | "galaxy" | "dark" | "space-black" | "light" | "system" => {
                         Some(theme.to_owned())
                     }
+                    "selora-dark" => Some("skarn-dark".to_owned()), // skarn-v1-migration-compat
                     _ => return Err(ProtocolErrorDto {
                         code: "invalid_settings_theme".into(),
                         message:
-                            "Theme must be one of: selora-dark, galaxy, dark, space-black, light, system."
+                            "Theme must be one of: skarn-dark, galaxy, dark, space-black, light, system."
                                 .into(),
                         retryable: false,
                     }),
@@ -3346,7 +3371,7 @@ impl DesktopState {
                 .set_queue_allowed(trusted == self.engine_workspace_trusted);
         }
         if let Some(disabled) = disabled_providers {
-            settings.selora.disabled_providers = disabled;
+            settings.skarn.disabled_providers = disabled;
         }
         self.layout_store
             .save_settings(&settings)
@@ -3390,7 +3415,7 @@ impl DesktopState {
         Err(ProtocolErrorDto {
             code: "workspace_trust_restart_required".into(),
             message:
-                "Workspace trust changed. Restart Selora to apply it before running the agent."
+                "Workspace trust changed. Restart Skarn to apply it before running the agent."
                     .into(),
             retryable: false,
         })
@@ -3981,9 +4006,11 @@ impl DesktopState {
             FrontendCommand::OpenFolder => {
                 // The keyboard/palette entry: prefer the boot override, and
                 // point the UI at the native picker otherwise.
-                let root = std::env::var("SELORA_WORKSPACE_ROOT")
-                    .ok()
-                    .map(PathBuf::from)
+                let root = skarn_settings::env_var_with_legacy_fallback(
+                    "SKARN_WORKSPACE_ROOT",
+                    "SELORA_WORKSPACE_ROOT", // skarn-v1-migration-compat
+                )
+                .map(PathBuf::from)
                     .filter(|path| path.is_dir())
                     .ok_or_else(|| ProtocolErrorDto {
                         code: "use_folder_picker".into(),
@@ -5588,7 +5615,7 @@ mod tests {
         );
         let persisted = skarn_settings::Settings::load_from(&path).expect("reload settings");
         assert_eq!(
-            persisted.selora.active_model.as_deref(),
+            persisted.skarn.active_model.as_deref(),
             Some("provider/new-model"),
             "the selection is durable"
         );
@@ -5717,7 +5744,7 @@ mod tests {
         assert_eq!(persisted.keybinds.toggle_chat, "Alt+L");
         assert_eq!(persisted.keybinds.save, "Ctrl+Alt+S");
         // A save preserves the unrelated sections.
-        assert_eq!(persisted.ui.theme, "selora-dark");
+        assert_eq!(persisted.ui.theme, "skarn-dark");
         assert_eq!(persisted.agent.max_iterations, 100);
 
         // A fresh state over the same file boots with the saved values.
@@ -5776,13 +5803,13 @@ mod tests {
 
         let persisted = skarn_settings::Settings::load_from(&path).expect("reload settings");
         assert_eq!(
-            persisted.selora.disabled_providers,
+            persisted.skarn.disabled_providers,
             vec!["deepseek".to_string(), "ollama".to_string()]
         );
 
         // The unrelated stored sections survive the save.
-        assert_eq!(persisted.selora.base_url, "");
-        assert_eq!(persisted.ui.theme, "selora-dark");
+        assert_eq!(persisted.skarn.base_url, "");
+        assert_eq!(persisted.ui.theme, "skarn-dark");
 
         let reenabled = state
             .dispatch(
@@ -5800,7 +5827,7 @@ mod tests {
             .expect("re-enabling providers succeeds");
         assert!(reenabled.settings.disabled_providers.is_empty());
         let persisted = skarn_settings::Settings::load_from(&path).expect("reload settings");
-        assert!(persisted.selora.disabled_providers.is_empty());
+        assert!(persisted.skarn.disabled_providers.is_empty());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -5843,7 +5870,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         std::fs::write(
             &path,
-            br#"{"_v":1,"selora":{"disabled_providers":["deepseek","bogus","deepseek"]}}"#,
+            br#"{"_v":1,"skarn":{"disabled_providers":["deepseek","bogus","deepseek"]}}"#,
         )
         .expect("write settings");
         let state = DesktopState::from_settings_path(path.clone());
@@ -11349,7 +11376,7 @@ mod tests {
         let prefs_path = dir.path().join("agent-preferences.json");
 
         let mut settings = skarn_settings::Settings::default();
-        settings.selora.active_model = Some("stale/settings-model".into());
+        settings.skarn.active_model = Some("stale/settings-model".into());
         settings.save_to(&settings_path).expect("save settings");
 
         crate::agents_preferences::save_to_path(
@@ -11374,7 +11401,7 @@ mod tests {
         assert_eq!(
             skarn_settings::Settings::load_from(&settings_path)
                 .expect("reload settings")
-                .selora
+                .skarn
                 .active_model
                 .as_deref(),
             Some("mistralai/mistral-large-4-1t-a52b")
@@ -11391,5 +11418,41 @@ mod tests {
             .resolve_model_for_dispatch(Some("custom/explicit-request-model"))
             .unwrap();
         assert_eq!(explicit.id, "custom/explicit-request-model");
+    }
+
+    #[test]
+    fn theme_migration_accepts_selora_dark_alias_and_normalizes_to_skarn_dark() { // skarn-v1-migration-compat
+        let app = mock_app_handle();
+        let path = temp_settings_path("theme-migration-alias");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"_v":1,"ui":{"theme":"selora-dark"}}"#) // skarn-v1-migration-compat
+            .expect("write legacy theme");
+
+        let state = DesktopState::from_settings_path(path.clone());
+        assert_eq!(
+            state.bootstrap().settings.theme,
+            "skarn-dark",
+            "settings_view must surface selora-dark as skarn-dark" // skarn-v1-migration-compat
+        );
+
+        let returned = state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            theme: Some("selora-dark".into()), // skarn-v1-migration-compat
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("legacy theme alias is accepted");
+        assert_eq!(returned.settings.theme, "skarn-dark");
+        let persisted = skarn_settings::Settings::load_from(&path).expect("reload");
+        assert_eq!(persisted.ui.theme, "skarn-dark");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

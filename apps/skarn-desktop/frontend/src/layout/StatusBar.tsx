@@ -1,4 +1,4 @@
-// Selora IDE — Phase Z2 status bar (DESIGN §3.7, ARCHITECTURE §8.1).
+// Skarn — Phase Z2 status bar (DESIGN §3.7, ARCHITECTURE §8.1).
 //
 // 24px, 1px top hairline, --type-xs.
 // Left: Workspace display name + Git branch with sync spinner + language/file info.
@@ -6,6 +6,7 @@
 // Right: LSP diagnostics summary (errors/warnings) + UTF-8 encoding + line/col + Core epoch + Provider connection status with live green pulse radar ring.
 import { useState, useSyncExternalStore } from 'react';
 import type { BootstrapState, ConnectionStatus } from '../bridge/bridge';
+import { getAppSnapshot, subscribeApp } from '../app/app-store';
 import { layoutStore } from '../features/layout/layout-store';
 import { agentStore } from '../features/agent/agent-store';
 import { SkarnMark } from '../components/SkarnMark';
@@ -18,9 +19,11 @@ import {
 
 function ConnectionStatusView({
   status,
+  connectionError,
   onOpenConnect,
 }: {
   status: ConnectionStatus;
+  connectionError: string | null;
   onOpenConnect?: () => void;
 }) {
   if (status === 'connected') {
@@ -45,6 +48,24 @@ function ConnectionStatusView({
         </span>
         provider connected
       </button>
+    );
+  }
+
+  if (connectionError) {
+    const isKeyringError = /keyring|credential manager/i.test(connectionError);
+    return (
+      <span className="statusbar-connection is-disconnected is-error">
+        <span className="statusbar-dot" aria-hidden="true" />
+        <button
+          type="button"
+          className="statusbar-connect"
+          disabled={!onOpenConnect}
+          onClick={onOpenConnect}
+          title={connectionError}
+        >
+          {isKeyringError ? 'keyring error · re-enter key' : 'connection error · retry'}
+        </button>
+      </span>
     );
   }
 
@@ -76,6 +97,7 @@ export function StatusBar({
   bootstrap: BootstrapState;
   onOpenConnect?: () => void;
 }) {
+  const appState = useSyncExternalStore(subscribeApp, getAppSnapshot);
   const agentState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
   const [syncing, setSyncing] = useState(false);
 
@@ -201,7 +223,11 @@ export function StatusBar({
           core {epoch}
         </span>
 
-        <ConnectionStatusView status={bootstrap.connection} onOpenConnect={onOpenConnect} />
+        <ConnectionStatusView
+          status={bootstrap.connection}
+          connectionError={appState?.connectionError ?? null}
+          onOpenConnect={onOpenConnect}
+        />
       </div>
     </footer>
   );

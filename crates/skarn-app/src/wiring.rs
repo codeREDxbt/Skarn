@@ -920,7 +920,7 @@ pub fn spawn_dispatcher(
                     spawn_settings_load(&dispatch_handle, &notify, &msg_tx);
                 }
                 Effect::SettingsSave(settings) => {
-                    base_url = settings.selora.base_url.clone();
+                    base_url = settings.skarn.base_url.clone();
                     spawn_settings_save(&dispatch_handle, &notify, &msg_tx, settings);
                 }
                 Effect::SettingsSynced { base_url: url } => {

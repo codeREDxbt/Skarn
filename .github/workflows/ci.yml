@@ -1,4 +1,4 @@
-# Selora IDE - continuous integration.
+# Skarn - continuous integration.
 #
 # Signing requirements: see SIGNING.md at the repository root.
 #
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v4.2.2
 
       # Fails fast on a version or repository-slug mismatch (Cargo.toml,
-      # tauri.conf.json, frontend package.json, selora-ide.iss; mkdocs.yml
+      # tauri.conf.json, frontend package.json, skarn.iss; mkdocs.yml
       # only when docs/ exists). On a tag push it also requires the CHANGELOG
       # section, mirroring release.yml. No build is needed.
       - name: Verify release metadata
@@ -167,7 +167,7 @@ jobs:
         run: cargo build --release -p skarn-desktop --locked
 
       # Measures spawn -> the Rust-side "Window shown & focused!" boot marker
-      # in %TEMP%\selora_boot.log. A missing marker inside the timeout fails
+      # in %TEMP%\skarn_boot.log. A missing marker inside the timeout fails
       # the step; the process tree is killed either way.
       - name: Cold-start smoke (release exe)
         if: vars.ENABLE_STARTUP_SMOKE == 'true'
@@ -181,7 +181,7 @@ jobs:
             throw "Release binary not found at $exe."
           }
           $exe = (Resolve-Path -LiteralPath $exe).Path
-          $boot = Join-Path $env:TEMP 'selora_boot.log'
+          $boot = Join-Path $env:TEMP 'skarn_boot.log'
           Remove-Item -LiteralPath $boot -Force -ErrorAction SilentlyContinue
           $timeout = [int]$env:STARTUP_TIMEOUT_SECONDS
           $marker = 'Window shown & focused!'

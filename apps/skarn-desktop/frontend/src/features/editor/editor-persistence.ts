@@ -11,11 +11,11 @@ type Session = {
   /** The single transients tab opened by a single click, if any. */
   previewPath?: string | null;
 };
-const LAST_WORKSPACE = 'selora:last-editor-workspace';
+const LAST_WORKSPACE = 'skarn:last-editor-workspace';
 const keyFor = (root: string) => {
   const normalized = root.replace(/\\/g, '/');
   const windowsPath = /^[a-z]:\//i.test(normalized) || root.startsWith('\\\\');
-  return 'selora:editor-session:' + (windowsPath ? normalized.toLowerCase() : normalized);
+  return 'skarn:editor-session:' + (windowsPath ? normalized.toLowerCase() : normalized);
 };
 const cursors = new Map<string, Selection>();
 const cursorKey = (root: string, path: string) => keyFor(root) + ':' + path;

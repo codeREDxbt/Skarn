@@ -1,7 +1,19 @@
 # Changelog
 
-All notable changes to Selora IDE are documented here. This project follows
+All notable changes to Skarn are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
+
+## [1.0.0] - 2026-11-26
+
+### Changed
+
+- Renamed from Selora IDE to Skarn (`app.skarn.desktop`, `Skarn-Setup-1.0.0.exe`).
+- Migrated settings storage (`%APPDATA%\skarn` with read-only fallback and
+  `"selora"` JSON root alias), Windows Credential Manager service
+  (`skarn-ide`), `SKARN_*` environment variables (with `SELORA_*` fallback),
+  `skarn-dark` theme ID, `localStorage` keys, and cross-process IPC channels.
+- Hardened credential migration with read-back verification and explicit keyring
+  error surfacing in the status bar and Connect modal.
 
 ## [0.1.0] - 2026-10-29
 

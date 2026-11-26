@@ -3,7 +3,7 @@
 // A tiny external store in the shape React's useSyncExternalStore expects:
 // `subscribe` / `getSnapshot`, plus `setEnabled` and a `playCue` wrapper that
 // is silent while the preference is OFF (the default). The preference lives
-// in localStorage under `selora:ui-sounds`; the audio itself stays in
+// in localStorage under `skarn:ui-sounds`; the audio itself stays in
 // `sound.ts`, which owns the global mute flag and the AudioContext.
 import {
   playCue as playEngineCue,
@@ -13,7 +13,7 @@ import {
 
 export type { SoundCue };
 
-export const SOUND_PREFERENCE_KEY = 'selora:ui-sounds';
+export const SOUND_PREFERENCE_KEY = 'skarn:ui-sounds';
 
 type Listener = () => void;
 const listeners = new Set<Listener>();

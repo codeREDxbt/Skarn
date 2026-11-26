@@ -1406,7 +1406,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     for _ in 0..100 {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let temporary = parent.join(format!(
-            ".{}.selora-{}-{sequence}.tmp",
+            ".{}.skarn-{}-{sequence}.tmp",
             file_name.to_string_lossy(),
             std::process::id()
         ));

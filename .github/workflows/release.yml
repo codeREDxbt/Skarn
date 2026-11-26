@@ -1,4 +1,4 @@
-# Selora IDE - release pipeline.
+# Skarn - release pipeline.
 #
 # Signing requirements: see SIGNING.md at the repository root.
 #
@@ -262,7 +262,7 @@ jobs:
             throw "dumpbin failed on $exe with $LASTEXITCODE."
           }
           if ($imports -notmatch 'VCRUNTIME140\.dll') {
-            throw 'The release binary does not import VCRUNTIME140.dll. If the CRT became static, update installer/selora-ide.iss before shipping.'
+            throw 'The release binary does not import VCRUNTIME140.dll. If the CRT became static, update installer/skarn.iss before shipping.'
           }
 
           # The escaped dot matters: MSVCP140.dll must not match
@@ -281,10 +281,10 @@ jobs:
 
           # Keep the installer honest: a staged DLL with no [Files] entry is
           # staged and then silently not shipped.
-          $installerScript = Get-Content -LiteralPath 'installer\selora-ide.iss' -Raw
+          $installerScript = Get-Content -LiteralPath 'installer\skarn.iss' -Raw
           foreach ($dll in $dlls) {
             if ($installerScript -notmatch [regex]::Escape($dll)) {
-              throw "installer/selora-ide.iss has no [Files] entry for $dll; add one before shipping."
+              throw "installer/skarn.iss has no [Files] entry for $dll; add one before shipping."
             }
           }
 
@@ -359,7 +359,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed with $LASTEXITCODE" }
 
           # Do not assume Chocolatey's install directory. find-iscc.ps1 checks
-          # SELORA_ISCC, PATH, the standard 6/7 directories, and the uninstall
+          # SKARN_ISCC (and SELORA_ISCC fallback), PATH, the standard 6/7 directories, and the uninstall # skarn-v1-migration-compat
           # registry, and prints the absolute compiler path.
           $iscc = (& .\installer\find-iscc.ps1 | Out-String).Trim()
           if (-not $iscc -or -not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
@@ -372,7 +372,7 @@ jobs:
         if: env.SIGNING_CERT_BASE64 != ''
         shell: pwsh
         run: |
-          $pfx = Join-Path $env:RUNNER_TEMP 'selora-signing.pfx'
+          $pfx = Join-Path $env:RUNNER_TEMP 'skarn-signing.pfx'
           try {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
 
@@ -386,7 +386,7 @@ jobs:
             $target = 'target\release\skarn-desktop.exe'
             & $signtool.FullName sign /f $pfx /p $env:SIGNING_CERT_PASSWORD `
               /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 `
-              /d 'Selora IDE' /du "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+              /d 'Skarn' /du "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
               $target
             if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with $LASTEXITCODE" }
 
@@ -419,12 +419,12 @@ jobs:
           # must not be able to move the artifact out of installer\output.
           $out = Join-Path $env:GITHUB_WORKSPACE 'installer\output'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $installer = Join-Path $out "Selora-IDE-Setup-$env:VERSION.exe"
+          $installer = Join-Path $out "Skarn-Setup-$env:VERSION.exe"
 
           # A stale setup for this version must not survive a failed compile.
           Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
 
-          & $env:ISCC "/DMyAppVersion=$env:VERSION" "/DMyCrtDlls=$env:CRT_DLLS" "/O$out" (Join-Path $env:GITHUB_WORKSPACE 'installer\selora-ide.iss')
+          & $env:ISCC "/DMyAppVersion=$env:VERSION" "/DMyCrtDlls=$env:CRT_DLLS" "/O$out" (Join-Path $env:GITHUB_WORKSPACE 'installer\skarn.iss')
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
 
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
@@ -442,7 +442,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          $pfx = Join-Path $env:RUNNER_TEMP 'selora-signing.pfx'
+          $pfx = Join-Path $env:RUNNER_TEMP 'skarn-signing.pfx'
           try {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
 
@@ -453,10 +453,10 @@ jobs:
               Select-Object -First 1
             if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
 
-            $installer = "installer\output\Selora-IDE-Setup-$env:VERSION.exe"
+            $installer = "installer\output\Skarn-Setup-$env:VERSION.exe"
             & $signtool.FullName sign /f $pfx /p $env:SIGNING_CERT_PASSWORD `
               /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 `
-              /d 'Selora IDE Installer' /du "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+              /d 'Skarn Installer' /du "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
               $installer
             if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with $LASTEXITCODE" }
 
@@ -473,7 +473,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          $installer = Join-Path $env:GITHUB_WORKSPACE "installer\output\Selora-IDE-Setup-$env:VERSION.exe"
+          $installer = Join-Path $env:GITHUB_WORKSPACE "installer\output\Skarn-Setup-$env:VERSION.exe"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
             throw "Installer not found at $installer."
           }
@@ -511,7 +511,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          $installer = Join-Path $env:GITHUB_WORKSPACE "installer\output\Selora-IDE-Setup-$env:VERSION.exe"
+          $installer = Join-Path $env:GITHUB_WORKSPACE "installer\output\Skarn-Setup-$env:VERSION.exe"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
             throw "Installer not found at $installer."
           }
@@ -528,7 +528,7 @@ jobs:
           if ($written -ne $line) {
             throw "Checksum file does not contain the expected line: $written"
           }
-          if ($written -notmatch '^[0-9a-f]{64}  Selora-IDE-Setup-\d+\.\d+\.\d+\.exe$') {
+          if ($written -notmatch '^[0-9a-f]{64}  Skarn-Setup-\d+\.\d+\.\d+\.exe$') {
             throw "Checksum line has an unexpected shape: $written"
           }
 
@@ -543,10 +543,10 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4.4.3
         with:
-          name: selora-ide-setup-${{ steps.version.outputs.VERSION }}
+          name: skarn-setup-${{ steps.version.outputs.VERSION }}
           path: |
-            installer/output/Selora-IDE-Setup-${{ steps.version.outputs.VERSION }}.exe
-            installer/output/Selora-IDE-Setup-${{ steps.version.outputs.VERSION }}.exe.sha256
+            installer/output/Skarn-Setup-${{ steps.version.outputs.VERSION }}.exe
+            installer/output/Skarn-Setup-${{ steps.version.outputs.VERSION }}.exe.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -576,11 +576,11 @@ jobs:
       - name: Draft GitHub release
         uses: softprops/action-gh-release@v2.2.0
         with:
-          name: Selora IDE v${{ steps.version.outputs.VERSION }}
+          name: Skarn v${{ steps.version.outputs.VERSION }}
           tag_name: ${{ github.ref_name }}
           files: |
-            installer/output/Selora-IDE-Setup-${{ steps.version.outputs.VERSION }}.exe
-            installer/output/Selora-IDE-Setup-${{ steps.version.outputs.VERSION }}.exe.sha256
+            installer/output/Skarn-Setup-${{ steps.version.outputs.VERSION }}.exe
+            installer/output/Skarn-Setup-${{ steps.version.outputs.VERSION }}.exe.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
           draft: true
@@ -603,7 +603,7 @@ jobs:
             throw "Release $env:GITHUB_REF_NAME is not a draft. This workflow must never publish."
           }
 
-          $installerName = "Selora-IDE-Setup-$env:VERSION.exe"
+          $installerName = "Skarn-Setup-$env:VERSION.exe"
           $checksumName = "$installerName.sha256"
           $names = @($release.assets | ForEach-Object { $_.name })
           foreach ($expected in @($installerName, $checksumName)) {
@@ -624,7 +624,7 @@ jobs:
           }
 
           # Round-trip: download what the owner will download and re-hash it.
-          $verifyDir = Join-Path $env:RUNNER_TEMP 'selora-draft-verify'
+          $verifyDir = Join-Path $env:RUNNER_TEMP 'skarn-draft-verify'
           New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
           & gh release download $env:GITHUB_REF_NAME --pattern $installerName --dir $verifyDir --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release download failed with $LASTEXITCODE" }

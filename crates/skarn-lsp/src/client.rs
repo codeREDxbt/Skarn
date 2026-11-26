@@ -373,14 +373,18 @@ fn dead(name: &str) -> SkarnError {
     SkarnError::Lsp(format!("{name} server is not running"))
 }
 
-/// The environment variables that can carry the Selora gateway key.
+/// The environment variables that can carry the Skarn gateway key.
 ///
 /// The desktop keeps the key in the keyring and never copies it into its
-/// own environment; a user-exported `SELORA_API_KEY`/`OPENAI_API_KEY` would
-/// still be inherited by a child, so every spawned server strips both.
+/// own environment; a user-exported `SKARN_API_KEY`/`SELORA_API_KEY`/`OPENAI_API_KEY` would // skarn-v1-migration-compat
+/// still be inherited by a child, so every spawned server strips all of them.
 /// Everything else — `PATH`, `SystemRoot`, the user's toolchain env — stays
 /// inherited: `env_clear` would break `node`/`cargo` lookups.
-const KEY_ENV_VARS: [&str; 2] = ["SELORA_API_KEY", "OPENAI_API_KEY"];
+const KEY_ENV_VARS: [&str; 3] = [
+    "SKARN_API_KEY",
+    "SELORA_API_KEY", // skarn-v1-migration-compat
+    "OPENAI_API_KEY",
+];
 
 /// Drop the gateway-key variables from a child command's inherited env.
 fn strip_key_env(command: &mut tokio::process::Command) {
@@ -1254,30 +1258,38 @@ mod tests {
             ServerSpec {
                 name: "env-probe".into(),
                 program: "cmd.exe".into(),
-                args: vec!["/C".into(), "set".into(), "SELORA_API_KEY".into()],
+                args: vec![
+                    "/C".into(),
+                    "echo SKARN=%SKARN_API_KEY% SELORA=%SELORA_API_KEY%".into(), // skarn-v1-migration-compat
+                ],
             }
         } else {
             ServerSpec {
                 name: "env-probe".into(),
                 program: "sh".into(),
-                args: vec!["-c".into(), "printf %s \"$SELORA_API_KEY\"".into()],
+                args: vec![
+                    "-c".into(),
+                    "printf '%s|%s' \"$SKARN_API_KEY\" \"$SELORA_API_KEY\"".into(), // skarn-v1-migration-compat
+                ],
             }
         };
 
-        // Simulate the key sitting in the desktop process's environment...
-        std::env::set_var("SELORA_API_KEY", "sk-live-do-not-leak");
+        // Simulate both keys sitting in the desktop process's environment...
+        std::env::set_var("SKARN_API_KEY", "sk-live-skarn-secret");
+        std::env::set_var("SELORA_API_KEY", "sk-live-do-not-leak"); // skarn-v1-migration-compat
         let launched = spawn_process(&spec).expect("spawn the env probe");
         let mut reader = launched.reader;
         let mut output = Vec::new();
         let _ =
             tokio::time::timeout(Duration::from_secs(10), reader.read_to_end(&mut output)).await;
         drop(launched.child);
-        std::env::remove_var("SELORA_API_KEY");
+        std::env::remove_var("SKARN_API_KEY");
+        std::env::remove_var("SELORA_API_KEY"); // skarn-v1-migration-compat
 
-        // ...the child must never see it.
+        // ...the child must never see either.
         let text = String::from_utf8_lossy(&output);
         assert!(
-            !text.contains("sk-live-do-not-leak"),
+            !text.contains("sk-live-skarn-secret") && !text.contains("sk-live-do-not-leak"),
             "the gateway key leaked into a language server's env: {text:?}"
         );
     }

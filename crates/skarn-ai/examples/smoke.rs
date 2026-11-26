@@ -2,7 +2,7 @@
 //! NOT run in CI — it needs a real key.
 //!
 //! Usage:
-//!   SELORA_KEY=sk-... cargo run -p selora-ai --example smoke <base_url>
+//!   SKARN_KEY=sk-... cargo run -p skarn-ai --example smoke <base_url>
 //!
 //! Exercises exactly what the spike window does: `list_models`, then a
 //! streaming "say hi" chat, printing deltas as they arrive and the receipt
@@ -13,12 +13,17 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
-    let key = std::env::var("SELORA_KEY").expect("SELORA_KEY must be set");
+    let key = std::env::var("SKARN_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("SELORA_KEY").ok()) // skarn-v1-migration-compat
+        .expect("SKARN_KEY must be set");
     let base_url = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("SELORA_BASE_URL").ok())
+        .or_else(|| std::env::var("SKARN_BASE_URL").ok())
+        .or_else(|| std::env::var("SELORA_BASE_URL").ok()) // skarn-v1-migration-compat
         .filter(|url| !url.is_empty())
-        .expect("pass <base_url> argument or set SELORA_BASE_URL");
+        .expect("pass <base_url> argument or set SKARN_BASE_URL");
 
     let client = SkarnClient::new(&base_url, &key);
 
@@ -39,10 +44,11 @@ async fn main() {
     };
 
     // --- stream_chat: "say hi" ---
-    // The smoke example takes the first model the provider listed; SELORA_MODEL overrides.
-    let model_id = std::env::var("SELORA_MODEL")
+    // The smoke example takes the first model the provider listed; SKARN_MODEL overrides.
+    let model_id = std::env::var("SKARN_MODEL")
         .ok()
         .filter(|m| !m.is_empty())
+        .or_else(|| std::env::var("SELORA_MODEL").ok().filter(|m| !m.is_empty())) // skarn-v1-migration-compat
         .unwrap_or_else(|| {
             models
                 .first()

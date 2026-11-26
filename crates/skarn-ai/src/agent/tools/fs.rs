@@ -853,7 +853,7 @@ pub(crate) fn apply_delete(root: &Path, id: &str, path: &str) -> ToolResult {
 }
 
 /// A unique sibling temp path for `target`:
-/// `.<name>.selora-tmp-<pid>-<seq>`. The process id plus a per-process
+/// `.<name>.skarn-tmp-<pid>-<seq>`. The process id plus a per-process
 /// atomic counter means two concurrent approved writes to the same target
 /// never share a temp file (the old deterministic sidecar name made them
 /// truncate each other's temp).
@@ -867,10 +867,10 @@ fn temp_sibling(target: &Path) -> PathBuf {
     target
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.selora-tmp-{}-{seq}", std::process::id()))
+        .join(format!(".{name}.skarn-tmp-{}-{seq}", std::process::id()))
 }
 
-/// The one-slot recovery sidecar for `target`: `.<name>.selora-bak`.
+/// The one-slot recovery sidecar for `target`: `.<name>.skarn-bak`.
 /// Replaced (atomically) on every write, so the file the user was looking at
 /// is always available after an approved overwrite.
 fn backup_sibling(target: &Path) -> PathBuf {
@@ -881,7 +881,7 @@ fn backup_sibling(target: &Path) -> PathBuf {
     target
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.selora-bak"))
+        .join(format!(".{name}.skarn-bak"))
 }
 
 /// Copy the current bytes of `target` to [`backup_sibling`], atomically.
@@ -1626,7 +1626,7 @@ mod tests {
             "keep me\n"
         );
         // No backup and no temp: nothing was replaced.
-        assert!(!root.join(".f.txt.selora-bak").exists());
+        assert!(!root.join(".f.txt.skarn-bak").exists());
     }
 
     #[test]
@@ -1637,7 +1637,7 @@ mod tests {
         let backup = write_atomic(&target, "new\n")
             .expect("write")
             .expect("existing target gets a backup");
-        assert_eq!(backup, root.join(".f.txt.selora-bak"));
+        assert_eq!(backup, root.join(".f.txt.skarn-bak"));
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "old\n");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
         // The next write replaces the backup with the next-most-recent bytes.
@@ -1683,7 +1683,7 @@ mod tests {
             "content\n"
         );
         // No temp file left behind.
-        assert!(!root.join("nested/.new.rs.selora-tmp").exists());
+        assert!(!root.join("nested/.new.rs.skarn-tmp").exists());
         let result = apply_write(&root, "call_1", "nested/new.rs", "replaced\n");
         assert!(result.ok);
         assert_eq!(
@@ -1692,7 +1692,7 @@ mod tests {
         );
         // The approved overwrite preserved the bytes the user was viewing.
         assert_eq!(
-            std::fs::read_to_string(root.join("nested/.new.rs.selora-bak")).unwrap(),
+            std::fs::read_to_string(root.join("nested/.new.rs.skarn-bak")).unwrap(),
             "content\n"
         );
     }
@@ -1711,7 +1711,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned();
             assert!(
-                name.starts_with(".f.txt.selora-tmp-"),
+                name.starts_with(".f.txt.skarn-tmp-"),
                 "unexpected temp name: {name}"
             );
             assert!(
@@ -1755,7 +1755,7 @@ mod tests {
             .expect("read fixture root")
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains(".selora-tmp"))
+            .filter(|name| name.contains(".skarn-tmp"))
             .collect();
         assert!(
             leftovers.is_empty(),

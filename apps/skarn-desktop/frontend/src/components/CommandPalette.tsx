@@ -104,7 +104,7 @@ export function CommandPalette({ open, commands, onRun, onClose }: CommandPalett
   const [activeIndex, setActiveIndex] = useState(0);
   const [recentIds, setRecentIds] = useState<string[]>(() => {
     try {
-      const stored = localStorage.getItem('selora:recent-commands');
+      const stored = localStorage.getItem('skarn:recent-commands');
       return stored ? JSON.parse(stored) : [];
     } catch {
       return [];
@@ -169,7 +169,7 @@ export function CommandPalette({ open, commands, onRun, onClose }: CommandPalett
     setRecentIds((prev) => {
       const updated = [command.id, ...prev.filter((id) => id !== command.id)].slice(0, 8);
       try {
-        localStorage.setItem('selora:recent-commands', JSON.stringify(updated));
+        localStorage.setItem('skarn:recent-commands', JSON.stringify(updated));
       } catch {
         // storage disabled/unavailable
       }

@@ -1,4 +1,5 @@
-// Selora IDE — Phase Z2 entry point.
+import './app/run-storage-migration';
+// Skarn — Phase Z2 entry point.
 //
 // Style imports follow the single convention (ARCHITECTURE §8.3, DESIGN
 // §13.1): base.css (which @imports tokens.css) first, then component
@@ -30,7 +31,7 @@ const agentsSurface = isNativeFrontend()
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Suspense fallback={<main className="boot-screen" aria-live="polite">Loading Selora…</main>}>
+    <Suspense fallback={<main className="boot-screen" aria-live="polite">Loading Skarn…</main>}>
       {agentsSurface ? <AgentsWindowApp /> : <App />}
     </Suspense>
   </React.StrictMode>,

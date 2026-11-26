@@ -23,15 +23,17 @@ function root(): HTMLElement {
 
 describe('theme resolution', () => {
   it('accepts exactly the values Rust persists', () => {
-    expect([...THEME_VALUES]).toEqual(['selora-dark', 'galaxy', 'dark', 'space-black', 'light', 'system']);
-    expect(THEME_OPTIONS.map((option) => option.value)).toEqual(['selora-dark', 'galaxy', 'dark', 'light', 'system']);
+    expect(DEFAULT_THEME).toBe('skarn-dark');
+    expect([...THEME_VALUES]).toEqual(['skarn-dark', 'galaxy', 'dark', 'space-black', 'light', 'system']);
+    expect(THEME_OPTIONS.map((option) => option.value)).toEqual(['skarn-dark', 'galaxy', 'dark', 'light', 'system']);
     expect(THEME_OPTIONS.some((option) => /OLED/.test(option.label))).toBe(false);
     for (const value of THEME_VALUES) expect(isThemeValue(value)).toBe(true);
     expect(isThemeValue('not-a-theme')).toBe(false);
   });
 
   it('maps both dark aliases and space-black to the dark palette', () => {
-    expect(resolveTheme('selora-dark')).toBe('dark');
+    expect(resolveTheme('skarn-dark')).toBe('dark');
+    expect(resolveTheme('selora-dark')).toBe('dark'); // skarn-v1-migration-compat
     expect(resolveTheme('dark')).toBe('dark');
     expect(resolveTheme('space-black')).toBe('dark');
     expect(resolveTheme('light')).toBe('light');
@@ -122,6 +124,7 @@ describe('theme resolution', () => {
 
   it('keeps an unknown stored value out of the select and falls back safely', () => {
     expect(normalizeThemeValue('light')).toBe('light');
+    expect(normalizeThemeValue('selora-dark')).toBe('skarn-dark'); // skarn-v1-migration-compat
     expect(normalizeThemeValue('unknown')).toBe(DEFAULT_THEME);
     expect(normalizeThemeValue(null)).toBe(DEFAULT_THEME);
   });
@@ -134,7 +137,9 @@ describe('theme switching', () => {
     expect(element.dataset.theme).toBe('light');
     expect(applyTheme('space-black', element)).toBe('dark');
     expect(element.dataset.theme).toBe('dark');
-    expect(applyTheme('selora-dark', element)).toBe('dark');
+    expect(applyTheme('skarn-dark', element)).toBe('dark');
+    expect(applyTheme('selora-dark', element)).toBe('dark'); // skarn-v1-migration-compat
+    expect(element.dataset.themePreference).toBe('skarn-dark');
   });
 
   it('applies theme and reduced motion together without coupling them', () => {

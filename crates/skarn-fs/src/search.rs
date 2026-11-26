@@ -425,13 +425,17 @@ fn rg_on_path() -> bool {
     })
 }
 
-/// The environment variables that can carry the Selora gateway key.
+/// The environment variables that can carry the Skarn gateway key.
 ///
 /// The desktop keeps the key in the keyring and never copies it into its
-/// own environment; a user-exported `SELORA_API_KEY`/`OPENAI_API_KEY` would
-/// still be inherited by this child, so both are stripped. Everything else
+/// own environment; a user-exported `SKARN_API_KEY`/`SELORA_API_KEY`/`OPENAI_API_KEY` would // skarn-v1-migration-compat
+/// still be inherited by this child, so all are stripped. Everything else
 /// (above all `PATH`, without which `rg` cannot be found) stays inherited.
-const KEY_ENV_VARS: [&str; 2] = ["SELORA_API_KEY", "OPENAI_API_KEY"];
+const KEY_ENV_VARS: [&str; 3] = [
+    "SKARN_API_KEY",
+    "SELORA_API_KEY", // skarn-v1-migration-compat
+    "OPENAI_API_KEY",
+];
 
 /// Run the literal engine through `rg`.
 fn run_rg(
@@ -2161,5 +2165,12 @@ mod tests {
             spans: vec![MatchSpan { start: 4, end: 5 }],
         };
         assert_eq!(bounded_hit(hit.clone()), hit);
+    }
+
+    #[test]
+    fn rg_key_env_vars_strip_both_skarn_and_selora_keys() { // skarn-v1-migration-compat
+        assert!(KEY_ENV_VARS.contains(&"SKARN_API_KEY"));
+        assert!(KEY_ENV_VARS.contains(&"SELORA_API_KEY")); // skarn-v1-migration-compat
+        assert!(KEY_ENV_VARS.contains(&"OPENAI_API_KEY"));
     }
 }

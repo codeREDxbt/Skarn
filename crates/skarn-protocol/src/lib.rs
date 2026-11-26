@@ -2332,7 +2332,7 @@ pub enum FrontendEvent {
     GitStatusChanged(GitStatusDto),
     GitDiffReady(GitDiffDto),
     ModelsChanged(ModelsDto),
-    #[serde(rename = "selora_status_changed")]
+    #[serde(rename = "skarn_status_changed")]
     SkarnStatusChanged(SkarnStatusDto),
     WorkspaceLayoutChanged(LayoutDto),
     Toast(ToastDto),
@@ -2574,7 +2574,7 @@ mod tests {
             },
             settings: SettingsViewDto {
                 reduced_motion: false,
-                theme: "selora-dark".into(),
+                theme: "skarn-dark".into(),
                 keybind_command_palette: "Ctrl+Shift+P".into(),
                 keybind_toggle_chat: "Ctrl+L".into(),
                 keybind_fuzzy_find: "Ctrl+P".into(),
@@ -2682,7 +2682,7 @@ mod tests {
     #[test]
     fn settings_workspace_trust_round_trip() {
         let view: SettingsViewDto = serde_json::from_str(
-            r#"{"reduced_motion":false,"theme":"selora-dark","workspace_trusted":true}"#,
+            r#"{"reduced_motion":false,"theme":"skarn-dark","workspace_trusted":true}"#,
         )
         .expect("view with trust parses");
         assert!(view.workspace_trusted);
@@ -2704,7 +2704,7 @@ mod tests {
     #[test]
     fn settings_disabled_providers_round_trip() {
         let view: SettingsViewDto = serde_json::from_str(
-            r#"{"reduced_motion":false,"theme":"selora-dark","disabled_providers":["deepseek","custom"]}"#,
+            r#"{"reduced_motion":false,"theme":"skarn-dark","disabled_providers":["deepseek","custom"]}"#,
         )
         .expect("view with providers parses");
         assert_eq!(view.disabled_providers, vec!["deepseek", "custom"]);

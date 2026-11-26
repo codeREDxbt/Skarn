@@ -14,7 +14,7 @@ import { AgentsChangesView } from './AgentsChangesView';
 import './agents-context.css';
 
 type Tab = 'files' | 'changes';
-const TAB_KEY = 'agents:last-context-tab';
+const TAB_KEY = 'skarn:agents-last-context-tab';
 function initialTab(): Tab {
   try { return localStorage.getItem(TAB_KEY) === 'changes' ? 'changes' : 'files'; } catch { return 'files'; }
 }

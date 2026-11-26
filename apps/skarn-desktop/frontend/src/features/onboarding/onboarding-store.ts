@@ -5,7 +5,7 @@
 // across launches. Only a completed or skipped tour marks the flag; a storage
 // failure leaves the tour available in memory instead of blocking the app.
 
-export const ONBOARDING_SEEN_KEY = 'selora:onboarding_seen';
+export const ONBOARDING_SEEN_KEY = 'skarn:onboarding_seen';
 
 export type OnboardingState = {
   seen: boolean;

@@ -15,7 +15,7 @@ const argument = (name, fallback) => {
 const executable = resolve(root, argument('--exe', 'target/debug/skarn-desktop.exe'));
 const port = Number(argument('--port', '9347'));
 const artifacts = resolve(argument('--artifacts', join(process.env.LOCALAPPDATA ?? process.env.TEMP,
-  'Temp', 'opencode', `selora-agents-smoke-${Date.now()}`)));
+  'Temp', 'opencode', `skarn-agents-smoke-${Date.now()}`)));
 const results = [];
 const connections = [];
 let child;
@@ -133,7 +133,7 @@ async function check(name, run) {
 try {
   assert(process.platform === 'win32', 'Native smoke requires Windows/WebView2.');
   const processes = execFileSync('tasklist', ['/FI', 'IMAGENAME eq skarn-desktop.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8' });
-  assert(!processes.toLowerCase().includes('"skarn-desktop.exe"'), 'Close existing Selora processes before isolated smoke checks.');
+  assert(!processes.toLowerCase().includes('"skarn-desktop.exe"'), 'Close existing Skarn processes before isolated smoke checks.');
   await mkdir(artifacts, { recursive: true });
   const settings = join(artifacts, 'settings');
   const workspace = join(artifacts, 'workspace');
@@ -142,7 +142,7 @@ try {
   await writeFile(join(workspace, 'smoke.ts'), 'export const nativeAgentsSmoke = true;\n');
   execFileSync('git', ['init', workspace], { stdio: 'ignore' });
   child = spawn(executable, [], { cwd: root, env: { ...process.env,
-    SELORA_SETTINGS_DIR: settings, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
+    SKARN_SETTINGS_DIR: settings, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
     stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (value) => { output += value; });
@@ -161,13 +161,13 @@ try {
     const target = await until(async () => (await pages()).find((page) => page.url.includes('surface=agents')), 'Agents native WebView');
     agents = await Page.connect(target);
     await agents.evaluate(`(() => {
-      window.__seloraSmoke = { bootstrap: 'pending', agents: 'pending' };
+      window.__skarnSmoke = { bootstrap: 'pending', agents: 'pending' };
       window.__TAURI_INTERNALS__.invoke('get_bootstrap_state', { protocolVersion: 1 })
-        .then(() => { window.__seloraSmoke.bootstrap = 'resolved'; })
-        .catch((error) => { window.__seloraSmoke.bootstrap = 'rejected:' + String(error); });
+        .then(() => { window.__skarnSmoke.bootstrap = 'resolved'; })
+        .catch((error) => { window.__skarnSmoke.bootstrap = 'rejected:' + String(error); });
       window.__TAURI_INTERNALS__.invoke('get_agents_snapshot', { protocolVersion: 1 })
-        .then(() => { window.__seloraSmoke.agents = 'resolved'; })
-        .catch((error) => { window.__seloraSmoke.agents = 'rejected:' + String(error); });
+        .then(() => { window.__skarnSmoke.agents = 'resolved'; })
+        .catch((error) => { window.__skarnSmoke.agents = 'rejected:' + String(error); });
     })()`);
     await until(async () => {
       const state = await agents.evaluate(`(() => ({
@@ -175,7 +175,7 @@ try {
         text: document.body?.innerText?.slice(0, 600) ?? '',
         root: !!document.querySelector('.agents-workspace'),
         alerts: [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent),
-        smoke: window.__seloraSmoke ?? null,
+        smoke: window.__skarnSmoke ?? null,
       }))()`);
       if (state.root) return true;
       if (state.alerts.length || state.text) {

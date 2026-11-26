@@ -170,7 +170,11 @@ pub const ALLOWED_ENV_VARS: [&str; 7] = [
 ];
 
 /// Key-bearing names the host strips from any child it starts itself.
-const SECRET_ENV_VARS: [&str; 2] = ["SELORA_API_KEY", "OPENAI_API_KEY"];
+const SECRET_ENV_VARS: [&str; 3] = [
+    "SKARN_API_KEY",
+    "SELORA_API_KEY", // skarn-v1-migration-compat
+    "OPENAI_API_KEY",
+];
 
 /// One chat call for [`WorkflowHost`]: `(model, whole conversation including
 /// the system prompt)` → assistant text.
@@ -2242,15 +2246,48 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn world_run_clears_the_key_env_and_roots_the_cwd() {
-        const SECRET: &str = "selora-workflow-secret-4242";
-        std::env::set_var("SELORA_API_KEY", SECRET);
+        const SECRET: &str = "skarn-workflow-secret-4242";
+        struct EnvGuard {
+            skarn: Option<std::ffi::OsString>,
+            selora: Option<std::ffi::OsString>, // skarn-v1-migration-compat
+            openai: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.skarn {
+                    Some(v) => std::env::set_var("SKARN_API_KEY", v),
+                    None => std::env::remove_var("SKARN_API_KEY"),
+                }
+                match &self.selora {
+                    Some(v) => std::env::set_var("SELORA_API_KEY", v), // skarn-v1-migration-compat
+                    None => std::env::remove_var("SELORA_API_KEY"), // skarn-v1-migration-compat
+                }
+                match &self.openai {
+                    Some(v) => std::env::set_var("OPENAI_API_KEY", v),
+                    None => std::env::remove_var("OPENAI_API_KEY"),
+                }
+            }
+        }
+        let _env_lock = crate::commands::API_KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = EnvGuard {
+            skarn: std::env::var_os("SKARN_API_KEY"),
+            selora: std::env::var_os("SELORA_API_KEY"), // skarn-v1-migration-compat
+            openai: std::env::var_os("OPENAI_API_KEY"),
+        };
+        std::env::set_var("SKARN_API_KEY", SECRET);
+        std::env::set_var("SELORA_API_KEY", SECRET); // skarn-v1-migration-compat
         std::env::set_var("OPENAI_API_KEY", SECRET);
 
         let workspace = tempfile::tempdir().expect("workspace");
         let host = WorkflowHost::new(workspace.path().to_path_buf(), config());
-        let probe = "if ($env:SELORA_API_KEY) { Write-Output $env:SELORA_API_KEY } \
-                     elseif ($env:OPENAI_API_KEY) { Write-Output $env:OPENAI_API_KEY } \
-                     else { Write-Output 'clean' }";
+        let probe = concat!(
+            "if ($env:SKARN_API_KEY) { Write-Output $env:SKARN_API_KEY } ",
+            "elseif ($env:SELORA_API_KEY) { Write-Output $env:SELORA_API_KEY } ", // skarn-v1-migration-compat
+            "elseif ($env:OPENAI_API_KEY) { Write-Output $env:OPENAI_API_KEY } ",
+            "else { Write-Output 'clean' }",
+        );
         let output = host
             .world_run(probe, &[], Some(30_000))
             .expect("powershell runs");
@@ -2272,9 +2309,6 @@ mod tests {
             fs::canonicalize(&printed).expect("child cwd exists"),
             fs::canonicalize(workspace.path()).expect("workspace path")
         );
-
-        std::env::remove_var("SELORA_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-; Selora IDE - Windows installer (RELEASE.md section 2).
+; Skarn - Windows installer (RELEASE.md section 2).
 ;
 ; Build locally:
 ;     installer\prebuild.bat
@@ -6,7 +6,7 @@
 ; runtime DLLs beside the exe, fetches the WebView2 bootstrapper, and invokes
 ; ISCC with /DMyAppVersion, /DMyTargetDir, /DMyCrtDlls, and an absolute /O.
 ; CI passes the tag's version and runs the same staging steps before calling:
-;     ISCC.exe /DMyAppVersion=X.Y.Z /O<repo>\installer\output installer\selora-ide.iss
+;     ISCC.exe /DMyAppVersion=X.Y.Z /O<repo>\installer\output installer\skarn.iss
 ;
 ; OutputDir below is the default for a hand-run ISCC and resolves against this
 ; script's directory. prebuild.bat and CI pass /O so the setup lands in
@@ -32,8 +32,14 @@
 #endif
 
 #ifndef MyAppExe
-  #define MyAppExe MyTargetDir + '\selora-desktop.exe'
+  #define MyAppExe MyTargetDir + '\skarn-desktop.exe'
 #endif
+
+; v1.0 upgrade compatibility: preserve install dir and clean v0.1.0 payloads.
+#define LegacyAppDirName "Selora IDE" // skarn-v1-migration-compat
+#define LegacyDesktopExe "selora-desktop.exe" // skarn-v1-migration-compat
+#define LegacyIconFile "selora-ide.ico" // skarn-v1-migration-compat
+#define LegacyStartMenuLnk "Selora IDE.lnk" // skarn-v1-migration-compat
 
 ; Comma-separated list of the CRT DLLs staged beside the exe. prebuild.bat and
 ; the release workflow pass the dumpbin-derived list; the [Code] loop below
@@ -45,13 +51,13 @@
 
 [Setup]
 AppId={{7A3E9C41-5D2B-4E8F-B6A1-9C0D2E4F6A8B}
-AppName=Selora IDE
+AppName=Skarn
 AppVersion={#MyAppVersion}
-AppVerName=Selora IDE {#MyAppVersion}
+AppVerName=Skarn {#MyAppVersion}
 AppPublisher=codeREDxbt
 AppPublisherURL={#RepoUrl}
 AppSupportURL={#RepoUrl}/issues
-DefaultDirName={localappdata}\Programs\Selora IDE
+DefaultDirName={localappdata}\Programs\{#LegacyAppDirName}
 ; Per-user install: no admin prompt (RELEASE.md section 2.1).
 PrivilegesRequired=lowest
 ; Welcome, Install, Finish - no unnecessary pages (RELEASE.md section 2.2).
@@ -59,8 +65,8 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 WizardStyle=modern
-; In-app updates run this setup with /SILENT /CLOSEAPPLICATIONS while Selora
-; IDE may still be writing its settings. Close the running instance before
+; In-app updates run this setup with /SILENT /CLOSEAPPLICATIONS while Skarn
+; may still be writing its settings. Close the running instance before
 ; replacing files; the updater reopens the app itself, so Setup must not.
 CloseApplications=yes
 RestartApplications=no
@@ -71,12 +77,12 @@ WizardSmallImageFile={#SourcePath}..\assets\icons\wizard_small.bmp
 ; release.yml still pass an absolute /O (see the header) so the artifact path
 ; does not depend on ISCC's current directory or install location.
 OutputDir={#SourcePath}output
-OutputBaseFilename=Selora-IDE-Setup-{#MyAppVersion}
+OutputBaseFilename=Skarn-Setup-{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
-SetupIconFile={#SourcePath}..\assets\icons\selora-ide.ico
-UninstallDisplayIcon={app}\selora-ide.ico
-UninstallDisplayName=Selora IDE
+SetupIconFile={#SourcePath}..\assets\icons\skarn.ico
+UninstallDisplayIcon={app}\skarn.ico
+UninstallDisplayName=Skarn
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1809 (build 17763) or newer - the floor documented in
@@ -87,10 +93,10 @@ MinVersion=10.0.17763
 ChangesAssociations=yes
 
 [Files]
-; The Tauri shell is selora-desktop.exe (workspace bin name), built in
+; The Tauri shell is skarn-desktop.exe (workspace bin name), built in
 ; {#MyTargetDir}.
 Source: "{#MyAppExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}..\assets\icons\selora-ide.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourcePath}..\assets\icons\skarn.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Dynamic CRT (src-tauri/build.rs sets static_vc_runtime(false)). prebuild.bat
 ; and the release workflow stage every VCRUNTIME140*/MSVCP140*/CONCRT140/
@@ -115,30 +121,35 @@ Source: "{#MyTargetDir}\vcomp140.dll"; DestDir: "{app}"; Flags: ignoreversion sk
 Source: "{#MyTargetDir}\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
-Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\Selora IDE.lnk"; Filename: "{app}\selora-desktop.exe"; IconFilename: "{app}\selora-ide.ico"; Comment: "Selora IDE"
+Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\Skarn.lnk"; Filename: "{app}\skarn-desktop.exe"; IconFilename: "{app}\skarn.ico"; Comment: "Skarn"
 
 [Run]
 ; Do not offer to launch into a missing WebView2 runtime; the post-install
 ; check below explains what to install instead.
-Filename: "{app}\selora-desktop.exe"; Description: "{cm:LaunchProgram,Selora IDE}"; Flags: nowait postinstall skipifsilent; Check: WebView2Available
+Filename: "{app}\skarn-desktop.exe"; Description: "{cm:LaunchProgram,Skarn}"; Flags: nowait postinstall skipifsilent; Check: WebView2Available
+
+[InstallDelete]
+Type: files; Name: "{app}\{#LegacyDesktopExe}"
+Type: files; Name: "{app}\{#LegacyIconFile}"
+Type: files; Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\{#LegacyStartMenuLnk}"
 
 [UninstallDelete]
-; The app's per-user data (%APPDATA%\selora-ide: settings.json,
-; workspace.json, sessions.json) - RELEASE.md's skeleton named {localappdata};
-; the app writes under Roaming (selora-settings), so that is what a clean
-; uninstall removes.
-Type: filesandordirs; Name: "{userappdata}\selora-ide"
+; Remove Skarn's per-user data, updater staging, and WebView2 profile.
+; Legacy v0.1.0 directories are intentionally never touched.
+Type: filesandordirs; Name: "{userappdata}\skarn"
+Type: filesandordirs; Name: "{localappdata}\Skarn"
+Type: filesandordirs; Name: "{localappdata}\app.skarn.desktop"
 
 [Registry]
-; ".txt opens with Selora IDE" (Lite only; no source-file defaults,
-; RELEASE.md section 9 item 5). OpenWithProgids adds Selora IDE to the
+; ".txt opens with Skarn" (Lite only; no source-file defaults,
+; RELEASE.md section 9 item 5). OpenWithProgids adds Skarn to the
 ; "Open with" list without hijacking the user's existing default.
 ; Owner decision: keep the .txt association as OpenWithProgids only - do not
 ; turn it into the default handler for .txt, and do not add other extensions.
-Root: HKCU; Subkey: "Software\Classes\.txt\OpenWithProgids"; ValueType: string; ValueName: "SeloraIDE.txt"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\SeloraIDE.txt"; ValueType: string; ValueName: ""; ValueData: "Text Document"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SeloraIDE.txt\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\selora-ide.ico"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SeloraIDE.txt\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\selora-desktop.exe"" ""%1"""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\.txt\OpenWithProgids"; ValueType: string; ValueName: "Skarn.txt"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\Skarn.txt"; ValueType: string; ValueName: ""; ValueData: "Text Document"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Skarn.txt\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\skarn.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Skarn.txt\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\skarn-desktop.exe"" ""%1"""; Flags: uninsdeletekey
 
 [Code]
 const
@@ -161,9 +172,9 @@ end;
     HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\<guid> 32-bit view
     HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\<guid>             64-bit view
   Inno's HKLM32 root is already the WOW6432Node view, so that path is not
-  repeated. The Selora prefix keeps the name clear of any support function
+  repeated. The Skarn prefix keeps the name clear of any support function
   a future Inno Setup release might add. }
-function SeloraWebView2Version(): String;
+function SkarnWebView2Version(): String;
 var
   Version: String;
 begin
@@ -177,11 +188,11 @@ end;
 
 function WebView2Available(): Boolean;
 begin
-  Result := SeloraWebView2Version() <> '';
+  Result := SkarnWebView2Version() <> '';
 end;
 
 { Next comma-separated item of Rest, or '' when the list is exhausted. }
-function SeloraNextCrtDll(var Rest: String): String;
+function SkarnNextCrtDll(var Rest: String): String;
 var
   P: Integer;
 begin
@@ -202,7 +213,7 @@ end;
   per line ('' when the install is complete). Kept in sync with the [Files]
   entries above by the build scripts, which pass exactly the DLLs dumpbin
   reported. }
-function SeloraMissingCrtDlls(): String;
+function SkarnMissingCrtDlls(): String;
 var
   Rest: String;
   Dll: String;
@@ -211,7 +222,7 @@ begin
   Rest := '{#MyCrtDlls}';
   while Rest <> '' do
   begin
-    Dll := SeloraNextCrtDll(Rest);
+    Dll := SkarnNextCrtDll(Rest);
     if (Dll <> '') and (not FileExists(ExpandConstant('{app}\' + Dll))) then
       Result := Result + #13#10 + Dll;
   end;
@@ -230,7 +241,7 @@ begin
       + #13#10 + 'does not include the bootstrapper.' + #13#10 + #13#10
       + 'Install the Evergreen Runtime from:' + #13#10
       + 'https://developer.microsoft.com/microsoft-edge/webview2/'
-      + #13#10 + #13#10 + 'then start Selora IDE again.',
+      + #13#10 + #13#10 + 'then start Skarn again.',
       mbError, MB_OK);
     exit;
   end;
@@ -259,7 +270,7 @@ begin
     exit;
   end;
 
-  Result := SeloraWebView2Version() <> '';
+  Result := SkarnWebView2Version() <> '';
   if not Result then
     MsgBox('The WebView2 bootstrapper finished, but the runtime was not'
       + #13#10 + 'detected. Restart Windows, or install the Evergreen Runtime'
@@ -274,16 +285,20 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    { Remove obsolete v0.1.0 .txt ProgId registration on upgrade. }
+    RegDeleteValue(HKCU, 'Software\Classes\.txt\OpenWithProgids', 'SeloraIDE.txt'); // skarn-v1-migration-compat
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\SeloraIDE.txt'); // skarn-v1-migration-compat
+
     { Install-time sanity check: every CRT DLL the build reported as staged
       must be beside the exe. The required [Files] entries make this rare;
       it catches a mismatched /DMyCrtDlls or a hand-edited script. }
-    MissingDlls := SeloraMissingCrtDlls();
+    MissingDlls := SkarnMissingCrtDlls();
     if MissingDlls <> '' then
       MsgBox('The bundled Visual C++ runtime is incomplete. Missing:'
         + MissingDlls + #13#10 + #13#10
-        + 'Selora IDE needs these DLLs beside selora-desktop.exe. Install the'
+        + 'Skarn needs these DLLs beside skarn-desktop.exe. Install the'
         + #13#10 + 'Microsoft Visual C++ 2015-2022 x64 Redistributable, then'
-        + #13#10 + 'start Selora IDE.',
+        + #13#10 + 'start Skarn.',
         mbInformation, MB_OK);
 
     { Run the Evergreen bootstrapper only when no runtime is registered.

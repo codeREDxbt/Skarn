@@ -129,7 +129,7 @@ pub(super) fn pane_skarn(dialog: &mut SettingsDialog, ui: &mut egui::Ui) {
 
     field_gap(ui);
     label_style(ui, "Base URL");
-    let resp = ui.text_edit_singleline(&mut dialog.settings.selora.base_url);
+    let resp = ui.text_edit_singleline(&mut dialog.settings.skarn.base_url);
     dialog.commit_text_on_blur(&resp);
 
     field_gap(ui);
@@ -138,7 +138,7 @@ pub(super) fn pane_skarn(dialog: &mut SettingsDialog, ui: &mut egui::Ui) {
     label_style(ui, "Active Model");
     let model = dialog
         .settings
-        .selora
+        .skarn
         .active_model
         .clone()
         .unwrap_or_default();

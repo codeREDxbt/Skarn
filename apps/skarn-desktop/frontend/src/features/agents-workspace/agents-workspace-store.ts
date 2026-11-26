@@ -38,7 +38,7 @@ let state: AgentsWorkspaceState = {
   ...defaults, workspaceId: null, page: 'conversation', history: [], historyIndex: -1, viewportWidth: 0, compactPanel: null,
 };
 const listeners = new Set<() => void>();
-const storageKey = (workspaceId: string | null) => `selora:agents-workspace:v1:${workspaceId ?? 'none'}`;
+const storageKey = (workspaceId: string | null) => `skarn:agents-workspace:v1:${workspaceId ?? 'none'}`;
 
 export function clampAgentsWidth(panel: AgentsWorkspacePanel, value: number): number {
   const bounds = AGENTS_LAYOUT_BOUNDS[panel];

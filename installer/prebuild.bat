@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-rem Selora IDE - local installer build (RELEASE.md section 2.3).
+rem Skarn - local installer build (RELEASE.md section 2.3).
 rem
 rem   installer\prebuild.bat
 rem
@@ -15,11 +15,11 @@ rem sidecar, re-hashes the file, and reports the Authenticode status. An
 rem unsigned local build (NotSigned) is expected and does not fail; a setup
 rem whose hash contradicts its signature does.
 rem
-rem ISCC.exe is located by installer\find-iscc.ps1: SELORA_ISCC, PATH, the
+rem ISCC.exe is located by installer\find-iscc.ps1: SKARN_ISCC, PATH, the
 rem standard Inno Setup 6/7 directories, then the uninstall registry. The
 rem compiler's own install location no longer decides where the setup lands:
 rem /O is passed explicitly and the artifact is always written to
-rem installer\output\Selora-IDE-Setup-<version>.exe.
+rem installer\output\Skarn-Setup-<version>.exe.
 rem
 rem Honors CARGO_TARGET_DIR: the release binary and the staged DLLs are read
 rem from %CARGO_TARGET_DIR%\release when it is set (cargo resolves a relative
@@ -65,7 +65,7 @@ for /f "usebackq delims=" %%i in (`powershell -NoProfile -ExecutionPolicy Bypass
 if not defined ISCC (
     echo prebuild: Inno Setup 6.3 or newer ^(or 7.x^) not found 1>&2
     echo prebuild: install it with: winget install JRSoftware.InnoSetup 1>&2
-    echo prebuild: or set SELORA_ISCC to the full path of ISCC.exe 1>&2
+    echo prebuild: or set SKARN_ISCC to the full path of ISCC.exe 1>&2
     exit /b 1
 )
 echo prebuild: using "%ISCC%"
@@ -76,13 +76,13 @@ rem (whose Source paths are relative to installer\) still finds the files.
 set "TARGET_DIR=target"
 if defined CARGO_TARGET_DIR set "TARGET_DIR=%CARGO_TARGET_DIR%"
 for %%i in ("%TARGET_DIR%\release") do set "RELEASE_DIR=%%~fi"
-set "APP_EXE=%RELEASE_DIR%\selora-desktop.exe"
+set "APP_EXE=%RELEASE_DIR%\skarn-desktop.exe"
 
 if not exist "%APP_EXE%" (
     echo prebuild: %APP_EXE% is missing 1>&2
     echo prebuild: build the frontend, then the release binary: 1>&2
-    echo prebuild:   npm --prefix apps\selora-desktop\frontend run build 1>&2
-    echo prebuild:   cargo build --release -p selora-desktop 1>&2
+    echo prebuild:   npm --prefix apps\skarn-desktop\frontend run build 1>&2
+    echo prebuild:   cargo build --release -p skarn-desktop 1>&2
     if defined CARGO_TARGET_DIR echo prebuild: CARGO_TARGET_DIR is "%CARGO_TARGET_DIR%" 1>&2
     exit /b 1
 )
@@ -102,14 +102,14 @@ rem relative OutputDir against the script's own directory, so a relative or
 rem absolute invocation both happen to work - but a stray /O in the
 rem environment or a hand-run compile moved the setup out of the repository
 rem during the Phase 8 acceptance run. Pin it here: every prebuild produces
-rem installer\output\Selora-IDE-Setup-<version>.exe or fails.
+rem installer\output\Skarn-Setup-<version>.exe or fails.
 set "OUTPUT_DIR=%REPO_ROOT%\installer\output"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if errorlevel 1 (
     echo prebuild: could not create "%OUTPUT_DIR%" 1>&2
     exit /b 1
 )
-set "SETUP=%OUTPUT_DIR%\Selora-IDE-Setup-%VERSION%.exe"
+set "SETUP=%OUTPUT_DIR%\Skarn-Setup-%VERSION%.exe"
 
 rem Remove a previous artifact for this version first: if ISCC fails, a stale
 rem setup (and its checksum) must not survive to look like a fresh build.
@@ -117,8 +117,8 @@ if exist "%SETUP%" del /q "%SETUP%" >nul 2>&1
 if exist "%SETUP%.sha256" del /q "%SETUP%.sha256" >nul 2>&1
 
 rem /DMyTargetDir and /DMyCrtDlls keep the installer in step with whatever was
-rem actually built and staged; selora-ide.iss defaults them for a hand-run ISCC.
-"%ISCC%" "/DMyAppVersion=%VERSION%" "/DMyTargetDir=%RELEASE_DIR%" "/DMyCrtDlls=%CRT_DLLS%" "/O%OUTPUT_DIR%" "%~dp0selora-ide.iss"
+rem actually built and staged; skarn.iss defaults them for a hand-run ISCC.
+"%ISCC%" "/DMyAppVersion=%VERSION%" "/DMyTargetDir=%RELEASE_DIR%" "/DMyCrtDlls=%CRT_DLLS%" "/O%OUTPUT_DIR%" "%~dp0skarn.iss"
 if errorlevel 1 (
     echo prebuild: ISCC failed 1>&2
     exit /b 1
@@ -136,10 +136,10 @@ rem CI-shaped line. Hash the file twice so a checksum generated from a
 rem changing file cannot pass. The Authenticode status is reported, not
 rem enforced: an unsigned local build (NotSigned) is expected, while a
 rem signature that contradicts the file's hash is an error.
-set "SELORA_SETUP=%SETUP%"
-set "SELORA_SETUP_VERSION=%VERSION%"
-set "SELORA_CHECKSUM=%SETUP%.sha256"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $setup=$env:SELORA_SETUP; $version=$env:SELORA_SETUP_VERSION; $checksum=$env:SELORA_CHECKSUM; if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw ('missing ' + $setup) }; $product=([string](Get-Item -LiteralPath $setup).VersionInfo.ProductVersion).Trim(); if ($product -ne $version) { throw ('ProductVersion ' + $product + ' does not match ' + $version) }; $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); $name=Split-Path -Leaf $setup; $line=$hash + '  ' + $name; [IO.File]::WriteAllText($checksum, $line + [char]13 + [char]10, (New-Object System.Text.ASCIIEncoding)); $written=(Get-Content -LiteralPath $checksum -Raw).Trim(); if ($written -ne $line) { throw ('checksum file holds ' + $written + ', expected ' + $line) }; if ($written -notmatch '^[0-9a-f]{64}  Selora-IDE-Setup-\d+\.\d+\.\d+\.exe$') { throw ('checksum line has an unexpected shape: ' + $written) }; $again=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); if ($again -ne $hash) { throw 'the installer changed while the checksum was generated' }; $sig=Get-AuthenticodeSignature -LiteralPath $setup; if ($sig.Status -eq 'HashMismatch') { throw 'the installer hash does not match its Authenticode signature' }; Write-Output ('prebuild: product version ' + $product); Write-Output ('prebuild: sha256 ' + $hash); if ($sig.Status -eq 'Valid') { Write-Output ('prebuild: authenticode Valid (' + $sig.SignerCertificate.Subject + ')') } else { Write-Output ('prebuild: authenticode ' + $sig.Status) }"
+set "SKARN_SETUP=%SETUP%"
+set "SKARN_SETUP_VERSION=%VERSION%"
+set "SKARN_CHECKSUM=%SETUP%.sha256"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $setup=$env:SKARN_SETUP; $version=$env:SKARN_SETUP_VERSION; $checksum=$env:SKARN_CHECKSUM; if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw ('missing ' + $setup) }; $product=([string](Get-Item -LiteralPath $setup).VersionInfo.ProductVersion).Trim(); if ($product -ne $version) { throw ('ProductVersion ' + $product + ' does not match ' + $version) }; $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); $name=Split-Path -Leaf $setup; $line=$hash + '  ' + $name; [IO.File]::WriteAllText($checksum, $line + [char]13 + [char]10, (New-Object System.Text.ASCIIEncoding)); $written=(Get-Content -LiteralPath $checksum -Raw).Trim(); if ($written -ne $line) { throw ('checksum file holds ' + $written + ', expected ' + $line) }; if ($written -notmatch '^[0-9a-f]{64}  Skarn-Setup-\d+\.\d+\.\d+\.exe$') { throw ('checksum line has an unexpected shape: ' + $written) }; $again=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); if ($again -ne $hash) { throw 'the installer changed while the checksum was generated' }; $sig=Get-AuthenticodeSignature -LiteralPath $setup; if ($sig.Status -eq 'HashMismatch') { throw 'the installer hash does not match its Authenticode signature' }; Write-Output ('prebuild: product version ' + $product); Write-Output ('prebuild: sha256 ' + $hash); if ($sig.Status -eq 'Valid') { Write-Output ('prebuild: authenticode Valid (' + $sig.SignerCertificate.Subject + ')') } else { Write-Output ('prebuild: authenticode ' + $sig.Status) }"
 if errorlevel 1 (
     echo prebuild: installer verification failed 1>&2
     if exist "%SETUP%.sha256" del /q "%SETUP%.sha256" >nul 2>&1
@@ -196,26 +196,26 @@ if not defined DUMPBIN (
     exit /b 1
 )
 
-set "SELORA_DUMPBIN=%DUMPBIN%"
-set "SELORA_EXE=%APP_EXE%"
-set "SELORA_OUT=%RELEASE_DIR%"
-set "SELORA_CRT=%CRT%"
-set "SELORA_LIST=%TEMP%\selora-crt-dlls-%RANDOM%.txt"
-if exist "%SELORA_LIST%" del /q "%SELORA_LIST%" >nul 2>&1
+set "SKARN_DUMPBIN=%DUMPBIN%"
+set "SKARN_EXE=%APP_EXE%"
+set "SKARN_OUT=%RELEASE_DIR%"
+set "SKARN_CRT=%CRT%"
+set "SKARN_LIST=%TEMP%\skarn-crt-dlls-%RANDOM%.txt"
+if exist "%SKARN_LIST%" del /q "%SKARN_LIST%" >nul 2>&1
 
 rem One PowerShell pass: parse dumpbin, match the CRT import set (the [.] in
 rem each pattern escapes the dot so MSVCP140.dll cannot match MSVCP140Xdll),
 rem then copy each name from the CRT folder or its Microsoft.VC*.OpenMP
 rem sibling (concrt140 / vcomp140 live outside Microsoft.VC*.CRT).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $dumpbin=$env:SELORA_DUMPBIN; $exe=$env:SELORA_EXE; $out=$env:SELORA_OUT; $crt=$env:SELORA_CRT; if (-not (Test-Path -LiteralPath $exe)) { throw ('missing ' + $exe) }; $imports = (& $dumpbin /nologo /dependents $exe) -join ' '; if ($imports -notmatch 'VCRUNTIME140[.]dll') { throw 'the exe does not import VCRUNTIME140.dll - if the CRT became static, update installer/selora-ide.iss' }; $pattern = '^(VCRUNTIME140|VCRUNTIME140_1|MSVCP140|MSVCP140_[A-Z0-9_]+|CONCRT140|VCOMP140)[.]dll$'; $names = New-Object System.Collections.Generic.List[string]; foreach ($n in @('vcruntime140.dll','vcruntime140_1.dll')) { if (-not $names.Contains($n)) { $names.Add($n) } }; foreach ($t in ($imports -split '\s+')) { $name = $t.Trim(); if ($name -match $pattern) { $lower = $name.ToLowerInvariant(); if (-not $names.Contains($lower)) { $names.Add($lower) } } }; $dirs = @($crt); Get-ChildItem -LiteralPath (Split-Path -Parent $crt) -Directory | ForEach-Object { $dirs += $_.FullName }; foreach ($name in $names) { $src = $null; foreach ($d in $dirs) { $p = Join-Path $d $name; if (Test-Path -LiteralPath $p) { $src = $p; break } }; if ($null -eq $src) { throw ('the MSVC redist has no ' + $name + ', but the exe imports it') }; Copy-Item -LiteralPath $src -Destination $out -Force }; [IO.File]::WriteAllText($env:SELORA_LIST, ($names -join ','))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $dumpbin=$env:SKARN_DUMPBIN; $exe=$env:SKARN_EXE; $out=$env:SKARN_OUT; $crt=$env:SKARN_CRT; if (-not (Test-Path -LiteralPath $exe)) { throw ('missing ' + $exe) }; $imports = (& $dumpbin /nologo /dependents $exe) -join ' '; if ($imports -notmatch 'VCRUNTIME140[.]dll') { throw 'the exe does not import VCRUNTIME140.dll - if the CRT became static, update installer/skarn.iss' }; $pattern = '^(VCRUNTIME140|VCRUNTIME140_1|MSVCP140|MSVCP140_[A-Z0-9_]+|CONCRT140|VCOMP140)[.]dll$'; $names = New-Object System.Collections.Generic.List[string]; foreach ($n in @('vcruntime140.dll','vcruntime140_1.dll')) { if (-not $names.Contains($n)) { $names.Add($n) } }; foreach ($t in ($imports -split '\s+')) { $name = $t.Trim(); if ($name -match $pattern) { $lower = $name.ToLowerInvariant(); if (-not $names.Contains($lower)) { $names.Add($lower) } } }; $dirs = @($crt); Get-ChildItem -LiteralPath (Split-Path -Parent $crt) -Directory | ForEach-Object { $dirs += $_.FullName }; foreach ($name in $names) { $src = $null; foreach ($d in $dirs) { $p = Join-Path $d $name; if (Test-Path -LiteralPath $p) { $src = $p; break } }; if ($null -eq $src) { throw ('the MSVC redist has no ' + $name + ', but the exe imports it') }; Copy-Item -LiteralPath $src -Destination $out -Force }; [IO.File]::WriteAllText($env:SKARN_LIST, ($names -join ','))"
 if errorlevel 1 (
     echo prebuild: could not stage the CRT DLLs 1>&2
-    if exist "%SELORA_LIST%" del /q "%SELORA_LIST%" >nul 2>&1
+    if exist "%SKARN_LIST%" del /q "%SKARN_LIST%" >nul 2>&1
     exit /b 1
 )
 
-set /p CRT_DLLS=<"%SELORA_LIST%"
-if exist "%SELORA_LIST%" del /q "%SELORA_LIST%" >nul 2>&1
+set /p CRT_DLLS=<"%SKARN_LIST%"
+if exist "%SKARN_LIST%" del /q "%SKARN_LIST%" >nul 2>&1
 if not defined CRT_DLLS (
     echo prebuild: dumpbin reported no CRT imports to stage 1>&2
     exit /b 1
@@ -230,9 +230,9 @@ rem Microsoft's Evergreen Bootstrapper (x64), staged beside the exe. It
 rem downloads the runtime only when the installer actually runs it (the
 rem [Code] guard checks first).
 set "WV2=%RELEASE_DIR%\MicrosoftEdgeWebview2Setup.exe"
-set "SELORA_WEBVIEW2_OUT=%WV2%"
+set "SKARN_WEBVIEW2_OUT=%WV2%"
 if exist "%WV2%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$sig = Get-AuthenticodeSignature -FilePath $env:SELORA_WEBVIEW2_OUT; if ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'Microsoft') { exit 0 } else { exit 1 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$sig = Get-AuthenticodeSignature -FilePath $env:SKARN_WEBVIEW2_OUT; if ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'Microsoft') { exit 0 } else { exit 1 }"
     if not errorlevel 1 (
         echo prebuild: WebView2 bootstrapper already cached
         exit /b 0
@@ -248,7 +248,7 @@ rem whether the file exists).
 set "WV2_ATTEMPT=0"
 :webview2_download
 set /a WV2_ATTEMPT+=1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $out = $env:SELORA_WEBVIEW2_OUT; try { Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $out -TimeoutSec 120 -ErrorAction Stop; $sig = Get-AuthenticodeSignature -FilePath $out; if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft') { throw ('signature check failed: ' + $sig.Status) }; exit 0 } catch { Write-Warning $_.Exception.Message; Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $out = $env:SKARN_WEBVIEW2_OUT; try { Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $out -TimeoutSec 120 -ErrorAction Stop; $sig = Get-AuthenticodeSignature -FilePath $out; if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft') { throw ('signature check failed: ' + $sig.Status) }; exit 0 } catch { Write-Warning $_.Exception.Message; Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue; exit 1 }"
 if not errorlevel 1 goto webview2_downloaded
 if %WV2_ATTEMPT% GEQ 3 goto webview2_unavailable
 echo prebuild: retrying the WebView2 bootstrapper download (attempt %WV2_ATTEMPT% of 3 failed) 1>&2
@@ -269,13 +269,13 @@ exit /b 0
 :usage
 echo Usage: installer\prebuild.bat
 echo.
-echo Builds installer\output\Selora-IDE-Setup-^<version^>.exe from an existing
-echo release binary: target\release\selora-desktop.exe, or
-echo %%CARGO_TARGET_DIR%%\release\selora-desktop.exe when CARGO_TARGET_DIR is set.
+echo Builds installer\output\Skarn-Setup-^<version^>.exe from an existing
+echo release binary: target\release\skarn-desktop.exe, or
+echo %%CARGO_TARGET_DIR%%\release\skarn-desktop.exe when CARGO_TARGET_DIR is set.
 echo Writes the matching .sha256 next to it and reports the Authenticode status.
 echo.
 echo Requires Inno Setup 6.3 or newer ^(or 7.x^) and the MSVC x64 toolset.
-echo ISCC.exe is found via SELORA_ISCC, PATH, the standard 6/7 install
+echo ISCC.exe is found via SKARN_ISCC, PATH, the standard 6/7 install
 echo directories, then the uninstall registry. The setup is always written to
 echo installer\output, regardless of where Inno Setup itself is installed.
 echo No files are written by this help text; running the script for real

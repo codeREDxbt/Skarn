@@ -1,8 +1,8 @@
 //! Crash and fatal-error logging for the desktop shell.
 //!
-//! Panic records go to `<app-data>/logs/selora.log` — `%APPDATA%\selora-ide\`
-//! `logs\selora.log` in production, or `$SELORA_SETTINGS_DIR/logs` when that
-//! override is set. The file rotates by size (`selora.log`, `selora.log.1`,
+//! Panic records go to `<app-data>/logs/skarn.log` — `%APPDATA%\skarn\`
+//! `logs\skarn.log` in production, or `$SKARN_SETTINGS_DIR/logs` when that
+//! override is set. The file rotates by size (`skarn.log`, `skarn.log.1`,
 //! … up to [`KEEP_LOG_FILES`] files) so a crash loop cannot fill the disk.
 //!
 //! Every operation here is best effort. The panic hook never unwinds its own
@@ -27,8 +27,8 @@ use std::{
 /// Directory under the app-data root that holds the rotating log files.
 pub const LOG_DIR_NAME: &str = "logs";
 
-/// Current log file. Rotated siblings are `selora.log.1`, `selora.log.2`, …
-pub const LOG_FILE_NAME: &str = "selora.log";
+/// Current log file. Rotated siblings are `skarn.log.1`, `skarn.log.2`, …
+pub const LOG_FILE_NAME: &str = "skarn.log";
 
 /// Rotate before an append would push the current file past this size.
 pub const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
@@ -81,7 +81,7 @@ pub fn install_panic_hook() {
 /// returning an error). Appends to the same rotating file; never panics.
 pub fn record_fatal(message: &str) {
     let record = format!(
-        "----- Selora fatal {} -----\nMessage: {message}\n\
+        "----- Skarn fatal {} -----\nMessage: {message}\n\
          No editor buffers were saved from the fatal handler.\n\
          ----- end fatal -----\n\n",
         format_timestamp(SystemTime::now())
@@ -104,7 +104,7 @@ pub fn format_panic_record(
         backtrace
     };
     format!(
-        "----- Selora panic {timestamp} -----\n\
+        "----- Skarn panic {timestamp} -----\n\
          Thread: {thread}\n\
          Location: {location}\n\
          Message: {message}\n\
@@ -195,7 +195,7 @@ fn append_with_limits(
     Ok(())
 }
 
-/// `selora.log` → `selora.log.1` → … → `selora.log.<keep-1>`, deleting the
+/// `skarn.log` → `skarn.log.1` → … → `skarn.log.<keep-1>`, deleting the
 /// oldest. A missing source is not an error (the first rotation may find no
 /// sibling at a given index).
 fn rotate(dir: &Path, file_name: &str, keep: usize) -> io::Result<()> {
@@ -308,18 +308,18 @@ mod tests {
 
         for index in 0..6 {
             let record = format!("record-{index}-{body}");
-            append_with_limits(dir.path(), "selora.log", record.as_bytes(), max_bytes, keep)
+            append_with_limits(dir.path(), "skarn.log", record.as_bytes(), max_bytes, keep)
                 .expect("append");
         }
 
-        let current = fs::read_to_string(dir.path().join("selora.log")).expect("current log");
-        let one = fs::read_to_string(dir.path().join("selora.log.1")).expect("first rotation");
-        let two = fs::read_to_string(dir.path().join("selora.log.2")).expect("second rotation");
+        let current = fs::read_to_string(dir.path().join("skarn.log")).expect("current log");
+        let one = fs::read_to_string(dir.path().join("skarn.log.1")).expect("first rotation");
+        let two = fs::read_to_string(dir.path().join("skarn.log.2")).expect("second rotation");
 
         assert!(current.contains("record-5-"));
         assert!(one.contains("record-4-"));
         assert!(two.contains("record-3-"));
-        assert!(!dir.path().join("selora.log.3").exists());
+        assert!(!dir.path().join("skarn.log.3").exists());
         // The count is `keep` files total, never more.
         let files = fs::read_dir(dir.path())
             .expect("read dir")
@@ -332,12 +332,12 @@ mod tests {
     fn crash_rotation_retains_a_single_file_when_keep_is_one() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        append_with_limits(dir.path(), "selora.log", b"one", 4, 1).expect("first");
-        append_with_limits(dir.path(), "selora.log", b"two", 4, 1).expect("second");
+        append_with_limits(dir.path(), "skarn.log", b"one", 4, 1).expect("first");
+        append_with_limits(dir.path(), "skarn.log", b"two", 4, 1).expect("second");
 
-        let current = fs::read_to_string(dir.path().join("selora.log")).expect("log");
+        let current = fs::read_to_string(dir.path().join("skarn.log")).expect("log");
         assert_eq!(current, "two\n");
-        assert!(!dir.path().join("selora.log.1").exists());
+        assert!(!dir.path().join("skarn.log.1").exists());
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         let unusable = blocker.join("logs");
 
         let result = std::panic::catch_unwind(|| {
-            append_with_limits(&unusable, "selora.log", b"record", 1024, 2)
+            append_with_limits(&unusable, "skarn.log", b"record", 1024, 2)
         });
 
         let outcome = result.expect("the log writer must not panic");

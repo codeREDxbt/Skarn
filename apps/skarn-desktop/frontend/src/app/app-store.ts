@@ -8,6 +8,7 @@
 // state and re-run the bootstrap flow. Z1's reload-bootstrap-on-any-event
 // behavior is gone.
 import {
+  getApiKeyStatus,
   getBootstrapState,
   getEventsAfter,
   getAgentsSnapshot,
@@ -50,6 +51,8 @@ export type AppState = {
   phase: AppPhase;
   bootstrap: BootstrapState | null;
   error: string | null;
+  /** Non-fatal provider/keyring error surfaced in StatusBar & ConnectModal. */
+  connectionError: string | null;
   /** Z4: latest SearchResults event; null until the first search. */
   searchResults: SearchResultsState | null;
   /** Z4: latest GitDiffReady event; null when the diff overlay is closed. */
@@ -73,6 +76,7 @@ let state: AppState = {
   phase: 'connecting',
   bootstrap: null,
   error: null,
+  connectionError: null,
   searchResults: null,
   gitDiff: null,
   hoverResult: null,
@@ -121,6 +125,7 @@ function notify(): void {
     phase: state.phase,
     bootstrap: state.bootstrap,
     error: state.error,
+    connectionError: state.connectionError,
     searchResults: state.searchResults,
     gitDiff: state.gitDiff,
     hoverResult: state.hoverResult,
@@ -129,6 +134,28 @@ function notify(): void {
     bufferConflicts: state.bufferConflicts,
   };
   for (const listener of listeners) listener();
+}
+
+function hydrateConnectionError(gen?: number): void {
+  if (!isNativeFrontend()) return;
+  void Promise.resolve()
+    .then(() => getApiKeyStatus?.())
+    .then((status) => {
+      if (gen !== undefined && gen !== generation) return;
+      if (!status) return;
+      const nextError = status.connected
+        ? null
+        : status.last_error?.trim()
+        ? status.last_error
+        : status.source === 'keyring_error'
+        ? 'Saved API key could not be read from Windows Credential Manager — click Connect to re-enter it.'
+        : null;
+      if (state.connectionError !== nextError) {
+        state = { ...state, connectionError: nextError };
+        notify();
+      }
+    })
+    .catch(() => null);
 }
 
 function applyBootstrapAppearance(bootstrap: BootstrapState): void {
@@ -276,6 +303,7 @@ async function runBootstrapFlow(options: { preserveReadyUi?: boolean } = {}): Pr
     // Publish bootstrap before rebuilding large agent projections. Native
     // WebView must paint its workspace before session history hydration runs.
     notify();
+    hydrateConnectionError(gen);
     if (typeof process === 'undefined' || process.env.NODE_ENV !== 'test') {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
@@ -518,12 +546,17 @@ case 'plan_state_changed':
     case 'agent_session_renamed':
       agentStore.handleSessionRenamed(payload.payload);
       return;
-    case 'selora_status_changed':
+    case 'skarn_status_changed':
       if (state.bootstrap) {
-        state.bootstrap = {
-          ...state.bootstrap,
-          connection: payload.payload.status,
-          active_model_id: payload.payload.active_model_id ?? state.bootstrap.active_model_id,
+        state = {
+          ...state,
+          bootstrap: {
+            ...state.bootstrap,
+            connection: payload.payload.status,
+            active_model_id: payload.payload.active_model_id ?? state.bootstrap.active_model_id,
+          },
+          connectionError:
+            payload.payload.status === 'connected' ? null : (payload.payload.error ?? null),
         };
         if (payload.payload.active_model_id) {
           if (!isNativeFrontend()) agentStore.setSelectedModel(payload.payload.active_model_id);
@@ -663,6 +696,7 @@ function emptyState(): AppState {
     phase: 'connecting',
     bootstrap: null,
     error: null,
+    connectionError: null,
     searchResults: null,
     gitDiff: null,
     hoverResult: null,

@@ -45,7 +45,7 @@ fn prompt_close_choice(dirty: &[skarn_protocol::BufferSnapshotDto]) -> state::Cl
     if dirty.len() > MAX_LISTED {
         description.push_str(&format!("  … and {} more\n", dirty.len() - MAX_LISTED));
     }
-    description.push_str("\nSave all changes before closing Selora?");
+    description.push_str("\nSave all changes before closing Skarn?");
 
     match rfd::MessageDialog::new()
         .set_title("Unsaved changes")
@@ -87,11 +87,68 @@ pub(crate) fn log_boot(msg: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
+const LEGACY_WEBVIEW_APP_ID: &str = "lol.selora.ide"; // skarn-v1-migration-compat
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Atomically copy `old_dir/EBWebView` into `new_dir/EBWebView` via a `.EBWebView.migrating`
+/// staging directory before `WebviewWindowBuilder` initializes WebView2.
+pub(crate) fn migrate_webview2_data_dir(
+    old_dir: &std::path::Path,
+    new_dir: &std::path::Path,
+) -> std::io::Result<bool> {
+    let target = new_dir.join("EBWebView");
+    let source = old_dir.join("EBWebView");
+    if target.exists() || !source.is_dir() {
+        return Ok(false);
+    }
+
+    let staging = new_dir.join(".EBWebView.migrating");
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    std::fs::create_dir_all(new_dir)?;
+    if let Err(err) = copy_dir_recursive(&source, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let marker = format!(
+        "{{\"migrated_from\":\"{LEGACY_WEBVIEW_APP_ID}\",\"migrated_at_unix_secs\":{secs}}}\n"
+    );
+    let _ = std::fs::write(new_dir.join(".migrated_from_webview"), marker);
+
+    if let Err(err) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+    Ok(true)
+}
+
 fn main() {
     // Note: Do not bind a restrictive JobObject here without breakaway flags;
     // WebView2 creates its own child process JobObjects and fails with 0x800700AA if restricted.
 
-    // Rotating panic records live in `%APPDATA%\selora-ide\logs\selora.log`.
+    // Rotating panic records live in `%APPDATA%\skarn\logs\skarn.log`.
     // The hook never touches editor buffers: saving from an unwinding thread is
     // unsafe, so it logs that fact instead (see `crash_log`).
     crash_log::install_panic_hook();
@@ -174,13 +231,23 @@ fn main() {
         })
         .setup(|app| {
             log_boot("setup() started");
+            if let Ok(new_dir) = app.path().app_local_data_dir() {
+                if let Some(local_appdata) = new_dir.parent() {
+                    let old_dir = local_appdata.join(LEGACY_WEBVIEW_APP_ID);
+                    match migrate_webview2_data_dir(&old_dir, &new_dir) {
+                        Ok(true) => log_boot("migrated WebView2 EBWebView profile"),
+                        Ok(false) => {}
+                        Err(err) => log_boot(&format!("WebView2 migration failed: {err}")),
+                    }
+                }
+            }
             #[cfg(debug_assertions)]
             let webview_url = tauri::WebviewUrl::default();
             #[cfg(not(debug_assertions))]
             let webview_url = tauri::WebviewUrl::App("index.html".into());
 
             let window = tauri::WebviewWindowBuilder::new(app, "main", webview_url)
-                .title("Selora IDE")
+                .title("Skarn")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(960.0, 640.0)
                 .center()
@@ -218,7 +285,7 @@ fn main() {
             // itself runs on the hot-exit writer thread, never on the UI.
             let hot_exit_state = app.state::<state::DesktopState>().inner().clone();
             let _ = std::thread::Builder::new()
-                .name("selora-hot-exit-timer".into())
+                .name("skarn-hot-exit-timer".into())
                 .spawn(move || {
                     hot_exit_state.hot_exit_prune_stale();
                     loop {
@@ -262,4 +329,61 @@ fn main() {
             std::process::exit(1);
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webview2_migration_copies_ebwebview_atomically_and_ignores_missing_old() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let missing_old = root.path().join("lol.selora.ide"); // skarn-v1-migration-compat
+        let new_dir = root.path().join("app.skarn.desktop");
+        assert!(!migrate_webview2_data_dir(&missing_old, &new_dir).expect("missing old ok"));
+        assert!(!new_dir.join("EBWebView").exists());
+
+        let old_eb = missing_old.join("EBWebView").join("Default");
+        std::fs::create_dir_all(&old_eb).expect("mkdir old");
+        std::fs::write(old_eb.join("Preferences"), br#"{"profile":"ok"}"#).expect("seed old");
+        // Simulate stale interrupted staging directory.
+        std::fs::create_dir_all(new_dir.join(".EBWebView.migrating")).expect("stale staging");
+        std::fs::write(new_dir.join(".EBWebView.migrating").join("stale"), b"bad")
+            .expect("stale file");
+
+        assert!(migrate_webview2_data_dir(&missing_old, &new_dir).expect("migrate"));
+        assert!(!new_dir.join(".EBWebView.migrating").exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                new_dir
+                    .join("EBWebView")
+                    .join("Default")
+                    .join("Preferences")
+            )
+            .expect("copied file"),
+            r#"{"profile":"ok"}"#
+        );
+        assert!(new_dir.join(".migrated_from_webview").is_file());
+
+        // Existing new EBWebView is never overwritten on subsequent runs.
+        std::fs::write(
+            new_dir
+                .join("EBWebView")
+                .join("Default")
+                .join("Preferences"),
+            br#"{"profile":"new"}"#,
+        )
+        .expect("modify new");
+        assert!(!migrate_webview2_data_dir(&missing_old, &new_dir).expect("second run no-op"));
+        assert_eq!(
+            std::fs::read_to_string(
+                new_dir
+                    .join("EBWebView")
+                    .join("Default")
+                    .join("Preferences")
+            )
+            .expect("new preserved"),
+            r#"{"profile":"new"}"#
+        );
+    }
 }

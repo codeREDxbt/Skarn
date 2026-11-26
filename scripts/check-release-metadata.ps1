@@ -10,7 +10,7 @@
       * an optional -Tag vX.Y.Z matches that version and is numeric;
       * CHANGELOG.md has a "## [<version>]" section;
       * the repository slug agrees across Cargo.toml, package.json,
-        installer/selora-ide.iss, and docs/mkdocs.yml when the docs tree is
+        installer/skarn.iss, and docs/mkdocs.yml when the docs tree is
         present (the public tree intentionally ships without docs/);
       * the About dialog and update check derive their URLs from those
         manifests instead of hard-coding a slug (a stale slug is how the
@@ -212,7 +212,7 @@ if (-not $frontendRepo) {
     Add-Fail 'apps/skarn-desktop/frontend/package.json has no repository URL'
 }
 
-$issPath = Join-Path $RepoRoot 'installer\selora-ide.iss'
+$issPath = Join-Path $RepoRoot 'installer\skarn.iss'
 $issRepo = ''
 if (Test-Path -LiteralPath $issPath -PathType Leaf) {
     $issText = Get-Content -LiteralPath $issPath -Raw
@@ -221,7 +221,7 @@ if (Test-Path -LiteralPath $issPath -PathType Leaf) {
     }
 }
 if (-not $issRepo) {
-    Add-Fail 'installer/selora-ide.iss has no #define RepoUrl'
+    Add-Fail 'installer/skarn.iss has no #define RepoUrl'
 }
 
 # The public tree deliberately omits docs/ (STABILITY_PLAN.md Decisions), so
@@ -243,7 +243,7 @@ $normalized = @{}
 foreach ($pair in @(
         @{ Name = 'Cargo.toml'; Url = $cargoRepo },
         @{ Name = 'frontend/package.json'; Url = $frontendRepo },
-        @{ Name = 'installer/selora-ide.iss'; Url = $issRepo },
+        @{ Name = 'installer/skarn.iss'; Url = $issRepo },
         @{ Name = 'docs/mkdocs.yml'; Url = $mkdocsRepo })) {
     if ([string]::IsNullOrWhiteSpace($pair.Url)) {
         continue
@@ -280,7 +280,7 @@ if ($canonical) {
 
 # The update check and the About dialog must derive from the manifests, not
 # repeat a literal slug that can drift after the repository is renamed.
-$updatesPath = Join-Path $RepoRoot 'crates\selora-ai\src\updates.rs'
+$updatesPath = Join-Path $RepoRoot 'crates\skarn-ai\src\updates.rs'
 if (Test-Path -LiteralPath $updatesPath -PathType Leaf) {
     $updatesText = Get-Content -LiteralPath $updatesPath -Raw
     if ($updatesText -match 'env!\("CARGO_PKG_REPOSITORY"\)') {
@@ -291,7 +291,7 @@ if (Test-Path -LiteralPath $updatesPath -PathType Leaf) {
     }
 }
 
-$aboutRustPath = Join-Path $RepoRoot 'crates\selora-ui\src\dialogs\about.rs'
+$aboutRustPath = Join-Path $RepoRoot 'crates\skarn-ui\src\dialogs\about.rs'
 if (Test-Path -LiteralPath $aboutRustPath -PathType Leaf) {
     $aboutRustText = Get-Content -LiteralPath $aboutRustPath -Raw
     if ($aboutRustText -match 'env!\("CARGO_PKG_REPOSITORY"\)') {

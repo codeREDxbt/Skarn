@@ -80,7 +80,7 @@ describe('Agents workspace context', () => {
   it('persists requested tab and reads independent staged and working tree baselines', async () => {
     render(<AgentsContextPane bootstrap={bootstrap()} />);
     act(() => window.dispatchEvent(new CustomEvent('skarn:agents-context-tab', { detail: { tab: 'changes' } })));
-    expect(localStorage.getItem('agents:last-context-tab')).toBe('changes');
+    expect(localStorage.getItem('skarn:agents-last-context-tab')).toBe('changes');
     const rows = screen.getAllByRole('button', { name: 'a.ts' });
     fireEvent.click(rows[0]);
     await screen.findByText('diff index');

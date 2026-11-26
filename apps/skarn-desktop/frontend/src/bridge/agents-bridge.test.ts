@@ -9,12 +9,17 @@ import {
   agentsReadGitDiff,
   agentsWindowReady,
   getAgentsSnapshot,
+  listenProtocolEvent,
+  listenUpdateProgress,
   openAgentsWindow,
   queueAgentPrompt,
   renameAgentSession,
   showSessionInMainWindow,
+  subscribeAgentPreferences,
   subscribeAgentsNavigation,
+  subscribeMainSessionNavigation,
   updateAgentPreferences,
+  UPDATE_PROGRESS_EVENT,
   type AgentRequestDto,
   type EnvelopeContext,
 } from './bridge';
@@ -69,7 +74,7 @@ describe('Agents window bridge', () => {
     const handler = vi.fn();
     await subscribeAgentsNavigation(handler);
     const [name, listener] = transport.listen.mock.calls[0];
-    expect(name).toBe('selora://agents-navigate');
+    expect(name).toBe('skarn://agents-navigate');
     listener({ payload: { workspace_id: 'workspace-1', session_id: 'parent' } });
     expect(handler).toHaveBeenCalledWith({ workspace_id: 'workspace-1', session_id: 'parent' });
   });
@@ -88,5 +93,23 @@ describe('Agents window bridge', () => {
     expect(transport.invoke).toHaveBeenCalledWith('update_agent_preferences', {
       patch: { systemInstructions: 'Review changes before editing.' },
     });
+  });
+
+  it('subscribes to all 5 renamed Skarn IPC channels', async () => {
+    const noop = () => undefined;
+    await listenProtocolEvent(noop);
+    await subscribeAgentPreferences(noop);
+    await subscribeAgentsNavigation(noop);
+    await subscribeMainSessionNavigation(noop);
+    await listenUpdateProgress(noop);
+
+    expect(UPDATE_PROGRESS_EVENT).toBe('skarn:update-progress');
+    expect(transport.listen.mock.calls.map(([channel]) => channel)).toEqual([
+      'skarn://event',
+      'skarn://agent-preferences',
+      'skarn://agents-navigate',
+      'skarn://main-session-navigate',
+      'skarn:update-progress',
+    ]);
   });
 });

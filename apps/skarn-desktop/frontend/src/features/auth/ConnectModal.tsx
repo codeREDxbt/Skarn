@@ -765,6 +765,17 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
             </div>
 
             {/* Alert Messages */}
+            {!error && !successMsg && (keyStatus?.source === 'keyring_error' || Boolean(keyStatus?.last_error?.trim())) && (
+              <div className="connect-alert is-error" role="alert">
+                <AlertCircle size={15} className="connect-alert-icon" aria-hidden="true" />
+                <span className="connect-alert-text">
+                  {keyStatus?.source === 'keyring_error'
+                    ? 'Saved key could not be read from Windows Credential Manager — please re-enter your API key.'
+                    : keyStatus?.last_error}
+                </span>
+              </div>
+            )}
+
             {error && (
               <div className="connect-alert is-error" role="alert">
                 <AlertCircle size={15} className="connect-alert-icon" aria-hidden="true" />

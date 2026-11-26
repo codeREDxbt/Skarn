@@ -9,7 +9,7 @@
 # into a manual ISCC call with an /O override outside installer\output\.
 #
 # Search order, first hit wins:
-#   1. $env:SELORA_ISCC (explicit path to ISCC.exe, for a non-standard install)
+#   1. $env:SKARN_ISCC (explicit path to ISCC.exe, with legacy SELORA_ISCC fallback) # skarn-v1-migration-compat
 #   2. ISCC.exe on PATH
 #   3. Inno Setup 6 / 7 under Program Files, Program Files (x86), and the
 #      per-user %LOCALAPPDATA%\Programs location
@@ -69,7 +69,11 @@ function Write-Result {
 }
 
 # 1. Explicit override.
-$found = Resolve-IsccPath -Candidate $env:SELORA_ISCC
+$found = Resolve-IsccPath -Candidate $env:SKARN_ISCC
+if (-not $found -and -not [string]::IsNullOrWhiteSpace($env:SELORA_ISCC)) { # skarn-v1-migration-compat
+    Write-Diag "SELORA_ISCC is deprecated; set SKARN_ISCC instead." # skarn-v1-migration-compat
+    $found = Resolve-IsccPath -Candidate $env:SELORA_ISCC # skarn-v1-migration-compat
+}
 if ($found) {
     Write-Result -IsccPath $found
 }
@@ -145,5 +149,5 @@ foreach ($entry in $entries) {
 Write-Diag "Inno Setup (ISCC.exe) was not found on PATH, in the standard install"
 Write-Diag "directories, or in the uninstall registry. Install it with:"
 Write-Diag "  winget install JRSoftware.InnoSetup"
-Write-Diag "or put the compiler path in SELORA_ISCC."
+Write-Diag "or put the compiler path in SKARN_ISCC."
 exit 1

@@ -391,14 +391,14 @@ impl SkarnApp {
                 // and both send paths read the panel, not the settings);
                 // a picker choice already made is never clobbered.
                 if self.state.chat_panel.model().is_none() {
-                    if let Some(model) = self.state.settings.selora.active_model.clone() {
+                    if let Some(model) = self.state.settings.skarn.active_model.clone() {
                         self.state.chat_panel.set_model(model);
                     }
                 }
                 // Phase 4a: restore the last session's connection — a key
                 // in the OS keyring is validated and becomes the session
                 // key (the base URL is the freshly loaded settings').
-                let base_url = self.state.settings.selora.base_url.clone();
+                let base_url = self.state.settings.skarn.base_url.clone();
                 let _ = self.effect_tx.send(Effect::SkarnAutoConnect { base_url });
             }
             if let Some(root) = folder_picked {
@@ -597,7 +597,7 @@ impl SkarnApp {
             return;
         }
         // No model picked → nothing to complete with (the picker sets it).
-        let Some(model) = self.state.settings.selora.active_model.clone() else {
+        let Some(model) = self.state.settings.skarn.active_model.clone() else {
             return;
         };
         let idle = editor
@@ -1213,7 +1213,7 @@ impl SkarnApp {
                 // flight (the Phase 6h states' surfaces, wired).
                 let rect = ui.max_rect();
                 let painter = ui.painter_at(rect);
-                let active_model = self.state.settings.selora.active_model.clone();
+                let active_model = self.state.settings.skarn.active_model.clone();
                 let activity = if self.tree_in_flight {
                     Some(OrbState::Shaping)
                 } else if self.search_in_flight {
@@ -1450,7 +1450,7 @@ impl SkarnApp {
                 // The picker flipped its header optimistically; this is
                 // the durable write (settings.json + the dispatcher's
                 // next request both follow).
-                self.state.settings.selora.active_model = Some(model);
+                self.state.settings.skarn.active_model = Some(model);
                 let _ = self
                     .effect_tx
                     .send(Effect::SettingsSave(self.state.settings.clone()));
@@ -1827,7 +1827,7 @@ impl SkarnApp {
             // dispatcher's Selora base URL (without it, every Selora
             // effect keeps the boot-time URL until the app restarts).
             let _ = self.effect_tx.send(Effect::SettingsSynced {
-                base_url: settings.selora.base_url.clone(),
+                base_url: settings.skarn.base_url.clone(),
             });
             self.state
                 .chat_panel
@@ -3580,7 +3580,7 @@ mod tests {
         assert!(app.state.chat_panel.is_reduce_motion());
     }
 
-    /// Phase 6g fix: the chat panel adopts `settings.selora.active_model`
+    /// Phase 6g fix: the chat panel adopts `settings.skarn.active_model`
     /// at boot — before this, the header read "no model" and sends were
     /// blocked behind a picker round-trip even though a model was persisted.
     #[tokio::test]
@@ -3592,7 +3592,7 @@ mod tests {
         assert!(app.state.chat_panel.model().is_none());
 
         let mut settings = Settings::default();
-        settings.selora.active_model = Some("claude-opus-5-5".to_owned());
+        settings.skarn.active_model = Some("claude-opus-5-5".to_owned());
         app.msg_tx
             .send(AppMessage::SettingsLoaded(settings))
             .expect("send");
@@ -3605,7 +3605,7 @@ mod tests {
         // A later settings reload never clobbers a picker choice.
         app.state.chat_panel.set_model("kimi-k3");
         let mut settings = Settings::default();
-        settings.selora.active_model = Some("claude-opus-5-5".to_owned());
+        settings.skarn.active_model = Some("claude-opus-5-5".to_owned());
         app.msg_tx
             .send(AppMessage::SettingsLoaded(settings))
             .expect("send");

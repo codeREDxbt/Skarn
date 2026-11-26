@@ -12,7 +12,7 @@ const listeners = new Set<() => void>();
 const emptyDraft: AgentDraft = { text: '', attachments: [], revision: 0 };
 
 function key(workspaceId: string, sessionId: string, surface: Surface): string {
-  return `selora:agent-draft:${JSON.stringify([surface, workspaceId, sessionId])}`;
+  return `skarn:agent-draft:${JSON.stringify([surface, workspaceId, sessionId])}`;
 }
 
 export function readAgentDraft(workspaceId: string, sessionId: string, surface: Surface): AgentDraft {

@@ -1,4 +1,4 @@
-# Signing Selora IDE releases
+# Signing Skarn releases
 
 This document lists the signing material the repository owner must provide.
 Nothing here creates, generates, or stores a real key. The build is unsigned
@@ -10,7 +10,7 @@ until the owner supplies a certificate.
 signing is enabled:
 
 1. `target/release/skarn-desktop.exe`, before the installer is compiled.
-2. `installer/output/Selora-IDE-Setup-<version>.exe`, after the installer is
+2. `installer/output/Skarn-Setup-<version>.exe`, after the installer is
    compiled.
 
 Each signature uses SHA-256 and an RFC 3161 timestamp from
@@ -37,7 +37,7 @@ Secrets):
 Generate the base64 value on a trusted machine, never in the repository:
 
 ```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\path\to\selora-signing.pfx'))
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\path\to\skarn-signing.pfx'))
 ```
 
 Paste the single-line output into `SIGNING_CERT_BASE64`. Do not commit the
@@ -72,7 +72,7 @@ silently produces an unsigned installer when the secrets are absent.
 
 ## Operational notes
 
-- The certificate is written to `%RUNNER_TEMP%\selora-signing.pfx` and removed
+- The certificate is written to `%RUNNER_TEMP%\skarn-signing.pfx` and removed
   in a `finally` block. It is never uploaded as an artifact.
 - Renew the certificate before it expires and replace both secrets. The
   workflow does not check the certificate's expiry date in advance;
@@ -82,7 +82,7 @@ silently produces an unsigned installer when the secrets are absent.
 - Verify a downloaded installer locally with:
 
 ```powershell
-Get-AuthenticodeSignature .\Selora-IDE-Setup-<version>.exe | Format-List Status, SignerCertificate, TimeStamperCertificate
+Get-AuthenticodeSignature .\Skarn-Setup-<version>.exe | Format-List Status, SignerCertificate, TimeStamperCertificate
 ```
 
 ## Why this matters for updates

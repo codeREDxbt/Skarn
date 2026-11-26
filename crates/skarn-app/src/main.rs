@@ -49,14 +49,14 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Selora IDE")
+            .with_title("Skarn")
             .with_inner_size(WINDOW_SIZE)
             .with_min_inner_size(MIN_WINDOW_SIZE),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Selora IDE",
+        "Skarn",
         options,
         Box::new(move |cc| {
             // Boot the bundled fonts and the Selora dark visuals (the typed

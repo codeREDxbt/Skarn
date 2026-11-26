@@ -307,7 +307,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
              The user approves a diff before anything is written; creating a \
              file is shown as all additions. Empty content is refused for a \
              non-empty file (use `delete_file` to delete); an overwrite keeps \
-             the previous bytes in a sibling `.<name>.selora-bak` file.",
+             the previous bytes in a sibling `.<name>.skarn-bak` file.",
             json_schema(
                 [("path", "string"), ("content", "string")],
                 ["path", "content"],

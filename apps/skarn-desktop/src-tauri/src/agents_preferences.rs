@@ -83,12 +83,12 @@ fn save(app: &tauri::AppHandle, preferences: &AgentPreferences) -> Result<(), St
     save_to_path(&path(app)?, preferences)
 }
 
-/// Startup reconciliation between `agent-preferences.json` and legacy `settings.selora.active_model`.
+/// Startup reconciliation between `agent-preferences.json` and legacy `settings.skarn.active_model`.
 ///
 /// Precedence (idempotent, independent of frontend call order):
-/// 1. Non-empty `agent-preferences.json` `selectedModel` wins and updates legacy `settings.selora.active_model`
+/// 1. Non-empty `agent-preferences.json` `selectedModel` wins and updates legacy `settings.skarn.active_model`
 ///    if they differ.
-/// 2. Otherwise, non-empty legacy `settings.selora.active_model` migrates into `agent-preferences.json`.
+/// 2. Otherwise, non-empty legacy `settings.skarn.active_model` migrates into `agent-preferences.json`.
 /// 3. If neither has a selection, returns `Ok(None)`.
 pub(crate) fn reconcile_startup_at(
     settings_path: &Path,
@@ -98,7 +98,7 @@ pub(crate) fn reconcile_startup_at(
     let mut preferences = load_from_path(preferences_path)?;
     let pref_model = preferences.selected_model.trim().to_owned();
     let settings_model = settings
-        .selora
+        .skarn
         .active_model
         .as_deref()
         .map(str::trim)
@@ -107,7 +107,7 @@ pub(crate) fn reconcile_startup_at(
 
     if !pref_model.is_empty() {
         if settings_model.as_deref() != Some(pref_model.as_str()) {
-            settings.selora.active_model = Some(pref_model.clone());
+            settings.skarn.active_model = Some(pref_model.clone());
             settings
                 .save_to(settings_path)
                 .map_err(|error| format!("Could not migrate active model to settings: {error}"))?;
@@ -158,7 +158,7 @@ pub(crate) fn sync_managed_state<R: tauri::Runtime>(
         if prefs.selected_model.trim() != desired {
             prefs.selected_model = desired.to_owned();
             prefs.revision = prefs.revision.saturating_add(1);
-            let _ = app.emit("selora://agent-preferences", &*prefs);
+            let _ = app.emit("skarn://agent-preferences", &*prefs);
         }
     }
 }
@@ -301,7 +301,7 @@ pub(crate) fn update_preferences_with_saver<R: tauri::Runtime>(
 
     *guard = Some(next.clone());
     // Preferences have their own revision domain, not the runtime replay sequence.
-    let _ = app.emit("selora://agent-preferences", &next);
+    let _ = app.emit("skarn://agent-preferences", &next);
     Ok(next)
 }
 
@@ -420,7 +420,7 @@ mod tests {
         );
         let persisted = skarn_settings::Settings::load_from(&settings_path).expect("settings load");
         assert_eq!(
-            persisted.selora.active_model.as_deref(),
+            persisted.skarn.active_model.as_deref(),
             Some("provider/initial-model")
         );
     }
@@ -431,9 +431,9 @@ mod tests {
         let settings_path = dir.path().join("settings.json");
         let prefs_path = dir.path().join("agent-preferences.json");
 
-        // Case 1: legacy settings.selora.active_model migrates into agent-preferences.json.
+        // Case 1: legacy settings.skarn.active_model migrates into agent-preferences.json.
         let mut legacy = skarn_settings::Settings::default();
-        legacy.selora.active_model = Some("legacy/active-model".into());
+        legacy.skarn.active_model = Some("legacy/active-model".into());
         legacy.save_to(&settings_path).expect("save legacy settings");
 
         let reconciled =
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(
             skarn_settings::Settings::load_from(&settings_path)
                 .unwrap()
-                .selora
+                .skarn
                 .active_model
                 .as_deref(),
             Some("prefs/authoritative-model")

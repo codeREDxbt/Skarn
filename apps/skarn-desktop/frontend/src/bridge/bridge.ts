@@ -843,7 +843,7 @@ export type FrontendEvent =
   | { type: 'git_diff_ready'; payload: { path: string; unified_diff: string } }
   | { type: 'models_changed'; payload: { models: Model[]; active_model_id: string | null } }
   | {
-      type: 'selora_status_changed';
+      type: 'skarn_status_changed';
       payload: { status: ConnectionStatus; active_model_id: string | null; error?: string | null };
     }
   | { type: 'workspace_layout_changed'; payload: Layout }
@@ -964,11 +964,11 @@ export const updateAgentPreferences = (patch: AgentPreferencesPatch): Promise<Ag
   invoke<AgentPreferences>('update_agent_preferences', { patch });
 
 export const subscribeAgentPreferences = (handler: (preferences: AgentPreferences) => void): Promise<UnlistenFn> =>
-  listen<AgentPreferences>('selora://agent-preferences', ({ payload }) => handler(payload));
+  listen<AgentPreferences>('skarn://agent-preferences', ({ payload }) => handler(payload));
 
 /**
  * One-shot boot-trace marker. The Rust side appends a timestamped line to
- * `%TEMP%\selora_boot.log`; the performance harness uses it as the
+ * `%TEMP%\skarn_boot.log`; the performance harness uses it as the
  * "bootstrap ready" boundary (window creation happens earlier).
  */
 export const markFrontendReady = (): Promise<void> => invoke('frontend_ready');
@@ -1026,11 +1026,11 @@ export const agentsWindowReady = (): Promise<AgentsNavigationTarget | null> =>
 
 export const subscribeAgentsNavigation = (
   handler: (target: AgentsNavigationTarget) => void,
-): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('selora://agents-navigate', ({ payload }) => handler(payload));
+): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('skarn://agents-navigate', ({ payload }) => handler(payload));
 
 export const subscribeMainSessionNavigation = (
   handler: (target: AgentsNavigationTarget) => void,
-): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('selora://main-session-navigate', ({ payload }) => handler(payload));
+): Promise<UnlistenFn> => listen<AgentsNavigationTarget>('skarn://main-session-navigate', ({ payload }) => handler(payload));
 
 export const showSessionInMainWindow = (sessionId: Id, ctx: EnvelopeContext): Promise<void> =>
   invoke<void>('show_session_in_main_window', { sessionId, workspaceId: ctx.workspace_id });
@@ -1587,7 +1587,7 @@ export const checkForUpdate = (): Promise<UpdateCheck> =>
 export const installUpdate = (): Promise<void> =>
   invoke<void>('install_update');
 
-export const UPDATE_PROGRESS_EVENT = 'selora:update-progress';
+export const UPDATE_PROGRESS_EVENT = 'skarn:update-progress';
 
 export const listenUpdateProgress = (
   handler: (progress: UpdateProgress) => void,
@@ -1609,4 +1609,4 @@ export const validateEvent = (
 };
 
 export const listenProtocolEvent = (handler: (event: EventEnvelope) => void): Promise<UnlistenFn> =>
-  listen<EventEnvelope>('selora://event', (event) => handler(event.payload));
+  listen<EventEnvelope>('skarn://event', (event) => handler(event.payload));

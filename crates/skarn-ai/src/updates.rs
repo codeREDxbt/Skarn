@@ -1,7 +1,7 @@
 //! The "Check for updates" client (Phase 6b, UI_SPEC.md §11, RELEASE.md §4).
 //!
 //! One GET against the GitHub Releases API for the repo's latest release.
-//! This is the only non-gateway HTTP in the app; it lives in selora-ai so
+//! This is the only non-gateway HTTP in the app; it lives in skarn-ai so
 //! the workspace keeps a single HTTP stack (rustls reqwest — PLAN.md §4.7).
 //!
 //! Version comparison is a numeric triple compare (`v0.6.0` > `0.1.0`): a
@@ -54,7 +54,7 @@ pub struct ReleaseInfo {
     /// Whether the tag is a semver-ish triple strictly newer than the
     /// running build.
     pub newer: bool,
-    /// The release's `Selora-IDE-Setup-<tag>.exe` asset, when published.
+    /// The release's `Skarn-Setup-<tag>.exe` asset, when published.
     pub installer: Option<ReleaseAsset>,
     /// The matching `.exe.sha256` asset, when published.
     pub checksum: Option<ReleaseAsset>,
@@ -147,14 +147,14 @@ pub async fn check_latest_release_at(url: &str, current: &str) -> Result<Release
         _ => false,
     };
     // The release pipeline names both assets after the tag without the `v`
-    // (`installer/selora-ide.iss` OutputBaseFilename + the checksum step). A
+    // (`installer/skarn.iss` OutputBaseFilename + the checksum step). A
     // release published by hand may omit them; the check still reports
     // `newer`, and the UI falls back to the release page.
     let version = release
         .tag_name
         .strip_prefix('v')
         .unwrap_or(&release.tag_name);
-    let legacy_installer_name = format!("Selora-IDE-Setup-{version}.exe");
+    let installer_name = format!("Skarn-Setup-{version}.exe");
     let asset = |name: &str| {
         release
             .assets
@@ -162,17 +162,12 @@ pub async fn check_latest_release_at(url: &str, current: &str) -> Result<Release
             .find(|candidate| candidate.name == name)
             .map(|candidate| candidate.clone().into_asset())
     };
-    let installer_name = if asset(&legacy_installer_name).is_some() {
-        legacy_installer_name.as_str()
-    } else {
-        "selora-installer-v1.exe"
-    };
     let checksum_name = format!("{installer_name}.sha256");
     Ok(ReleaseInfo {
         tag: release.tag_name,
         html_url: release.html_url,
         newer,
-        installer: asset(installer_name),
+        installer: asset(&installer_name),
         checksum: asset(&checksum_name),
     })
 }
@@ -404,16 +399,16 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "tag_name": "v0.2.0",
-                    "html_url": "https://github.com/x/y/releases/tag/v0.2.0",
+                    "tag_name": "v1.0.0",
+                    "html_url": "https://github.com/x/y/releases/tag/v1.0.0",
                     "assets": [
                         {
-                            "name": "Selora-IDE-Setup-0.2.0.exe",
+                            "name": "Skarn-Setup-1.0.0.exe",
                             "browser_download_url": "https://example.invalid/setup.exe",
                             "size": 1234
                         },
                         {
-                            "name": "Selora-IDE-Setup-0.2.0.exe.sha256",
+                            "name": "Skarn-Setup-1.0.0.exe.sha256",
                             "browser_download_url": "https://example.invalid/setup.exe.sha256",
                             "size": 90
                         }
@@ -427,7 +422,7 @@ mod tests {
             .expect("ok");
         assert!(info.newer);
         let installer = info.installer.expect("installer asset");
-        assert_eq!(installer.name, "Selora-IDE-Setup-0.2.0.exe");
+        assert_eq!(installer.name, "Skarn-Setup-1.0.0.exe");
         assert_eq!(installer.size, 1234);
         assert!(info
             .checksum
@@ -437,15 +432,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_release_exposes_the_fixed_installer_name() {
+    async fn unrecognized_or_legacy_installer_assets_are_ignored() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tag_name": "v0.2.0",
-                "html_url": "https://github.com/x/y/releases/tag/v0.2.0",
+                "tag_name": "v1.0.0",
+                "html_url": "https://github.com/x/y/releases/tag/v1.0.0",
                 "assets": [
-                    { "name": "selora-installer-v1.exe", "browser_download_url": "https://example.invalid/setup.exe", "size": 1234 },
-                    { "name": "selora-installer-v1.exe.sha256", "browser_download_url": "https://example.invalid/setup.sha256", "size": 90 }
+                    { "name": "selora-installer-v1.exe", "browser_download_url": "https://example.invalid/old1.exe", "size": 1234 }, // skarn-v1-migration-compat
+                    { "name": "selora-installer-v1.exe.sha256", "browser_download_url": "https://example.invalid/old1.sha256", "size": 90 }, // skarn-v1-migration-compat
+                    { "name": "Selora-IDE-Setup-1.0.0.exe", "browser_download_url": "https://example.invalid/old2.exe", "size": 1234 }, // skarn-v1-migration-compat
+                    { "name": "Selora-IDE-Setup-1.0.0.exe.sha256", "browser_download_url": "https://example.invalid/old2.sha256", "size": 90 }, // skarn-v1-migration-compat
+                    { "name": "skarn-installer-v1.exe", "browser_download_url": "https://example.invalid/old3.exe", "size": 1234 },
+                    { "name": "skarn-installer-v1.exe.sha256", "browser_download_url": "https://example.invalid/old3.sha256", "size": 90 }
                 ]
             })))
             .mount(&server)
@@ -453,10 +452,13 @@ mod tests {
         let info = check_latest_release_at(&server.uri(), "0.1.0")
             .await
             .expect("ok");
-        assert_eq!(info.installer.unwrap().name, "selora-installer-v1.exe");
-        assert_eq!(
-            info.checksum.unwrap().name,
-            "selora-installer-v1.exe.sha256"
+        assert!(
+            info.installer.is_none(),
+            "legacy or fallback installer names must be ignored"
+        );
+        assert!(
+            info.checksum.is_none(),
+            "legacy or fallback checksum names must be ignored"
         );
     }
 
@@ -464,7 +466,7 @@ mod tests {
     fn a_checksum_file_is_one_hex_digest() {
         let digest = "a".repeat(64);
         assert_eq!(
-            parse_checksum(&format!("{digest}  Selora-IDE-Setup-0.2.0.exe\n")),
+            parse_checksum(&format!("{digest}  Skarn-Setup-1.0.0.exe\n")),
             Some(digest.clone())
         );
         assert_eq!(parse_checksum(&digest.to_ascii_uppercase()), Some(digest));

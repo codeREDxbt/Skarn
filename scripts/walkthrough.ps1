@@ -37,7 +37,7 @@
 
 .PARAMETER ArtifactsDir
     Where screenshots, logs, and summary files are written. Default
-    %TEMP%\selora-walkthrough-<stamp>. The directory is created if missing and
+    %TEMP%\skarn-walkthrough-<stamp>. The directory is created if missing and
     never cleaned automatically.
 
 .PARAMETER Workspace
@@ -80,7 +80,7 @@
 
     Safety: refuses to start when another skarn-desktop process is running
     (the Tauri single-instance plugin would forward to it). Kills only the
-    process tree it started. The app gets SELORA_SETTINGS_DIR pointing inside
+    process tree it started. The app gets SKARN_SETTINGS_DIR pointing inside
     the artifact directory, so settings/layout writes are isolated. No API key
     is read from or written to this script, and the walkthrough never sends a
     gateway request.
@@ -108,7 +108,7 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $startedAt = Get-Date
 
 if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
-    $ArtifactsDir = Join-Path $env:TEMP ("selora-walkthrough-" + $stamp)
+    $ArtifactsDir = Join-Path $env:TEMP ("skarn-walkthrough-" + $stamp)
 }
 $ArtifactsDir = [System.IO.Path]::GetFullPath($ArtifactsDir)
 $null = New-Item -ItemType Directory -Path $ArtifactsDir -Force
@@ -351,8 +351,8 @@ function Start-App {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.EnvironmentVariables['SELORA_WORKSPACE_ROOT'] = $Workspace
-    $psi.EnvironmentVariables['SELORA_SETTINGS_DIR'] = $settingsDir
+    $psi.EnvironmentVariables['SKARN_WORKSPACE_ROOT'] = $Workspace
+    $psi.EnvironmentVariables['SKARN_SETTINGS_DIR'] = $settingsDir
     $psi.EnvironmentVariables['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = ('--remote-debugging-port=' + $Port + ' --remote-allow-origins=*')
     $psi.EnvironmentVariables['RUST_BACKTRACE'] = '1'
 
@@ -447,7 +447,7 @@ function Invoke-Driver {
 function Copy-App-Logs {
     $pidText = ''
     if ($null -ne $script:appProcess) { $pidText = '[pid ' + $script:appProcess.Id + ']' }
-    $bootLog = Join-Path $env:TEMP 'selora_boot.log'
+    $bootLog = Join-Path $env:TEMP 'skarn_boot.log'
     if (Test-Path -LiteralPath $bootLog) {
         $lines = @()
         if (-not [string]::IsNullOrWhiteSpace($pidText)) {
@@ -458,7 +458,7 @@ function Copy-App-Logs {
         }
         $lines | Set-Content -LiteralPath (Join-Path $ArtifactsDir 'app-boot.log') -Encoding UTF8
     }
-    $panicLog = Join-Path $env:TEMP 'selora_last_panic.log'
+    $panicLog = Join-Path $env:TEMP 'skarn_last_panic.log'
     if (Test-Path -LiteralPath $panicLog) {
         $info = Get-Item -LiteralPath $panicLog
         if ($info.LastWriteTime -gt $startedAt) {

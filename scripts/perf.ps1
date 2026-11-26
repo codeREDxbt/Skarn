@@ -6,7 +6,7 @@
     Measures six things and writes raw results next to the logs:
 
       1. cold start, debug and release (process spawn -> main window handle);
-      2. the Rust bootstrap stages from %TEMP%\selora_boot.log (state init,
+      2. the Rust bootstrap stages from %TEMP%\skarn_boot.log (state init,
          Tauri setup, WebView build, window shown);
       3. idle working set / private bytes for the app and its whole child tree
          (WebView2 helpers included);
@@ -80,7 +80,7 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $frontend = Join-Path $RepoRoot 'apps\skarn-desktop\frontend'
 $debugExe = Join-Path $RepoRoot 'target\debug\skarn-desktop.exe'
 $releaseExe = Join-Path $RepoRoot 'target\release\skarn-desktop.exe'
-$bootLog = Join-Path $env:TEMP 'selora_boot.log'
+$bootLog = Join-Path $env:TEMP 'skarn_boot.log'
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if ([string]::IsNullOrWhiteSpace($ResultsDir)) {
@@ -486,9 +486,9 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "skarn-desktop perf tests failed ($LASTEXITCODE)" }
 
         $workflowLog = Join-Path $ResultsDir 'cargo-test-perf-workflow.log'
-        & cargo test -p selora-workflow --release --test perf_overhead -- --ignored --nocapture 2>&1 |
+        & cargo test -p skarn-workflow --release --test perf_overhead -- --ignored --nocapture 2>&1 |
             Tee-Object -FilePath $workflowLog
-        if ($LASTEXITCODE -ne 0) { throw "selora-workflow perf tests failed ($LASTEXITCODE)" }
+        if ($LASTEXITCODE -ne 0) { throw "skarn-workflow perf tests failed ($LASTEXITCODE)" }
     } else {
         Add-Stage -Name 'rust-benchmarks' -Status 'SKIP' -Detail '-SkipRust'
     }

@@ -130,8 +130,8 @@ export type AgentState = {
   sessionError: string | null;
 };
 
-const STORED_SETTINGS_KEY = 'selora:model_settings';
-const PINNED_SESSIONS_KEY = 'selora:agent-pinned-sessions';
+const STORED_SETTINGS_KEY = 'skarn:model_settings';
+const PINNED_SESSIONS_KEY = 'skarn:agent-pinned-sessions';
 
 function loadPinnedSessionIds(): string[] {
   try {

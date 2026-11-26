@@ -10,7 +10,7 @@ beforeEach(() => {
 
 describe('Agents workspace layout', () => {
   it('bounds corrupt and non-finite persisted sizes', () => {
-    localStorage.setItem('selora:agents-workspace:v1:corrupt', JSON.stringify({ navigationWidth: -100, contextWidth: 99999, navigationOpen: 'false' }));
+    localStorage.setItem('skarn:agents-workspace:v1:corrupt', JSON.stringify({ navigationWidth: -100, contextWidth: 99999, navigationOpen: 'false' }));
     store.setWorkspace('corrupt');
     expect(store.getSnapshot().navigationWidth).toBe(AGENTS_LAYOUT_BOUNDS.navigation.min);
     expect(store.getSnapshot().contextWidth).toBe(AGENTS_LAYOUT_BOUNDS.context.max);
@@ -27,7 +27,7 @@ describe('Agents workspace layout', () => {
     expect(store.getSnapshot().navigationWidth).toBe(AGENTS_LAYOUT_BOUNDS.navigation.default);
     store.setWorkspace('one');
     expect(store.getSnapshot()).toMatchObject({ navigationWidth: 300, contextWidth: 410, navigationOpen: false });
-    expect(Object.keys(localStorage)).not.toContain('selora:layout');
+    expect(Object.keys(localStorage)).not.toContain('skarn:layout');
   });
 
   it('uses compact drawers without overwriting saved desktop widths', () => {

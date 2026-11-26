@@ -508,49 +508,69 @@ pub async fn get_api_key_status(
     offload(move || Ok(api_key_status(&state))).await
 }
 
+#[cfg(test)]
+pub(crate) static API_KEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn api_key_status(state: &DesktopState) -> ApiKeyStatusDto {
     let engine = state.sessions();
     let base_url = engine.base_url();
     let active_model_id = engine.active_model_id();
     let connection = engine.connection();
-    let last_error = engine.last_connection_error();
+    let mut last_error = engine.last_connection_error();
 
     let (has_key, source, key_hint) = if engine.key_source().is_test_override() {
         match engine.key_source().get() {
             Ok(Some(key)) => (true, "test_memory".to_string(), Some(mask_key(&key))),
             Ok(None) => (false, "none".to_string(), None),
-            Err(_) => (false, "keyring_error".to_string(), None),
+            Err(err) => {
+                if last_error.is_none() {
+                    last_error = Some(err.message);
+                }
+                (false, "keyring_error".to_string(), None)
+            }
         }
     } else {
-        match check_keyring() {
-            (true, source, key_hint) => (true, source, key_hint),
-            _ => {
-                if let Ok(env_key) = std::env::var("SELORA_API_KEY") {
-                    let trimmed = env_key.trim();
-                    if !trimmed.is_empty() {
-                        (
-                            true,
-                            "env: SELORA_API_KEY".to_string(),
-                            Some(mask_key(trimmed)),
-                        )
-                    } else {
-                        (false, "none".to_string(), None)
-                    }
-                } else if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
-                    let trimmed = env_key.trim();
-                    if !trimmed.is_empty() {
-                        (
-                            true,
-                            "env: OPENAI_API_KEY".to_string(),
-                            Some(mask_key(trimmed)),
-                        )
-                    } else {
-                        (false, "none".to_string(), None)
-                    }
-                } else {
-                    (false, "none".to_string(), None)
+        let (keyring_res, keyring_err) = match skarn_settings::keyring::api_key_get() {
+            Ok(Some(key)) => (Some((true, "keyring".to_string(), Some(mask_key(&key)))), None),
+            Ok(None) => (None, None),
+            Err(err) => (None, Some(err.to_string())),
+        };
+        if let Some(found) = keyring_res {
+            found
+        } else if let Some((env_key, var_name)) = skarn_settings::env_var_with_legacy_source(
+            "SKARN_API_KEY",
+            "SELORA_API_KEY", // skarn-v1-migration-compat
+        ) {
+            let trimmed = env_key.trim();
+            let label = if var_name == "SELORA_API_KEY" { // skarn-v1-migration-compat
+                "env: SELORA_API_KEY" // skarn-v1-migration-compat
+            } else {
+                "env: SKARN_API_KEY"
+            };
+            (true, label.to_string(), Some(mask_key(trimmed)))
+        } else if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
+            let trimmed = env_key.trim();
+            if !trimmed.is_empty() {
+                (
+                    true,
+                    "env: OPENAI_API_KEY".to_string(),
+                    Some(mask_key(trimmed)),
+                )
+            } else if let Some(err_msg) = keyring_err {
+                if last_error.is_none() {
+                    last_error = Some(format!("The OS keyring could not be read: {err_msg}"));
                 }
+                (false, "keyring_error".to_string(), None)
+            } else {
+                (false, "none".to_string(), None)
             }
+        } else if let Some(err_msg) = keyring_err {
+            if last_error.is_none() {
+                last_error = Some(format!("The OS keyring could not be read: {err_msg}"));
+            }
+            (false, "keyring_error".to_string(), None)
+        } else {
+            (false, "none".to_string(), None)
         }
     };
 
@@ -562,14 +582,6 @@ pub(crate) fn api_key_status(state: &DesktopState) -> ApiKeyStatusDto {
         key_hint,
         active_model_id,
         last_error,
-    }
-}
-
-fn check_keyring() -> (bool, String, Option<String>) {
-    match skarn_settings::keyring::api_key_get() {
-        Ok(Some(key)) => (true, "keyring".to_string(), Some(mask_key(&key))),
-        Ok(None) => (false, "none".to_string(), None),
-        Err(_) => (false, "keyring_error".to_string(), None),
     }
 }
 
@@ -885,6 +897,83 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.payload, FrontendEvent::Toast(_))),
             "boot probe failure must not emit toast spam"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_env_prefers_skarn_over_selora_and_reports_keyring_error() { // skarn-v1-migration-compat
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let key_slot = std::sync::Arc::new(std::sync::Mutex::new(Err(ProtocolErrorDto {
+            code: "keyring_unavailable".into(),
+            message: "The OS keyring could not be read: simulated vault failure".into(),
+            retryable: true,
+        })));
+        let state = DesktopState::from_settings_path_with_mutable_key(
+            settings_path,
+            std::sync::Arc::clone(&key_slot),
+        );
+        let app = mock_app_handle();
+
+        // Keyring error surfaces into last_connection_error, SkarnStatusChanged, warning toast, and status source.
+        state.run_boot_probe(app.clone()).await;
+        let status = api_key_status(&state);
+        assert!(!status.connected);
+        assert_eq!(status.source, "keyring_error");
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|m| m.contains("simulated vault failure")),
+            "expected keyring error in status.last_error, got {:?}",
+            status.last_error
+        );
+        let events = state.events_after(0);
+        assert!(events.iter().any(|e| matches!(
+            &e.payload,
+            FrontendEvent::Toast(t) if t.severity == skarn_protocol::ToastSeverity::Warning
+        )));
+
+        struct EnvGuard {
+            skarn: Option<std::ffi::OsString>,
+            selora: Option<std::ffi::OsString>, // skarn-v1-migration-compat
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.skarn {
+                    Some(v) => std::env::set_var("SKARN_API_KEY", v),
+                    None => std::env::remove_var("SKARN_API_KEY"),
+                }
+                match &self.selora {
+                    Some(v) => std::env::set_var("SELORA_API_KEY", v), // skarn-v1-migration-compat
+                    None => std::env::remove_var("SELORA_API_KEY"), // skarn-v1-migration-compat
+                }
+            }
+        }
+        let _env_lock = crate::commands::API_KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = EnvGuard {
+            skarn: std::env::var_os("SKARN_API_KEY"),
+            selora: std::env::var_os("SELORA_API_KEY"), // skarn-v1-migration-compat
+        };
+        std::env::remove_var("SKARN_API_KEY");
+        std::env::remove_var("SELORA_API_KEY"); // skarn-v1-migration-compat
+
+        // Precedence check: SKARN_API_KEY wins over SELORA_API_KEY; SELORA_API_KEY falls back cleanly. // skarn-v1-migration-compat
+        assert_eq!(
+            skarn_settings::env_var_with_legacy_source("SKARN_API_KEY", "SELORA_API_KEY"), // skarn-v1-migration-compat
+            None
+        );
+        std::env::set_var("SELORA_API_KEY", "sk-legacy-env"); // skarn-v1-migration-compat
+        assert_eq!(
+            skarn_settings::env_var_with_legacy_source("SKARN_API_KEY", "SELORA_API_KEY"), // skarn-v1-migration-compat
+            Some(("sk-legacy-env".into(), "SELORA_API_KEY")) // skarn-v1-migration-compat
+        );
+        std::env::set_var("SKARN_API_KEY", "sk-primary-env");
+        assert_eq!(
+            skarn_settings::env_var_with_legacy_source("SKARN_API_KEY", "SELORA_API_KEY"), // skarn-v1-migration-compat
+            Some(("sk-primary-env".into(), "SKARN_API_KEY"))
         );
     }
 }

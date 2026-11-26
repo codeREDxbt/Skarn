@@ -5,7 +5,7 @@
 // warning/error, manual × dismissal, fade-only enter/exit. Protocol toasts
 // are keyed by the event's sequence; locally generated command-error toasts
 // use negative ids. Accepted toasts also append to a bounded notification
-// history (newest first, max 50) persisted under `selora:notification_history`.
+// history (newest first, max 50) persisted under `skarn:notification_history`.
 import { readTokenNumber } from '../layout/dom-tokens';
 import type { ProtocolError, ToastSeverity } from '../../bridge/bridge';
 import { playCue } from '../sound/sound-store';
@@ -19,7 +19,7 @@ export const TOAST_MAX_VISIBLE = 3;
 
 /** Z5a: the notification center keeps the newest 50 entries. */
 export const NOTIFICATION_HISTORY_MAX = 50;
-export const NOTIFICATION_HISTORY_KEY = 'selora:notification_history';
+export const NOTIFICATION_HISTORY_KEY = 'skarn:notification_history';
 
 export type Toast = {
   id: number;

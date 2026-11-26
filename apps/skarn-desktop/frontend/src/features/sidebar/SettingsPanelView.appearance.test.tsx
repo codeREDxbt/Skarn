@@ -30,7 +30,7 @@ describe('SettingsPanelView appearance and keymap', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Theme' }));
     const theme = screen.getByLabelText('Color Theme') as HTMLSelectElement;
     expect(Array.from(theme.options).map((option) => option.value)).toEqual([
-      'selora-dark',
+      'skarn-dark',
       'galaxy',
       'dark',
       'light',

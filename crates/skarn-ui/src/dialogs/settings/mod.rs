@@ -610,11 +610,11 @@ impl SettingsDialog {
     }
 
     fn pane_ui(&mut self, ui: &mut egui::Ui) {
-        // The theme field exists in the schema but only "selora-dark" is
+        // The theme field exists in the schema but only "skarn-dark" is
         // honored in Lite (Phase 2f brief) — rendered read-only.
         label_style(ui, "Theme");
         value_style(ui, &self.settings.ui.theme.clone());
-        note_style(ui, "Only selora-dark is available in this edition.");
+        note_style(ui, "Only skarn-dark is available in this edition.");
 
         field_gap(ui);
         label_style(ui, "Sidebar Width");

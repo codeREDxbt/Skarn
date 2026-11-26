@@ -1,6 +1,6 @@
 //! In-app updates (UI_SPEC.md §11, RELEASE.md §4).
 //!
-//! The release pipeline publishes `Selora-IDE-Setup-<version>.exe` and its
+//! The release pipeline publishes `Skarn-Setup-<version>.exe` and its
 //! `.sha256` on every GitHub release. This module checks for a newer tag,
 //! downloads the installer, verifies the published digest and Authenticode
 //! signature, and hands the file to Windows. The installer's `AppId` is stable,
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::Emitter;
 
 /// Progress event the UpdateDialog listens for.
-pub const UPDATE_PROGRESS_EVENT: &str = "selora:update-progress";
+pub const UPDATE_PROGRESS_EVENT: &str = "skarn:update-progress";
 
 /// Stage 0 kill-switch: mirrors [`skarn_ai::updates::UPDATES_ENABLED`] so
 /// `check_for_update` and `install_update` make zero network calls until
@@ -196,7 +196,7 @@ fn verify_authenticode(_: &std::path::Path) -> Result<(), ProtocolErrorDto> {
 ///
 /// `/CLOSEAPPLICATIONS` lets Inno Setup close a still-running instance;
 /// `/NORESTART` suppresses a reboot prompt. The chained `start` reopens
-/// Selora IDE once the installer exits, which `/SILENT` would otherwise skip
+/// Skarn once the installer exits, which `/SILENT` would otherwise skip
 /// (`[Run]` is `skipifsilent`).
 fn launch_installer(setup: &std::path::Path) -> Result<(), ProtocolErrorDto> {
     let exe = std::env::current_exe()
@@ -273,10 +273,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn unsigned_or_missing_installer_is_rejected() {
-        let missing = update_dir().join("selora-nonexistent-signature-test.exe");
+        let missing = update_dir().join("skarn-nonexistent-signature-test.exe");
         assert!(verify_authenticode(&missing).is_err());
         let unsigned =
-            std::env::temp_dir().join(format!("selora-unsigned-{}.exe", std::process::id()));
+            std::env::temp_dir().join(format!("skarn-unsigned-{}.exe", std::process::id()));
         std::fs::write(&unsigned, b"unsigned installer").unwrap();
         let result = verify_authenticode(&unsigned);
         std::fs::remove_file(&unsigned).unwrap();

@@ -63,7 +63,7 @@ describe('editor persistence', () => {
     stop();
     expect(mocks.listeners.size).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
-    expect(localStorage.getItem('selora:editor-session:root-a')).not.toContain('text');
+    expect(localStorage.getItem('skarn:editor-session:root-a')).not.toContain('text');
   });
 
   it('keeps case-sensitive workspace roots separate', () => {
@@ -72,8 +72,8 @@ describe('editor persistence', () => {
     const stop = startEditorPersistence();
     mocks.app.bootstrap = { workspace: { root: '/work/project', id: 'b' }, buffers: [], active_buffer_id: null };
     for (const listener of mocks.listeners) listener();
-    expect(JSON.parse(localStorage.getItem('selora:editor-session:/work/Project')!).files[0].path).toBe('upper.txt');
-    expect(JSON.parse(localStorage.getItem('selora:editor-session:/work/project')!).files).toEqual([]);
+    expect(JSON.parse(localStorage.getItem('skarn:editor-session:/work/Project')!).files[0].path).toBe('upper.txt');
+    expect(JSON.parse(localStorage.getItem('skarn:editor-session:/work/project')!).files).toEqual([]);
     stop();
   });
 
@@ -87,7 +87,7 @@ describe('editor persistence', () => {
     mocks.store.pinnedPaths = ['clean.txt', 'dirty.txt'];
     mocks.store.previewPath = 'dirty.txt';
     const stop = startEditorPersistence();
-    const session = JSON.parse(localStorage.getItem('selora:editor-session:root-a')!);
+    const session = JSON.parse(localStorage.getItem('skarn:editor-session:root-a')!);
     expect(session.files.map((file: { path: string }) => file.path)).toEqual(['clean.txt']);
     expect(session.activePath).toBeNull();
     expect(session.pinnedPaths).toEqual(['clean.txt']);
@@ -105,7 +105,7 @@ describe('editor persistence', () => {
     mocks.store.pinnedPaths = ['a.txt'];
     mocks.store.previewPath = 'b.txt';
     const stop = startEditorPersistence();
-    const session = JSON.parse(localStorage.getItem('selora:editor-session:root-a')!);
+    const session = JSON.parse(localStorage.getItem('skarn:editor-session:root-a')!);
     expect(session.activePath).toBe('b.txt');
     expect(session.pinnedPaths).toEqual(['a.txt']);
     expect(session.previewPath).toBe('b.txt');
@@ -113,7 +113,7 @@ describe('editor persistence', () => {
   });
 
   it('reopens saved tabs and applies pins, preview, and the active tab', async () => {
-    localStorage.setItem('selora:editor-session:root-a', JSON.stringify({
+    localStorage.setItem('skarn:editor-session:root-a', JSON.stringify({
       files: [{ path: 'a.txt', selection: null }],
       activePath: 'a.txt',
       pinnedPaths: ['a.txt'],
@@ -135,7 +135,7 @@ describe('editor persistence', () => {
       active: { line: 3, utf16_column: 2 },
       version: 1,
     };
-    localStorage.setItem('selora:editor-session:root-a', JSON.stringify({
+    localStorage.setItem('skarn:editor-session:root-a', JSON.stringify({
       files: [{ path: 'a.txt', selection }],
       activePath: 'a.txt',
     }));
@@ -147,7 +147,7 @@ describe('editor persistence', () => {
   });
 
   it('stops restoring the old workspace after a switch', async () => {
-    localStorage.setItem('selora:editor-session:root-a', JSON.stringify({ files: [{ path: 'a.txt' }, { path: 'b.txt' }], activePath: null }));
+    localStorage.setItem('skarn:editor-session:root-a', JSON.stringify({ files: [{ path: 'a.txt' }, { path: 'b.txt' }], activePath: null }));
     let complete!: () => void;
     mocks.openFile.mockImplementation(() => new Promise<void>((resolve) => { complete = resolve; }));
     const stop = startEditorPersistence();

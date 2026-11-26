@@ -1,5 +1,5 @@
 export type LocalEditorPreferences = { autoSave: boolean; autoSaveDelay: number; restoreSession: boolean };
-const KEY = 'selora:editor-preferences';
+const KEY = 'skarn:editor-preferences';
 const defaults: LocalEditorPreferences = { autoSave: false, autoSaveDelay: 1000, restoreSession: true };
 const listeners = new Set<() => void>();
 

@@ -1,4 +1,4 @@
-# Generate selora-ide.ico / selora-ide-256.png / selora-ide-512.png from the
+# Generate skarn.ico / skarn-256.png / skarn-512.png from the
 # brand mark's construction (assets/icons/selora-ide-mono.svg is the source of
 # truth; this script replicates it exactly — ellipse rx=8 ry=2 stroke 1
 # rotated 20° clockwise, core r=4, satellite r=1 at the ring's far end — on a
@@ -48,12 +48,12 @@ def render(size: int) -> Image.Image:
 
 def main() -> None:
     png256 = render(256)
-    png256.save(HERE / "selora-ide-256.png")
-    render(512).save(HERE / "selora-ide-512.png")
+    png256.save(HERE / "skarn-256.png")
+    render(512).save(HERE / "skarn-512.png")
     # The Windows icon: BMP entries up to 48, PNG-compressed 256 (PIL packs
     # both from one call).
     png256.save(
-        HERE / "selora-ide.ico",
+        HERE / "skarn.ico",
         sizes=[(16, 16), (32, 32), (48, 48), (256, 256)],
     )
 
@@ -70,9 +70,9 @@ def main() -> None:
     small.save(HERE / "wizard_small.bmp")
 
     for name in (
-        "selora-ide.ico",
-        "selora-ide-256.png",
-        "selora-ide-512.png",
+        "skarn.ico",
+        "skarn-256.png",
+        "skarn-512.png",
         "wizard_large.bmp",
         "wizard_small.bmp",
     ):

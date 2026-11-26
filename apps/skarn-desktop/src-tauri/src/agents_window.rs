@@ -167,7 +167,7 @@ pub async fn open_agents_window(
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             if let Some(target) = navigation.accept(target) {
-                app.emit_to(LABEL, "selora://agents-navigate", &target)
+                app.emit_to(LABEL, "skarn://agents-navigate", &target)
                     .map_err(|cause| error("navigation_failed", cause.to_string()))?;
             }
             agents
@@ -230,7 +230,7 @@ pub async fn show_session_in_main_window(
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| error("window_missing", "The editor window is unavailable."))?;
-    app.emit_to("main", "selora://main-session-navigate", &target)
+    app.emit_to("main", "skarn://main-session-navigate", &target)
         .map_err(|cause| error("navigation_failed", cause.to_string()))?;
     focus(&main)
 }
@@ -365,7 +365,7 @@ fn build_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, Protocol
     let url = tauri::WebviewUrl::App("index.html?surface=agents".into());
 
     let agents = tauri::WebviewWindowBuilder::new(app, LABEL, url)
-        .title("Selora Agents")
+        .title("Skarn Agents")
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(
             960.0_f64.min(geometry.width),
