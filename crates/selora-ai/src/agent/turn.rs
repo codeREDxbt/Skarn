@@ -30,7 +30,9 @@ use uuid::Uuid;
 use super::router::{self, ToolContext, ToolOutcome};
 use super::{plan, AgentDecision, ApprovalCard, ApprovalId};
 use crate::chat_types::{ToolCall, ToolCallAccumulator, ToolResult, ToolSpec};
-use crate::types::{compute_cost_usd, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model};
+use crate::types::{
+    compute_cost_usd, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model, ToolCapability,
+};
 
 // ---------------------------------------------------------------------------
 // Caps (§17.3 — defaults; the user tunes them via settings `agent.*`)
@@ -887,6 +889,36 @@ where
     let end: Option<TurnEnd>;
     let mut ui_gone = false;
 
+    if !input.manifest.is_empty() && model.tool_capability != ToolCapability::Supported {
+        let reason = match model.tool_capability {
+            ToolCapability::Unsupported => format!(
+                "Model '{}' does not support tool calling and cannot run agent turns. Choose a tool-capable model.",
+                model.id
+            ),
+            ToolCapability::Unknown => format!(
+                "Tool calling capability for model '{}' is unknown and could not be verified. Choose a verified tool-capable model or verify capability first.",
+                model.id
+            ),
+            ToolCapability::Supported => unreachable!(),
+        };
+        let report = AgentTurnReport {
+            final_message: String::new(),
+            conversation,
+            summary: AgentSummary {
+                iterations: 0,
+                tools_used: 0,
+                approved: 0,
+                denied: 0,
+                tokens: 0,
+                cost_usd: 0.0,
+                completed: false,
+            },
+            end: TurnEnd::Failed(reason),
+        };
+        let _ = emit(&events, AgentEvent::TurnDone(report.clone()));
+        return report;
+    }
+
     'turn: loop {
         // --- the caps, checked before every round ------------------------
         if let Some(budget) = caps.context_budget_tokens() {
@@ -964,8 +996,10 @@ where
         if let Some(temp) = input.temperature {
             request = request.with_temperature(temp as f32);
         }
-        if let Some(ref effort) = input.reasoning_effort {
-            request = request.with_reasoning_effort(Some(effort.clone()));
+        if !model.reasoning_capability.is_unsupported() {
+            if let Some(ref effort) = input.reasoning_effort {
+                request = request.with_reasoning_effort(Some(effort.clone()));
+            }
         }
         let round = stream_round_gated(&mut chat, request, &events, &mut decisions, deadline).await;
         ui_gone |= round.ui_gone;
@@ -1322,7 +1356,9 @@ mod tests {
             price_per_1k_input: 0.010,
             price_per_1k_output: 0.030,
             supports_streaming: true,
-            supports_tools: true,
+            tool_capability: ToolCapability::Supported,
+            reasoning_capability: crate::types::ReasoningCapability::Unknown,
+            available: true,
             family: "test".into(),
         }
     }
@@ -3486,5 +3522,67 @@ mod tests {
         assert_eq!(denied.content, DENIED_MESSAGE);
         assert!(!denied.ok);
         assert_eq!(denied.id, "call_d");
+    }
+
+    #[tokio::test]
+    async fn run_agent_turn_fails_closed_before_request_when_tool_capability_not_supported() {
+        let root = unique_temp_root("tool-gate-turn");
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        for capability in [ToolCapability::Unsupported, ToolCapability::Unknown] {
+            let (chat, requests) = ScriptedChat::new(vec![]);
+            let ctx = ToolContext::new(&root, router::AgentToolSettings::default());
+            let runner = RouterToolRunner::new(ctx);
+            let (events_tx, _events_rx) = mpsc::unbounded_channel();
+            let (_decision_tx, decision_rx) = mpsc::unbounded_channel::<TurnDecision>();
+
+            let mut gated_model = model();
+            gated_model.tool_capability = capability;
+            let input = TurnInput::new(gated_model, conversation()).with_manifest(manifest());
+
+            let report = run_agent_turn(input, chat, runner, events_tx, decision_rx).await;
+            assert!(
+                matches!(report.end, TurnEnd::Failed(_)),
+                "expected agent turn to fail closed for {capability:?}"
+            );
+            assert!(
+                requests.lock().unwrap().is_empty(),
+                "no chat stream request may be dispatched for {capability:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn run_agent_turn_omits_reasoning_effort_when_model_unsupported_and_preserves_native() {
+        let root = unique_temp_root("reasoning-cap-turn");
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        let (chat_unsup, reqs_unsup) = ScriptedChat::new(vec![answer_round("ok", 0.0)]);
+        let runner_unsup = RouterToolRunner::new(ToolContext::new(&root, router::AgentToolSettings::default()));
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (_dtx1, drx1) = mpsc::unbounded_channel::<TurnDecision>();
+        let mut plain_model = model();
+        plain_model.reasoning_capability = crate::types::ReasoningCapability::Unsupported;
+        let input1 = TurnInput::new(plain_model, conversation())
+            .with_manifest(manifest())
+            .with_reasoning_effort("max");
+        let _ = run_agent_turn(input1, chat_unsup, runner_unsup, tx1, drx1).await;
+        assert!(reqs_unsup.lock().unwrap()[0].reasoning_effort.is_none());
+
+        let (chat_nat, reqs_nat) = ScriptedChat::new(vec![answer_round("ok", 0.0)]);
+        let runner_nat = RouterToolRunner::new(ToolContext::new(&root, router::AgentToolSettings::default()));
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (_dtx2, drx2) = mpsc::unbounded_channel::<TurnDecision>();
+        let mut thinking_model = model();
+        thinking_model.reasoning_capability = crate::types::ReasoningCapability::Native;
+        let input2 = TurnInput::new(thinking_model, conversation())
+            .with_manifest(manifest())
+            .with_reasoning_effort("none");
+        let _ = run_agent_turn(input2, chat_nat, runner_nat, tx2, drx2).await;
+        assert_eq!(reqs_nat.lock().unwrap()[0].reasoning_effort.as_deref(), Some("none"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

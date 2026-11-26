@@ -39,7 +39,7 @@ import {
 } from '../../../components/icons';
 import { BorderBeam } from '../presence/BorderBeam';
 import { VoiceBeam } from '../presence/VoiceBeam';
-import type { FileTreeNode, Model } from '../../../bridge/bridge';
+import type { FileTreeNode, Model, ToolCapability } from '../../../bridge/bridge';
 import type { PermissionMode, ReasoningEffort } from '../types';
 import { agentStore, getComposerGate, resolveModelId } from '../agent-store';
 import { activeEditorContext, editorStore } from '../../editor/editor-store';
@@ -66,6 +66,10 @@ type ModelItem = {
   name: string;
   provider: string;
   colorClass: string;
+  available: boolean;
+  toolCapability: ToolCapability;
+  reasoningCapability: 'native' | 'unsupported' | 'unknown';
+  reasoningModes: string[];
 };
 
 const MODE_OPTIONS: Array<{
@@ -104,6 +108,7 @@ const MODE_OPTIONS: Array<{
 ];
 
 const EFFORT_OPTIONS: Array<{ id: ReasoningEffort; label: string; desc: string }> = [
+  { id: 'none', label: 'Off', desc: 'Disable provider thinking when supported' },
   { id: 'max', label: 'Max', desc: 'Thorough, multi-step chain of thought' },
   { id: 'standard', label: 'Standard', desc: 'Balanced speed and analysis' },
   { id: 'quick', label: 'Quick', desc: 'Fast, minimal thought overhead' },
@@ -177,56 +182,45 @@ function baseName(path: string): string {
 /** Provider label derived from the real backend model id (no fake metadata). */
 function describeModel(model: Model): ModelItem {
   const idLower = `${model.id} ${model.display_name}`.toLowerCase();
-  if (idLower.includes('claude') || idLower.includes('anthropic')) {
-    return {
-      id: model.id,
-      name: model.display_name || model.id,
-      provider: 'Anthropic',
-      colorClass: 'provider-anthropic',
-    };
-  }
-  if (
-    idLower.includes('gpt') ||
-    idLower.includes('openai') ||
-    idLower.includes('o1') ||
-    idLower.includes('o3')
-  ) {
-    return {
-      id: model.id,
-      name: model.display_name || model.id,
-      provider: 'OpenAI',
-      colorClass: 'provider-openai',
-    };
-  }
-  if (idLower.includes('deepseek')) {
-    return {
-      id: model.id,
-      name: model.display_name || model.id,
-      provider: 'DeepSeek',
-      colorClass: 'provider-deepseek',
-    };
-  }
-  if (idLower.includes('glm') || idLower.includes('zhipu')) {
-    return {
-      id: model.id,
-      name: model.display_name || model.id,
-      provider: 'Zhipu',
-      colorClass: 'provider-zhipu',
-    };
-  }
-  if (idLower.includes('ollama') || idLower.includes('llama') || idLower.includes('qwen')) {
-    return {
-      id: model.id,
-      name: model.display_name || model.id,
-      provider: 'Local',
-      colorClass: 'provider-custom',
-    };
-  }
+  const available = model.available;
+  const toolCapability: ToolCapability = model.tool_capability ?? 'unknown';
+  const reasoningCapability = model.reasoning_capability ?? 'unknown';
+  const reasoningModes = model.reasoning_modes ?? ['none', 'quick', 'standard', 'max'];
+  const providerMeta = (() => {
+    if (idLower.includes('claude') || idLower.includes('anthropic')) {
+      return { provider: 'Anthropic', colorClass: 'provider-anthropic' };
+    }
+    if (
+      idLower.includes('gpt') ||
+      idLower.includes('openai') ||
+      idLower.includes('o1') ||
+      idLower.includes('o3')
+    ) {
+      return { provider: 'OpenAI', colorClass: 'provider-openai' };
+    }
+    if (idLower.includes('deepseek')) {
+      return { provider: 'DeepSeek', colorClass: 'provider-deepseek' };
+    }
+    if (idLower.includes('glm') || idLower.includes('zhipu')) {
+      return { provider: 'Zhipu', colorClass: 'provider-zhipu' };
+    }
+    if (idLower.includes('gemini') || idLower.includes('google')) {
+      return { provider: 'Google', colorClass: 'provider-custom' };
+    }
+    if (idLower.includes('ollama') || idLower.includes('llama') || idLower.includes('qwen')) {
+      return { provider: 'Local', colorClass: 'provider-custom' };
+    }
+    return { provider: 'Provider', colorClass: 'provider-custom' };
+  })();
   return {
     id: model.id,
     name: model.display_name || model.id,
-    provider: 'Provider',
-    colorClass: 'provider-custom',
+    provider: providerMeta.provider,
+    colorClass: providerMeta.colorClass,
+    available,
+    toolCapability,
+    reasoningCapability,
+    reasoningModes,
   };
 }
 
@@ -561,23 +555,39 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     MODE_OPTIONS.find((m) => m.id === permissionMode) || MODE_OPTIONS[0];
   const CurrentModeIcon = currentMode.icon;
 
-  const currentEffort =
-    EFFORT_OPTIONS.find((e) => e.id === reasoningEffort) || EFFORT_OPTIONS[1];
-
-  const autoApplyArmed = permissionMode === 'full';
-
   const resolvedModels: ModelItem[] = useMemo(() => {
     // Settings > AI Gateway can disable whole providers. Keep the currently
-    // selected model visible so a live session is never broken implicitly.
+    // selected model visible so a live session is never broken implicitly,
+    // while hiding retired/unavailable models from active recommendations.
     const disabled = appSnapshot.bootstrap?.settings.disabled_providers ?? [];
     return availableModels
       .filter((model) => {
         if (model.id === selectedModelId) return true;
+        if (!model.available) return false;
         const provider = providerIdForModel(model.id, model.display_name ?? '');
         return !provider || !disabled.includes(provider);
       })
       .map(describeModel);
   }, [availableModels, selectedModelId, appSnapshot.bootstrap?.settings.disabled_providers]);
+
+  const matchedModel = resolvedModels.find(
+    (m) => m.id === selectedModelId || m.name === selectedModelId,
+  );
+
+  const availableEffortOptions = useMemo(() => {
+    const modes = matchedModel?.reasoningModes;
+    if (!modes || modes.length === 0) return EFFORT_OPTIONS;
+    const filtered = EFFORT_OPTIONS.filter((opt) => modes.includes(opt.id));
+    return filtered.length > 0 ? filtered : EFFORT_OPTIONS;
+  }, [matchedModel]);
+
+  const currentEffort =
+    availableEffortOptions.find((e) => e.id === reasoningEffort) ||
+    EFFORT_OPTIONS.find((e) => e.id === reasoningEffort) ||
+    availableEffortOptions[0] ||
+    EFFORT_OPTIONS[2];
+
+  const autoApplyArmed = permissionMode === 'full';
 
   const filteredModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
@@ -590,13 +600,17 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     );
   }, [resolvedModels, modelSearch]);
 
-  const matchedModel = resolvedModels.find(
-    (m) => m.id === selectedModelId || m.name === selectedModelId,
-  );
   const sendableModelId = resolveModelId(storeState);
   const displayModelName = matchedModel
-    ? matchedModel.name
-    : sendableModelId ?? (availableModels.length === 0 ? 'No model' : 'Select a model');
+    ? matchedModel.available
+      ? matchedModel.name
+      : `${matchedModel.name} (Unavailable)`
+    : sendableModelId ??
+      (selectedModelId.trim()
+        ? `${selectedModelId.trim()} (Unavailable)`
+        : availableModels.length === 0
+        ? 'No model'
+        : 'Select a model');
 
   const sendBlocked = !inFlight && !gate.ready;
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
@@ -705,19 +719,6 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
           className="composer-send-blocked"
           role="status"
           aria-live="polite"
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 6,
-            margin: '0 10px 6px',
-            padding: '6px 8px',
-            fontSize: 11,
-            lineHeight: 1.4,
-            color: 'var(--fg-secondary, var(--c-a1a1aa))',
-            background: 'var(--c-rgba-251-191-36-0p08)',
-            border: '1px solid var(--c-rgba-251-191-36-0p28)',
-            borderRadius: 6,
-          }}
         >
           <ShieldAlert size={12} className="text-amber-400" aria-hidden="true" />
           <span>{gate.message}</span>
@@ -834,13 +835,33 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
                       selectedModelId === m.id ||
                       selectedModelId === m.name ||
                       sendableModelId === m.id;
+                    const disabledForAgent =
+                      !m.available || m.toolCapability === 'unsupported';
+                    const capabilityTag = !m.available
+                      ? 'Unavailable'
+                      : m.toolCapability === 'unsupported'
+                      ? 'No tools'
+                      : m.toolCapability === 'unknown'
+                      ? 'Unverified'
+                      : null;
                     return (
                       <button
                         key={m.id}
                         type="button"
                         className={`floating-menu-item ${isSelected ? 'is-selected' : ''}`}
                         role="menuitem"
+                        disabled={disabledForAgent}
+                        title={
+                          !m.available
+                            ? 'Model is retired/unavailable and cannot be used.'
+                            : m.toolCapability === 'unsupported'
+                            ? 'Model does not support tool calling for agent turns.'
+                            : m.toolCapability === 'unknown'
+                            ? 'Tool support is unverified and will be validated before running agent tools.'
+                            : undefined
+                        }
                         onClick={() => {
+                          if (disabledForAgent) return;
                           agentStore.setSelectedModel(m.id);
                           setActiveMenu(null);
                         }}
@@ -852,6 +873,16 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
                             <span className={`provider-badge ${m.colorClass}`}>
                               {m.provider}
                             </span>
+                            {m.reasoningCapability === 'native' && (
+                              <span className="provider-badge provider-custom">
+                                Thinking
+                              </span>
+                            )}
+                            {capabilityTag && (
+                              <span className="provider-badge provider-custom">
+                                {capabilityTag}
+                              </span>
+                            )}
                           </div>
                           {m.id !== m.name && <div className="item-desc">{m.id}</div>}
                         </div>
@@ -886,8 +917,14 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
       {/* Reasoning Depth Dropdown */}
       {activeMenu === 'effort' && (
         <div id="composer-effort-menu" className="composer-floating-menu effort-menu scale-in-menu" role="menu">
-          <div className="floating-menu-header">Reasoning Depth</div>
-          {EFFORT_OPTIONS.map((opt) => {
+          <div className="floating-menu-header">
+            {matchedModel?.reasoningCapability === 'unsupported'
+              ? 'Prompt Depth (No Native Thinking)'
+              : matchedModel?.reasoningCapability === 'native'
+              ? 'Native Thinking Mode'
+              : 'Reasoning Depth'}
+          </div>
+          {availableEffortOptions.map((opt) => {
             const isSelected = opt.id === reasoningEffort;
             return (
               <button
@@ -1018,19 +1055,6 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
               className="composer-auto-apply-armed"
               role="status"
               title="Full auto-apply is active: file writes, edits and deletes apply immediately for this session. Bash commands still require approval."
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '2px 6px',
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: '0.02em',
-                color: 'var(--c-34d399)',
-                background: 'var(--c-rgba-16-185-129-0p12)',
-                border: '1px solid var(--c-rgba-16-185-129-0p35)',
-                borderRadius: 4,
-              }}
             >
               <ShieldCheck size={11} aria-hidden="true" />
               Auto-apply armed

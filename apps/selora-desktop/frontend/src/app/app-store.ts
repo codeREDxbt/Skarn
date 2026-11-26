@@ -99,6 +99,7 @@ let replaying = false;
 /** One boot-trace mark per process; rebootstrap after a gap must not repeat it. */
 let readyMarked = false;
 let agentsSnapshotSequence: number | null = null;
+let liveAgentsRefreshInFlight: Promise<void> | null = null;
 const agentEventTypes = new Set([
   'chat_delta', 'chat_completed', 'chat_failed', 'tool_call_started', 'tool_result',
   'approval_needed', 'agent_state_changed', 'agent_turn_done', 'plan_state_changed', 'todos_changed',
@@ -205,7 +206,7 @@ export async function retryBootstrap(): Promise<void> {
 /** Refresh the bootstrap snapshot (e.g. after API key connect/disconnect). */
 export async function refreshBootstrap(): Promise<BootstrapState | null> {
   if (isNativeFrontend()) {
-    await runBootstrapFlow();
+    await runBootstrapFlow({ preserveReadyUi: true });
     return state.bootstrap;
   }
   try {
@@ -223,11 +224,42 @@ export async function refreshBootstrap(): Promise<BootstrapState | null> {
   }
 }
 
-async function runBootstrapFlow(): Promise<void> {
+async function refreshLiveAgentsSnapshot(gen: number): Promise<void> {
+  if (!isNativeFrontend() || gen !== generation) return;
+  if (liveAgentsRefreshInFlight) return liveAgentsRefreshInFlight;
+  liveAgentsRefreshInFlight = (async () => {
+    try {
+      const agents = await getAgentsSnapshot();
+      if (gen !== generation) return;
+      const bootstrap = state.bootstrap;
+      if (!bootstrap) return;
+      if (
+        agents.core_instance_id === bootstrap.core_instance_id &&
+        agents.workspace_id === bootstrap.workspace.id
+      ) {
+        agentStore.hydrateAgents(agents);
+        agentsSnapshotSequence = agents.snapshot_sequence;
+        notify();
+      }
+    } finally {
+      liveAgentsRefreshInFlight = null;
+    }
+  })();
+  return liveAgentsRefreshInFlight;
+}
+
+async function runBootstrapFlow(options: { preserveReadyUi?: boolean } = {}): Promise<void> {
   const gen = ++generation;
+  const preserveReadyUi = Boolean(
+    options.preserveReadyUi && state.phase === 'ready' && state.bootstrap !== null,
+  );
   // Reset the held state *and* the gate before subscribing (§3.4): the gate
-  // is seeded null so the boot toast still replays.
-  state = emptyState();
+  // is seeded null so the boot toast still replays. When refreshing a live
+  // ready shell (e.g. model catalog or session bootstrap update), keep the
+  // existing shell mounted instead of flashing the Connecting screen.
+  if (!preserveReadyUi) {
+    state = emptyState();
+  }
   lastSequence = null;
   agentsSnapshotSequence = null;
   replaying = true;
@@ -363,8 +395,9 @@ function reduceEvent(event: EventEnvelope): void {
   if (agentsSnapshotSequence !== null && event.sequence <= agentsSnapshotSequence && agentEventTypes.has(payload.type)) return;
   if (isNativeFrontend() && (payload.type === 'chat_delta' || payload.type === 'agent_state_changed') &&
       agentStore.needsRequestHydration(payload.payload)) {
-    // Another webview or the backend queue started this request. Fetch its user row and request identity together.
-    void runBootstrapFlow();
+    // Another webview or the backend queue started this request. Hydrate the
+    // live agents snapshot in place without tearing down the ready UI.
+    void refreshLiveAgentsSnapshot(generation);
     return;
   }
   if (['chat_delta', 'chat_completed', 'chat_failed', 'tool_call_started', 'tool_result',
@@ -376,7 +409,7 @@ function reduceEvent(event: EventEnvelope): void {
       if (isNativeFrontend()) {
         // An earlier bootstrap cannot overwrite projections from a later agents snapshot.
         if (agentsSnapshotSequence !== null && event.sequence <= agentsSnapshotSequence) return;
-        void runBootstrapFlow();
+        void runBootstrapFlow({ preserveReadyUi: true });
         return;
       }
       // Z4 — a workspace opened: the id, buffers and tree all move at once.
@@ -508,7 +541,10 @@ case 'plan_state_changed':
         if (payload.payload.active_model_id) {
           if (!isNativeFrontend()) agentStore.setSelectedModel(payload.payload.active_model_id);
         }
-        agentStore.setAvailableModels(payload.payload.models);
+        agentStore.setAvailableModels(
+          payload.payload.models,
+          payload.payload.active_model_id,
+        );
         notify();
       }
       return;

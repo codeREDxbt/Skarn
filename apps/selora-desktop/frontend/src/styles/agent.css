@@ -3450,25 +3450,19 @@
 
 .hero-composer-card {
   position: relative;
-  max-width: 860px;
+  max-width: min(860px, 100%);
   width: calc(100% - var(--space-6));
+  min-width: 0;
   margin: var(--space-2) auto var(--space-4) auto;
-  padding: 10px 14px 10px 14px;
-  background: linear-gradient(180deg, rgba(22, 22, 30, 0.88) 0%, rgba(13, 13, 18, 0.94) 100%);
-  background-image: radial-gradient(ellipse 90% 40% at 50% 0%, rgba(167, 139, 250, 0.08), transparent 75%);
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 12px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-ground, var(--ink-base));
+  border: var(--border-hairline);
+  border-radius: var(--radius-2);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 16px 44px -8px rgba(0, 0, 0, 0.75),
-    0 4px 16px rgba(0, 0, 0, 0.5),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  transition: border-color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm);
   box-sizing: border-box;
   flex-shrink: 0;
   container-type: inline-size;
@@ -3476,30 +3470,16 @@
 }
 
 .hero-composer-card:hover {
-  border-color: rgba(255, 255, 255, 0.18);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 20px 48px -6px rgba(0, 0, 0, 0.8),
-    0 0 0 1px rgba(255, 255, 255, 0.08);
-  transform: translateY(-1px);
+  border-color: var(--ink-line);
 }
 
 .hero-composer-card.is-focused,
 .hero-composer-card:focus-within {
-  border-color: rgba(167, 139, 250, 0.45);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 0 0 1px rgba(167, 139, 250, 0.35),
-    0 0 24px rgba(139, 92, 246, 0.18),
-    0 20px 48px rgba(0, 0, 0, 0.8);
+  border-color: var(--ink-focus);
 }
 
 .hero-composer-card.is-in-flight {
-  border-color: var(--c-rgba-56-189-248-0p4);
-  box-shadow:
-    0 0 0 1px var(--c-rgba-56-189-248-0p25),
-    0 16px 44px rgba(0, 0, 0, 0.8),
-    0 0 28px var(--c-rgba-56-189-248-0p16);
+  border-color: var(--accent, var(--c-rgba-56-189-248-0p4));
 }
 
 /* Attachments row (ZCode context chips) */
@@ -3616,10 +3596,9 @@
 .composer-floating-menu {
   position: absolute;
   bottom: calc(100% + 6px);
-  background: var(--c-rgba-18-20-24-0p95);
-  border: 1px solid var(--c-rgba-255-255-255-0p12);
+  background: var(--surface-elevated, var(--ink-high));
+  border: var(--border-hairline);
   border-radius: var(--radius-2);
-  box-shadow: 0 12px 36px var(--c-rgba-0-0-0-0p75), 0 0 0 1px var(--c-rgba-255-255-255-0p05);
   padding: 6px;
   z-index: 100;
   display: flex;
@@ -3630,6 +3609,7 @@
   max-height: min(340px, calc(100vh - 220px));
   overflow-y: auto;
   overflow-x: hidden;
+  box-sizing: border-box;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   overscroll-behavior: contain;
@@ -3665,7 +3645,7 @@
 .composer-floating-menu.model-menu {
   right: var(--space-3);
   width: 310px;
-  max-width: calc(100vw - 32px);
+  max-width: calc(100% - 24px);
   max-height: min(360px, calc(100vh - 220px));
   transform-origin: bottom right;
 }
@@ -3673,11 +3653,12 @@
 .composer-floating-menu.effort-menu {
   right: var(--space-3);
   width: 240px;
+  max-width: calc(100% - 24px);
   transform-origin: bottom right;
 }
 
 .floating-menu-header {
-  font-size: 10px;
+  font-size: var(--type-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg-faint);
@@ -3685,7 +3666,7 @@
   font-weight: 600;
   position: sticky;
   top: -6px;
-  background: var(--c-rgba-18-20-24-0p98);
+  background: var(--surface-elevated, var(--ink-high));
   z-index: 2;
   border-bottom: 1px solid var(--c-rgba-255-255-255-0p05);
   margin-bottom: 4px;
@@ -3939,23 +3920,38 @@
   opacity: 1;
 }
 
-/* Toolbar row */
+/* Toolbar row — container-aware wrapping keeps send button inside card edges at every width */
 .composer-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-height: 28px;
+  min-width: 0;
+  width: 100%;
   padding-top: var(--space-2);
+  box-sizing: border-box;
 }
 
-.toolbar-left,
+.toolbar-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .toolbar-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  flex: 0 1 auto;
+  margin-left: auto;
+  max-width: 100%;
   min-width: 0;
-  flex-shrink: 1;
 }
 
 .composer-btn-icon {
@@ -3971,7 +3967,9 @@
   cursor: pointer;
   flex-shrink: 0;
   box-sizing: border-box;
-  transition: all var(--dur-instant) var(--ease-calm);
+  transition: color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .composer-btn-icon:hover {
@@ -3980,51 +3978,104 @@
   border-color: var(--ink-rule);
 }
 
+.composer-btn-icon:focus-visible,
+.composer-pill:focus-visible,
+.composer-send-btn:focus-visible {
+  outline: 2px solid var(--ink-focus);
+  outline-offset: 2px;
+}
+
 .composer-pill {
   height: 28px;
-  padding: 0 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  padding: 0 var(--space-2);
+  background: var(--ink-low);
+  border: var(--border-hairline);
   border-radius: var(--radius-pill);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-1);
   color: var(--fg-muted);
   font-size: var(--type-xs);
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   line-height: 1;
   user-select: none;
   box-sizing: border-box;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.3);
-  transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
 }
 
 .composer-pill:hover {
-  color: var(--fg-bright);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.18);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 2px 6px rgba(0, 0, 0, 0.4);
-  transform: translateY(-0.5px);
+  color: var(--fg-default);
+  background: var(--ink-mid);
+  border-color: var(--ink-line);
+}
+
+.composer-pill:active,
+.composer-send-btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .composer-pill[aria-expanded="true"],
 .composer-pill.is-open {
-  background: rgba(167, 139, 250, 0.12);
-  border-color: rgba(167, 139, 250, 0.35);
-  color: var(--fg-bright);
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  background: var(--ink-mid);
+  border-color: var(--ink-focus);
+  color: var(--fg-default);
 }
 
 .composer-pill .pill-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 160px;
+  min-width: 0;
+  max-width: 148px;
   line-height: 1;
+}
+
+.composer-pill.model-pill {
+  max-width: clamp(92px, 34cqi, 180px);
+}
+
+.composer-pill.effort-pill .pill-text {
+  max-width: 88px;
+}
+
+.composer-pill .pill-chevron {
+  flex-shrink: 0;
+}
+
+.composer-send-blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0 var(--space-2) var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--type-xs);
+  line-height: 1.4;
+  color: var(--fg-muted);
+  background: var(--c-rgba-251-191-36-0p08);
+  border: 1px solid var(--c-rgba-251-191-36-0p28);
+  border-radius: var(--radius-1);
+}
+
+.composer-auto-apply-armed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ok);
+  background: var(--c-rgba-16-185-129-0p12);
+  border: 1px solid var(--c-rgba-16-185-129-0p35);
+  border-radius: var(--radius-1);
 }
 
 .composer-context-badge {
@@ -4036,8 +4087,8 @@
   padding: 0 8px;
   height: 28px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--ink-low);
+  border: var(--border-hairline);
   white-space: nowrap;
   flex-shrink: 0;
   user-select: none;
@@ -4046,22 +4097,20 @@
 }
 
 .composer-context-badge:hover {
-  color: var(--fg-bright);
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg-default);
+  background: var(--ink-mid);
 }
 
 .model-dot {
-  width: 6.5px;
-  height: 6.5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 8px #34d399, 0 0 2px #ffffff;
+  background: var(--ok);
   flex-shrink: 0;
 }
 
 .effort-icon {
-  color: #fbbf24;
-  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.65));
+  color: var(--warn);
   flex-shrink: 0;
 }
 
@@ -4073,70 +4122,60 @@
   height: 16px;
   padding: 0 4px;
   border-radius: var(--radius-pill);
-  background: rgba(34, 197, 94, 0.2);
-  border: 1px solid rgba(34, 197, 94, 0.4);
-  color: #34d399;
-  font-size: 10px;
+  background: var(--c-rgba-16-185-129-0p12);
+  border: 1px solid var(--c-rgba-16-185-129-0p35);
+  color: var(--ok);
+  font-size: var(--type-xs);
   font-weight: 600;
   line-height: 1;
 }
 
-/* Functional Glowing Green Send / Morphing Red Stop Button */
+/* Crisp Send / Stop Action Button */
 .composer-send-btn {
   width: 28px;
   height: 28px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ink-mid);
+  border: var(--border-hairline);
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--fg-muted);
   cursor: pointer;
   flex-shrink: 0;
   box-sizing: border-box;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color var(--dur-instant) var(--ease-calm),
+    background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm),
+    transform var(--dur-instant) var(--ease-calm);
   font-weight: 600;
 }
 
 .composer-send-btn:hover:not(.has-text):not(.is-stop):not(:disabled) {
-  color: var(--fg-bright);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.16);
-  transform: scale(1.05);
+  color: var(--fg-default);
+  background: var(--ink-high);
+  border-color: var(--ink-line);
 }
 
 .composer-send-btn.has-text {
-  background: linear-gradient(135deg, #4ade80 0%, #16a34a 100%);
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  color: #03140a;
-  box-shadow:
-    0 0 16px rgba(34, 197, 94, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.45),
-    inset 0 1px 1.5px rgba(255, 255, 255, 0.7);
+  background: var(--ok);
+  border: 1px solid var(--ok);
+  color: var(--ink-base);
 }
 
 .composer-send-btn.has-text:hover {
-  background: linear-gradient(135deg, #86efac 0%, #22c55e 100%);
-  box-shadow:
-    0 0 22px rgba(34, 197, 94, 0.75),
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    inset 0 1px 2px rgba(255, 255, 255, 0.85);
-  transform: translateY(-1px) scale(1.08);
+  filter: brightness(1.08);
 }
 
 .composer-send-btn.is-stop {
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.35) 0%, rgba(185, 28, 28, 0.5) 100%);
-  border: 1px solid rgba(248, 113, 113, 0.6);
-  color: #fca5a5;
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  background: var(--c-rgba-239-68-68-0p18);
+  border: 1px solid var(--err);
+  color: var(--err);
 }
 
 .composer-send-btn.is-stop:hover {
-  background: rgba(239, 68, 68, 0.5);
-  color: #ffffff;
-  transform: scale(1.08);
+  background: var(--err);
+  color: var(--fg-bright);
 }
 
 /* Prompt Suggestions with Subtle Gradient Border Shimmer */
@@ -4313,7 +4352,7 @@
 }
 
 /* Container Queries for Responsive Collapse */
-@container composer (max-width: 520px) {
+@container composer (max-width: 580px) {
   .effort-pill .pill-text {
     display: none;
   }

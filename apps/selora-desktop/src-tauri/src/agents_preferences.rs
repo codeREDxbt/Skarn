@@ -2,8 +2,9 @@
 //! Permission grants deliberately do not belong in these persisted defaults.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -49,14 +50,14 @@ fn authorize(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
 }
 
-fn path(_app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn path(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
     selora_settings::Settings::settings_dir()
         .map(|directory| directory.join("agent-preferences.json"))
         .map_err(|error| error.to_string())
 }
 
-fn load(app: &tauri::AppHandle) -> Result<AgentPreferences, String> {
-    match std::fs::read(path(app)?) {
+pub(crate) fn load_from_path(path: &Path) -> Result<AgentPreferences, String> {
+    match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| format!("Could not read agent preferences: {error}")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -64,6 +65,136 @@ fn load(app: &tauri::AppHandle) -> Result<AgentPreferences, String> {
         }
         Err(error) => Err(format!("Could not read agent preferences: {error}")),
     }
+}
+
+fn load(_app: &tauri::AppHandle) -> Result<AgentPreferences, String> {
+    load_from_path(&path(_app)?)
+}
+
+/// Persist preferences atomically through the shared `selora-settings` atomic writer
+/// (temp file in the same directory, flush/sync, replace-safe rename).
+pub(crate) fn save_to_path(path: &Path, preferences: &AgentPreferences) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(preferences).map_err(|error| error.to_string())?;
+    selora_settings::write_atomic(path, &bytes)
+        .map_err(|error| format!("Could not save agent preferences: {error}"))
+}
+
+fn save(app: &tauri::AppHandle, preferences: &AgentPreferences) -> Result<(), String> {
+    save_to_path(&path(app)?, preferences)
+}
+
+/// Startup reconciliation between `agent-preferences.json` and legacy `settings.selora.active_model`.
+///
+/// Precedence (idempotent, independent of frontend call order):
+/// 1. Non-empty `agent-preferences.json` `selectedModel` wins and updates legacy `settings.selora.active_model`
+///    if they differ.
+/// 2. Otherwise, non-empty legacy `settings.selora.active_model` migrates into `agent-preferences.json`.
+/// 3. If neither has a selection, returns `Ok(None)`.
+pub(crate) fn reconcile_startup_at(
+    settings_path: &Path,
+    settings: &mut selora_settings::Settings,
+    preferences_path: &Path,
+) -> Result<Option<String>, String> {
+    let mut preferences = load_from_path(preferences_path)?;
+    let pref_model = preferences.selected_model.trim().to_owned();
+    let settings_model = settings
+        .selora
+        .active_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if !pref_model.is_empty() {
+        if settings_model.as_deref() != Some(pref_model.as_str()) {
+            settings.selora.active_model = Some(pref_model.clone());
+            settings
+                .save_to(settings_path)
+                .map_err(|error| format!("Could not migrate active model to settings: {error}"))?;
+        }
+        return Ok(Some(pref_model));
+    }
+
+    if let Some(legacy) = settings_model {
+        preferences.selected_model = legacy.clone();
+        save_to_path(preferences_path, &preferences)?;
+        return Ok(Some(legacy));
+    }
+
+    Ok(None)
+}
+
+/// Persist a backend-resolved active model change (such as initial catalog default
+/// or case canonicalization) into `agent-preferences.json` without overwriting
+/// unrelated fields.
+pub(crate) fn sync_selected_model_to_path(
+    preferences_path: &Path,
+    selected_model: Option<&str>,
+) -> Result<(), String> {
+    let mut preferences = load_from_path(preferences_path)?;
+    let desired = selected_model.unwrap_or_default().trim();
+    if preferences.selected_model.trim() == desired {
+        return Ok(());
+    }
+    preferences.selected_model = desired.to_owned();
+    preferences.revision = preferences.revision.saturating_add(1);
+    save_to_path(preferences_path, &preferences)
+}
+
+/// Keep the in-memory Tauri `AgentPreferencesState` and frontend listeners aligned
+/// when the backend updates the active model (e.g., initial catalog discovery).
+pub(crate) fn sync_managed_state<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    selected_model: Option<&str>,
+) {
+    let Some(state) = app.try_state::<AgentPreferencesState>() else {
+        return;
+    };
+    let Ok(mut guard) = state.0.lock() else {
+        return;
+    };
+    let desired = selected_model.unwrap_or_default().trim();
+    if let Some(prefs) = guard.as_mut() {
+        if prefs.selected_model.trim() != desired {
+            prefs.selected_model = desired.to_owned();
+            prefs.revision = prefs.revision.saturating_add(1);
+            let _ = app.emit("selora://agent-preferences", &*prefs);
+        }
+    }
+}
+
+/// Repair a split model selection left by an older build or by two windows
+/// racing before the synchronization existed.
+///
+/// The shared preference is the user's most recent explicit selection, so it
+/// wins when it differs from the persisted/live fallback. The reverse direction
+/// is used only to migrate an older preference file that has no model yet.
+fn reconcile_selected_model(
+    app: &tauri::AppHandle,
+    preferences: &mut AgentPreferences,
+) -> Result<(), String> {
+    let desktop = app.state::<crate::state::DesktopState>();
+    let active = desktop.sessions().active_model_id();
+    let requested = preferences.selected_model.trim().to_owned();
+
+    if requested.is_empty() {
+        if let Some(active) = active {
+            preferences.selected_model = active;
+            save(app, preferences)?;
+        }
+        return Ok(());
+    }
+
+    if active.as_deref() != Some(requested.as_str()) {
+        let canonical = desktop
+            .set_active_model(app, &requested)
+            .map_err(|error| error.message)?;
+        if preferences.selected_model != canonical {
+            preferences.selected_model = canonical;
+            save(app, preferences)?;
+        }
+    }
+    Ok(())
 }
 
 fn patched(
@@ -93,10 +224,10 @@ fn patched(
         if value.len() > 512 {
             return Err("Selected model ID is too long".into());
         }
-        next.selected_model = value;
+        next.selected_model = value.trim().to_owned();
     }
     if let Some(value) = patch.reasoning_effort {
-        if !matches!(value.as_str(), "quick" | "standard" | "max") {
+        if !matches!(value.as_str(), "none" | "quick" | "standard" | "max") {
             return Err("Unknown reasoning effort".into());
         }
         next.reasoning_effort = value;
@@ -117,9 +248,61 @@ pub fn get_agent_preferences(
     authorize(&window)?;
     let mut guard = state.0.lock().map_err(|error| error.to_string())?;
     if guard.is_none() {
-        *guard = Some(load(&app)?);
+        let mut preferences = load(&app)?;
+        reconcile_selected_model(&app, &mut preferences)?;
+        *guard = Some(preferences);
     }
     Ok(guard.as_ref().expect("preferences initialized").clone())
+}
+
+pub(crate) fn update_preferences_with_saver<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    desktop: &crate::state::DesktopState,
+    state: &AgentPreferencesState,
+    prefs_path: &Path,
+    patch: AgentPreferencesPatch,
+    save_fn: impl FnOnce(&Path, &AgentPreferences) -> Result<(), String>,
+) -> Result<AgentPreferences, String> {
+    let mut guard = state.0.lock().map_err(|error| error.to_string())?;
+    if guard.is_none() {
+        *guard = Some(load_from_path(prefs_path)?);
+    }
+    let current = guard.as_ref().expect("preferences initialized").clone();
+    let selects_model = patch.selected_model.is_some();
+    let mut next = patched(&current, patch)?;
+
+    let previous_active = if selects_model {
+        let previous = desktop.sessions().active_model_id();
+        let requested = next.selected_model.trim();
+        let desired = (!requested.is_empty()).then_some(requested);
+        let canonical = desktop
+            .set_active_model_state(app, desired)
+            .map_err(|error| error.message)?;
+        next.selected_model = canonical.unwrap_or_default();
+        Some(previous)
+    } else {
+        None
+    };
+
+    if let Err(error) = save_fn(prefs_path, &next) {
+        if let Some(previous) = previous_active {
+            // The preference write is the second half of one logical change.
+            // Restore the previous live/persisted model so the next request
+            // cannot observe a half-applied selection.
+            if let Err(rollback) = desktop.set_active_model_state(app, previous.as_deref()) {
+                return Err(format!(
+                    "{error}; the previous model could not be restored: {}",
+                    rollback.message
+                ));
+            }
+        }
+        return Err(error);
+    }
+
+    *guard = Some(next.clone());
+    // Preferences have their own revision domain, not the runtime replay sequence.
+    let _ = app.emit("selora://agent-preferences", &next);
+    Ok(next)
 }
 
 #[tauri::command]
@@ -130,32 +313,9 @@ pub fn update_agent_preferences(
     patch: AgentPreferencesPatch,
 ) -> Result<AgentPreferences, String> {
     authorize(&window)?;
-    let mut guard = state.0.lock().map_err(|error| error.to_string())?;
-    if guard.is_none() {
-        *guard = Some(load(&app)?);
-    }
-    let next = patched(guard.as_ref().expect("preferences initialized"), patch)?;
-    let destination = path(&app)?;
-    let parent = destination.parent().ok_or("Invalid preferences path")?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = destination.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let bytes = serde_json::to_vec_pretty(&next).map_err(|error| error.to_string())?;
-    let result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temporary, &destination)
-    })();
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!("Could not save agent preferences: {error}"));
-    }
-    *guard = Some(next.clone());
-    // Preferences have their own revision domain, not the runtime replay sequence.
-    let _ = app.emit("selora://agent-preferences", &next);
-    Ok(next)
+    let prefs_path = path(&app)?;
+    let desktop = app.state::<crate::state::DesktopState>();
+    update_preferences_with_saver(&app, &desktop, &state, &prefs_path, patch, save_to_path)
 }
 
 #[cfg(test)]
@@ -210,6 +370,100 @@ mod tests {
                 "permissionMode": "full"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_preference_saves_succeed_and_failure_rolls_back_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let prefs_path = dir.path().join("agent-preferences.json");
+
+        // Repeated atomic saves replace the existing file cleanly on Windows.
+        for idx in 0..5 {
+            let prefs = AgentPreferences {
+                selected_model: format!("provider/model-{idx}"),
+                revision: idx as u64,
+                ..Default::default()
+            };
+            save_to_path(&prefs_path, &prefs).expect("repeated atomic preference save");
+        }
+        assert_eq!(
+            load_from_path(&prefs_path).expect("load saved prefs").selected_model,
+            "provider/model-4"
+        );
+
+        let desktop = crate::state::DesktopState::from_settings_path(settings_path.clone());
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        desktop
+            .set_active_model(handle, "provider/initial-model")
+            .expect("set initial model");
+        let pref_state = AgentPreferencesState::default();
+
+        let err = update_preferences_with_saver(
+            handle,
+            &desktop,
+            &pref_state,
+            &prefs_path,
+            AgentPreferencesPatch {
+                selected_model: Some("provider/failed-model".into()),
+                ..Default::default()
+            },
+            |_path, _prefs| Err("simulated disk full".into()),
+        )
+        .expect_err("failed preference write must error");
+        assert!(err.contains("simulated disk full"));
+        assert_eq!(
+            desktop.sessions().active_model_id().as_deref(),
+            Some("provider/initial-model")
+        );
+        let persisted = selora_settings::Settings::load_from(&settings_path).expect("settings load");
+        assert_eq!(
+            persisted.selora.active_model.as_deref(),
+            Some("provider/initial-model")
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_syncs_preferences_and_legacy_settings_idempotently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let prefs_path = dir.path().join("agent-preferences.json");
+
+        // Case 1: legacy settings.selora.active_model migrates into agent-preferences.json.
+        let mut legacy = selora_settings::Settings::default();
+        legacy.selora.active_model = Some("legacy/active-model".into());
+        legacy.save_to(&settings_path).expect("save legacy settings");
+
+        let reconciled =
+            reconcile_startup_at(&settings_path, &mut legacy, &prefs_path).expect("reconcile 1");
+        assert_eq!(reconciled.as_deref(), Some("legacy/active-model"));
+        assert_eq!(
+            load_from_path(&prefs_path).unwrap().selected_model,
+            "legacy/active-model"
+        );
+
+        // Case 2: non-empty agent-preferences.json selectedModel overrides differing settings.json.
+        save_to_path(
+            &prefs_path,
+            &AgentPreferences {
+                selected_model: "prefs/authoritative-model".into(),
+                ..Default::default()
+            },
+        )
+        .expect("save prefs");
+        let mut loaded = selora_settings::Settings::load_from(&settings_path).unwrap();
+        let reconciled_2 =
+            reconcile_startup_at(&settings_path, &mut loaded, &prefs_path).expect("reconcile 2");
+        assert_eq!(reconciled_2.as_deref(), Some("prefs/authoritative-model"));
+        assert_eq!(
+            selora_settings::Settings::load_from(&settings_path)
+                .unwrap()
+                .selora
+                .active_model
+                .as_deref(),
+            Some("prefs/authoritative-model")
         );
     }
 }

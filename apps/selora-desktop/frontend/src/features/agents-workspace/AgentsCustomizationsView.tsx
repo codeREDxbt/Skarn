@@ -102,6 +102,7 @@ export function AgentsCustomizationsView({ bootstrap, onOpenConnect }: AgentsCus
           const value = event.target.value as ReasoningEffort;
           void changePreference(() => agentStore.setReasoningEffort(value));
         }}>
+          <option value="none">Off</option>
           <option value="quick">Quick</option>
           <option value="standard">Standard</option>
           <option value="max">Maximum</option>

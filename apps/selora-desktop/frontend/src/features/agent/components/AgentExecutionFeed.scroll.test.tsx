@@ -37,4 +37,27 @@ describe('conversation scroll ownership', () => {
     view.rerender(<AgentExecutionFeed {...props} messages={[{ ...message, content: 'More output' }]} scrollKey="scroll-follow" />);
     expect(list.scrollTop).toBe(1000);
   });
+
+  it('extracts multiple think and thinking blocks cleanly without leaking raw tags', () => {
+    const view = render(
+      <AgentExecutionFeed
+        {...props}
+        messages={[{
+          id: 'multi-think',
+          role: 'assistant',
+          content: '<think>step one</think>Partial <thinking>step two</thinking>\n\nFinal answer',
+          status: 'complete',
+          timestamp: 0,
+        }]}
+        scrollKey="scroll-think"
+      />,
+    );
+    const text = view.container.textContent ?? '';
+    expect(text).toContain('Final answer');
+    expect(text).toContain('Partial');
+    expect(text).not.toContain('<think>');
+    expect(text).not.toContain('</think>');
+    expect(text).not.toContain('<thinking>');
+    expect(text).not.toContain('</thinking>');
+  });
 });

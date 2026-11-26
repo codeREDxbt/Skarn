@@ -5597,6 +5597,7 @@ dependencies = [
  "selora-protocol",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

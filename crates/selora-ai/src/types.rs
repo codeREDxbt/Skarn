@@ -10,6 +10,125 @@ use crate::chat_types::{ToolCall, ToolSpec};
 /// Identifier of a model on the gateway (e.g. `"claude-opus-5-5"`).
 pub type ModelId = String;
 
+/// Authoritative tri-state tool-calling capability for a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCapability {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+impl ToolCapability {
+    /// Convert an explicit boolean capability flag into [`ToolCapability`].
+    pub fn from_bool(supported: bool) -> Self {
+        if supported {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+
+    pub fn is_unsupported(self) -> bool {
+        matches!(self, Self::Unsupported)
+    }
+
+    pub fn is_unknown(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Authoritative tri-state native reasoning/thinking capability for a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningCapability {
+    Native,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+impl ReasoningCapability {
+    pub fn from_bool(supported: bool) -> Self {
+        if supported {
+            Self::Native
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    pub fn is_native(self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    pub fn is_unsupported(self) -> bool {
+        matches!(self, Self::Unsupported)
+    }
+}
+
+pub fn infer_reasoning_capability(model_id: &str) -> ReasoningCapability {
+    let lower = model_id.trim().to_ascii_lowercase();
+    let leaf = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if leaf.is_empty() {
+        return ReasoningCapability::Unknown;
+    }
+
+    if leaf.starts_with("gpt-5-chat")
+        || leaf.starts_with("gpt-4o")
+        || leaf.starts_with("gpt-4.1")
+        || leaf == "gpt-4"
+        || leaf.starts_with("gpt-4-")
+        || leaf.starts_with("gpt-3.5")
+        || leaf.starts_with("claude-3-5")
+        || leaf.starts_with("claude-3.5")
+        || leaf.starts_with("claude-3-haiku")
+        || leaf.starts_with("claude-3-sonnet")
+        || leaf.starts_with("claude-3-opus")
+        || leaf.starts_with("gemini-1.")
+        || (leaf.starts_with("gemini-2.0") && !leaf.contains("thinking"))
+    {
+        return ReasoningCapability::Unsupported;
+    }
+
+    if leaf.starts_with("o1")
+        || leaf.starts_with("o3")
+        || leaf.starts_with("o4")
+        || leaf.starts_with("gpt-5")
+        || leaf.starts_with("gpt-oss")
+        || leaf.starts_with("claude-3-7")
+        || leaf.starts_with("claude-3.7")
+        || leaf.starts_with("claude-sonnet-4")
+        || leaf.starts_with("claude-opus-4")
+        || leaf.starts_with("claude-haiku-4")
+        || leaf.starts_with("claude-4")
+        || leaf.starts_with("gemini-2.5")
+        || leaf.starts_with("gemini-3")
+        || leaf.contains("thinking")
+        || leaf.starts_with("deepseek-reasoner")
+        || leaf.starts_with("deepseek-r1")
+        || leaf.starts_with("deepseek-v3.1")
+        || leaf.starts_with("deepseek-v3.2")
+        || leaf.starts_with("glm-4.5")
+        || leaf.starts_with("glm-4.6")
+        || leaf.starts_with("glm-4.7")
+        || leaf.starts_with("glm-5")
+        || leaf.starts_with("glm-z1")
+        || leaf.starts_with("qwen3")
+        || leaf.starts_with("qwq")
+        || leaf.starts_with("kimi-k2.5")
+        || leaf.starts_with("minimax-m")
+    {
+        return ReasoningCapability::Native;
+    }
+
+    ReasoningCapability::Unknown
+}
+
 fn deserialize_lenient_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -35,34 +154,276 @@ where
 }
 
 /// A model offered by the gateway (`GET /v1/models`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Model {
-    #[serde(default, alias = "model")]
     pub id: ModelId,
     /// Human-facing name. Falls back to `id` when the gateway omits it.
-    #[serde(default, alias = "name", alias = "displayName")]
     pub display_name: String,
     /// Maximum context length in tokens.
+    pub context_window: u32,
+    /// USD per 1k input tokens.
+    pub price_per_1k_input: f64,
+    /// USD per 1k output tokens.
+    pub price_per_1k_output: f64,
+    pub supports_streaming: bool,
+    /// Authoritative tri-state tool-calling capability (`Unknown` when absent).
+    pub tool_capability: ToolCapability,
+    /// Authoritative tri-state native thinking/reasoning capability.
+    #[serde(default)]
+    pub reasoning_capability: ReasoningCapability,
+    /// Whether the model is active and available for selection (`false` for retired/410 models).
+    #[serde(default = "default_true")]
+    pub available: bool,
+    /// Model family: "claude" / "gpt" / "kimi" / "glm" / ...
+    pub family: String,
+}
+
+impl Model {
+    /// Read-only helper: true only when tool calling is confirmed supported.
+    pub fn supports_tools(&self) -> bool {
+        self.tool_capability.is_supported()
+    }
+
+    /// Read-only helper: true only when native thinking/reasoning is supported.
+    pub fn supports_reasoning(&self) -> bool {
+        self.reasoning_capability.is_native()
+    }
+
+    /// Provider-native UI reasoning modes (`none`, `quick`, `standard`, `max`).
+    pub fn reasoning_modes(&self) -> Vec<&'static str> {
+        if self.reasoning_capability.is_unsupported() {
+            return Vec::new();
+        }
+        let lower = self.id.trim().to_ascii_lowercase();
+        let leaf = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if self.reasoning_capability.is_native() {
+            if leaf.starts_with("o1")
+                || leaf.starts_with("o3")
+                || leaf.starts_with("o4")
+                || leaf.starts_with("qwq")
+                || leaf.starts_with("gemini-2.5-pro")
+            {
+                return vec!["quick", "standard", "max"];
+            }
+            if leaf.starts_with("deepseek-reasoner") || leaf.starts_with("deepseek-r1") {
+                return vec!["standard", "max"];
+            }
+            if leaf.starts_with("deepseek-chat")
+                || leaf.starts_with("deepseek-v3.1")
+                || leaf.starts_with("deepseek-v3.2")
+                || leaf.starts_with("glm-4.5")
+                || leaf.starts_with("glm-4.6")
+                || leaf.starts_with("glm-4.7")
+                || leaf.starts_with("glm-5")
+                || leaf.starts_with("glm-z1")
+            {
+                return vec!["none", "standard"];
+            }
+        }
+        vec!["none", "quick", "standard", "max"]
+    }
+
+    /// Read-only helper: true when the model is active and supports streaming.
+    pub fn is_available(&self) -> bool {
+        self.available && self.supports_streaming
+    }
+}
+
+#[derive(Deserialize)]
+struct RawModel {
+    #[serde(default, alias = "model")]
+    id: ModelId,
+    #[serde(default, alias = "name", alias = "displayName")]
+    display_name: String,
     #[serde(
         default,
         alias = "context_length",
         alias = "contextWindow",
+        alias = "max_context_length",
         deserialize_with = "deserialize_lenient_u32"
     )]
-    pub context_window: u32,
-    /// USD per 1k input tokens.
+    context_window: u32,
     #[serde(default, deserialize_with = "deserialize_lenient_f64")]
-    pub price_per_1k_input: f64,
-    /// USD per 1k output tokens.
+    price_per_1k_input: f64,
     #[serde(default, deserialize_with = "deserialize_lenient_f64")]
-    pub price_per_1k_output: f64,
+    price_per_1k_output: f64,
     #[serde(default = "default_true")]
-    pub supports_streaming: bool,
+    supports_streaming: bool,
     #[serde(default)]
-    pub supports_tools: bool,
-    /// Model family: "claude" / "gpt" / "kimi" / "glm" / ...
+    tool_capability: Option<ToolCapability>,
     #[serde(default)]
-    pub family: String,
+    supports_tools: Option<bool>,
+    #[serde(default)]
+    tool_calling: Option<bool>,
+    #[serde(default)]
+    function_calling: Option<bool>,
+    #[serde(default)]
+    reasoning_capability: Option<ReasoningCapability>,
+    #[serde(default)]
+    supports_reasoning: Option<bool>,
+    #[serde(default)]
+    capabilities: Option<serde_json::Value>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    available: bool,
+    #[serde(default)]
+    family: String,
+}
+
+pub(crate) fn extract_explicit_reasoning_capability(
+    value: &serde_json::Value,
+) -> Option<ReasoningCapability> {
+    if let Some(cap) = value
+        .get("reasoning_capability")
+        .and_then(|v| serde_json::from_value::<ReasoningCapability>(v.clone()).ok())
+    {
+        return Some(cap);
+    }
+    for key in ["supports_reasoning", "reasoning", "thinking"] {
+        if let Some(flag) = value.get(key).and_then(serde_json::Value::as_bool) {
+            return Some(ReasoningCapability::from_bool(flag));
+        }
+    }
+    if let Some(caps) = value.get("capabilities").and_then(serde_json::Value::as_object) {
+        for key in ["reasoning", "thinking", "reasoning_effort", "supports_reasoning"] {
+            if let Some(flag) = caps.get(key).and_then(serde_json::Value::as_bool) {
+                return Some(ReasoningCapability::from_bool(flag));
+            }
+        }
+    }
+    if let Some(params) = value
+        .get("supported_parameters")
+        .and_then(serde_json::Value::as_array)
+    {
+        let strings: Vec<&str> = params.iter().filter_map(serde_json::Value::as_str).collect();
+        if !strings.is_empty() {
+            let has_reasoning = strings.iter().any(|p| {
+                *p == "reasoning"
+                    || *p == "include_reasoning"
+                    || *p == "reasoning_effort"
+                    || *p == "thinking"
+            });
+            return Some(ReasoningCapability::from_bool(has_reasoning));
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_explicit_tool_capability(value: &serde_json::Value) -> Option<ToolCapability> {
+    if let Some(cap) = value
+        .get("tool_capability")
+        .and_then(|v| serde_json::from_value::<ToolCapability>(v.clone()).ok())
+    {
+        return Some(cap);
+    }
+    for key in ["supports_tools", "tool_calling", "function_calling"] {
+        if let Some(flag) = value.get(key).and_then(serde_json::Value::as_bool) {
+            return Some(ToolCapability::from_bool(flag));
+        }
+    }
+    if let Some(caps) = value.get("capabilities").and_then(serde_json::Value::as_object) {
+        for key in ["tools", "tool_calling", "function_calling", "supports_tools"] {
+            if let Some(flag) = caps.get(key).and_then(serde_json::Value::as_bool) {
+                return Some(ToolCapability::from_bool(flag));
+            }
+        }
+    }
+    if let Some(params) = value
+        .get("supported_parameters")
+        .and_then(serde_json::Value::as_array)
+    {
+        let strings: Vec<&str> = params.iter().filter_map(serde_json::Value::as_str).collect();
+        if !strings.is_empty() {
+            let has_tools = strings
+                .iter()
+                .any(|p| *p == "tools" || *p == "tool_choice" || *p == "functions");
+            return Some(ToolCapability::from_bool(has_tools));
+        }
+    }
+    None
+}
+
+impl<'de> Deserialize<'de> for Model {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawModel::deserialize(deserializer)?;
+        let mut tool_capability = raw.tool_capability;
+        if tool_capability.is_none() {
+            tool_capability = raw
+                .supports_tools
+                .or(raw.tool_calling)
+                .or(raw.function_calling)
+                .map(ToolCapability::from_bool);
+        }
+        if tool_capability.is_none() {
+            if let Some(caps) = raw.capabilities.as_ref().and_then(|v| v.as_object()) {
+                for key in ["tools", "tool_calling", "function_calling", "supports_tools"] {
+                    if let Some(flag) = caps.get(key).and_then(serde_json::Value::as_bool) {
+                        tool_capability = Some(ToolCapability::from_bool(flag));
+                        break;
+                    }
+                }
+            }
+        }
+        if tool_capability.is_none() {
+            if let Some(params) = raw.supported_parameters.as_ref() {
+                if !params.is_empty() {
+                    let has_tools = params
+                        .iter()
+                        .any(|p| p == "tools" || p == "tool_choice" || p == "functions");
+                    tool_capability = Some(ToolCapability::from_bool(has_tools));
+                }
+            }
+        }
+
+        let mut reasoning_capability = raw.reasoning_capability;
+        if reasoning_capability.is_none() {
+            reasoning_capability = raw
+                .supports_reasoning
+                .map(ReasoningCapability::from_bool);
+        }
+        if reasoning_capability.is_none() {
+            if let Some(caps) = raw.capabilities.as_ref().and_then(|v| v.as_object()) {
+                for key in ["reasoning", "thinking", "reasoning_effort", "supports_reasoning"] {
+                    if let Some(flag) = caps.get(key).and_then(serde_json::Value::as_bool) {
+                        reasoning_capability = Some(ReasoningCapability::from_bool(flag));
+                        break;
+                    }
+                }
+            }
+        }
+        if reasoning_capability.is_none() {
+            if let Some(params) = raw.supported_parameters.as_ref() {
+                if !params.is_empty() {
+                    let has_reasoning = params.iter().any(|p| {
+                        p == "reasoning"
+                            || p == "include_reasoning"
+                            || p == "reasoning_effort"
+                            || p == "thinking"
+                    });
+                    reasoning_capability = Some(ReasoningCapability::from_bool(has_reasoning));
+                }
+            }
+        }
+        let resolved_reasoning = reasoning_capability
+            .unwrap_or_else(|| infer_reasoning_capability(&raw.id));
+
+        Ok(Model {
+            id: raw.id,
+            display_name: raw.display_name,
+            context_window: raw.context_window,
+            price_per_1k_input: raw.price_per_1k_input,
+            price_per_1k_output: raw.price_per_1k_output,
+            supports_streaming: raw.supports_streaming,
+            tool_capability: tool_capability.unwrap_or(ToolCapability::Unknown),
+            reasoning_capability: resolved_reasoning,
+            available: raw.available,
+            family: raw.family,
+        })
+    }
 }
 
 fn default_true() -> bool {
@@ -141,6 +502,17 @@ impl ChatMessage {
     }
 }
 
+pub fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "quick" => Some("low".to_owned()),
+        "standard" => Some("medium".to_owned()),
+        "max" | "xhigh" => Some("high".to_owned()),
+        "none" | "minimal" | "low" | "medium" | "high" => Some(raw.trim().to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
 /// A chat completion request (`POST /v1/chat/completions`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -179,9 +551,12 @@ impl ChatRequest {
         self
     }
 
-    /// Builder-style override of reasoning effort.
+    /// Builder-style override of reasoning effort, normalizing Selora UI labels
+    /// (`quick`, `standard`, `max`) to OpenAI-compatible wire values.
     pub fn with_reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
-        self.reasoning_effort = reasoning_effort;
+        self.reasoning_effort = reasoning_effort
+            .as_deref()
+            .and_then(normalize_reasoning_effort);
         self
     }
 
@@ -325,6 +700,8 @@ mod tests {
         let model: Model = serde_json::from_value(json).unwrap();
         assert_eq!(model.id, "glm-5.3");
         assert!(model.supports_streaming, "streaming defaults to true");
+        assert_eq!(model.tool_capability, ToolCapability::Unknown);
+        assert!(model.available);
         assert_eq!(model.price_per_1k_input, 0.0);
 
         let json = serde_json::json!({
@@ -333,6 +710,61 @@ mod tests {
         let model: Model = serde_json::from_value(json).unwrap();
         assert_eq!(model.display_name, "Model Two");
         assert_eq!(model.context_window, 128000);
+        assert_eq!(model.tool_capability, ToolCapability::Unknown);
+    }
+
+    #[test]
+    fn model_honors_explicit_tool_capability_and_keeps_missing_unknown() {
+        let supported: Model =
+            serde_json::from_value(serde_json::json!({ "id": "m1", "supports_tools": true }))
+                .unwrap();
+        assert_eq!(supported.tool_capability, ToolCapability::Supported);
+        assert!(supported.supports_tools());
+
+        let unsupported: Model =
+            serde_json::from_value(serde_json::json!({ "id": "m2", "supports_tools": false }))
+                .unwrap();
+        assert_eq!(unsupported.tool_capability, ToolCapability::Unsupported);
+        assert!(!unsupported.supports_tools());
+
+        let tri_state: Model = serde_json::from_value(
+            serde_json::json!({ "id": "m3", "tool_capability": "unsupported" }),
+        )
+        .unwrap();
+        assert_eq!(tri_state.tool_capability, ToolCapability::Unsupported);
+
+        let missing: Model = serde_json::from_value(
+            serde_json::json!({ "id": "m4", "object": "model", "owned_by": "nvidia" }),
+        )
+        .unwrap();
+        assert_eq!(missing.tool_capability, ToolCapability::Unknown);
+        assert!(!missing.supports_tools());
+
+        let openrouter_thinking: Model = serde_json::from_value(serde_json::json!({
+            "id": "openrouter/custom-reasoner",
+            "supported_parameters": ["tools", "reasoning", "include_reasoning"]
+        }))
+        .unwrap();
+        assert_eq!(openrouter_thinking.reasoning_capability, ReasoningCapability::Native);
+        assert_eq!(
+            openrouter_thinking.reasoning_modes(),
+            vec!["none", "quick", "standard", "max"]
+        );
+
+        let openrouter_plain: Model = serde_json::from_value(serde_json::json!({
+            "id": "openrouter/plain-chat",
+            "supported_parameters": ["tools", "temperature"]
+        }))
+        .unwrap();
+        assert_eq!(openrouter_plain.reasoning_capability, ReasoningCapability::Unsupported);
+        assert!(openrouter_plain.reasoning_modes().is_empty());
+
+        let deepseek_r1: Model = serde_json::from_value(serde_json::json!({
+            "id": "deepseek-reasoner"
+        }))
+        .unwrap();
+        assert_eq!(deepseek_r1.reasoning_capability, ReasoningCapability::Native);
+        assert_eq!(deepseek_r1.reasoning_modes(), vec!["standard", "max"]);
     }
 
     #[test]
@@ -344,10 +776,32 @@ mod tests {
             price_per_1k_input: 0.5,
             price_per_1k_output: 1.5,
             supports_streaming: true,
-            supports_tools: false,
+            tool_capability: ToolCapability::Unsupported,
+            reasoning_capability: ReasoningCapability::Unknown,
+            available: true,
             family: String::new(),
         };
         assert!((compute_cost_usd(&model, 1000, 1000) - 2.0).abs() < 1e-12);
         assert!((compute_cost_usd(&model, 250, 0) - 0.125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normalize_reasoning_effort_maps_ui_labels_to_openai_wire_values() {
+        assert_eq!(normalize_reasoning_effort("quick").as_deref(), Some("low"));
+        assert_eq!(
+            normalize_reasoning_effort("standard").as_deref(),
+            Some("medium")
+        );
+        assert_eq!(normalize_reasoning_effort("max").as_deref(), Some("high"));
+        assert_eq!(normalize_reasoning_effort("none").as_deref(), Some("none"));
+        assert_eq!(
+            normalize_reasoning_effort("xhigh").as_deref(),
+            Some("high")
+        );
+        assert_eq!(normalize_reasoning_effort("  ").as_deref(), None);
+
+        let req = ChatRequest::new("m", vec![])
+            .with_reasoning_effort(Some("standard".into()));
+        assert_eq!(req.reasoning_effort.as_deref(), Some("medium"));
     }
 }

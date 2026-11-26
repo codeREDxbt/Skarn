@@ -822,7 +822,9 @@ mod tests {
             price_per_1k_input: 0.5,
             price_per_1k_output: 1.5,
             supports_streaming: true,
-            supports_tools: true,
+            tool_capability: selora_ai::ToolCapability::Supported,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
             family: id.split('-').next().unwrap_or_default().to_owned(),
         }
     }

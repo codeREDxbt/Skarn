@@ -29,10 +29,10 @@ mod settings;
 pub use detect::{find_in_dirs, find_on_path};
 pub use keybind::{keybind_matches, Keybind};
 pub use settings::{
-    is_known_provider, AgentSettings, EditorSettings, KeybindsSettings, LayoutSettings,
-    LspSettings, SeloraSettings, Settings, UiSettings, CONFIG_DIR, EDITOR_FONT_SIZE_MAX,
-    EDITOR_FONT_SIZE_MIN, EDITOR_TAB_SIZE_MAX, EDITOR_TAB_SIZE_MIN, KNOWN_PROVIDER_IDS,
-    SCHEMA_VERSION, SETTINGS_DIR_ENV, SETTINGS_FILE_NAME,
+    is_known_provider, write_atomic, AgentSettings, EditorSettings, KeybindsSettings,
+    LayoutSettings, LspSettings, SeloraSettings, Settings, UiSettings, CONFIG_DIR,
+    EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, EDITOR_TAB_SIZE_MAX, EDITOR_TAB_SIZE_MIN,
+    KNOWN_PROVIDER_IDS, SCHEMA_VERSION, SETTINGS_DIR_ENV, SETTINGS_FILE_NAME,
 };
 
 /// Re-exported so downstream shells (the Tauri desktop crate) can name the

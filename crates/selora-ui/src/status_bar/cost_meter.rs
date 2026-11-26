@@ -243,7 +243,9 @@ mod tests {
             price_per_1k_input: price_in,
             price_per_1k_output: price_out,
             supports_streaming: true,
-            supports_tools: false,
+            tool_capability: selora_ai::ToolCapability::Unsupported,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
             family: String::new(),
         }
     }

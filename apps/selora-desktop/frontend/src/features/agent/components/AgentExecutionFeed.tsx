@@ -145,21 +145,23 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
 
   function parseMessageContent(rawContent: string): { thoughtText?: string; mainContent: string } {
     if (!rawContent) return { mainContent: '' };
-    const thinkMatch = rawContent.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/i);
-    if (thinkMatch) {
-      return {
-        thoughtText: thinkMatch[1].trim(),
-        mainContent: thinkMatch[2].trim(),
-      };
+    const thoughts: string[] = [];
+    let stripped = rawContent.replace(/<(think|thinking)>([\s\S]*?)<\/\1>/gi, (_, _tag, inner: string) => {
+      const trimmed = inner.trim();
+      if (trimmed) thoughts.push(trimmed);
+      return '';
+    });
+    const partialMatch = stripped.match(/<(think|thinking)>([\s\S]*)$/i);
+    if (partialMatch) {
+      const trimmed = partialMatch[2].trim();
+      if (trimmed) thoughts.push(trimmed);
+      stripped = stripped.slice(0, partialMatch.index);
     }
-    const partialThinkMatch = rawContent.match(/^\s*<think>([\s\S]*)$/i);
-    if (partialThinkMatch) {
-      return {
-        thoughtText: partialThinkMatch[1].trim(),
-        mainContent: '',
-      };
-    }
-    return { mainContent: rawContent };
+    const mainContent = stripped.trim();
+    return {
+      ...(thoughts.length > 0 ? { thoughtText: thoughts.join('\n\n') } : {}),
+      mainContent,
+    };
   }
 
   return (

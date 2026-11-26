@@ -6,7 +6,7 @@
 //! [`SeloraError::Config`] it can toast. Every field carries a serde default
 //! so old or partial files load with the documented defaults filled in.
 
-use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use selora_core::SeloraError;
@@ -649,33 +649,13 @@ impl Settings {
         self.save_to(&Settings::default_path())
     }
 
-    /// Save to an explicit path, atomically: write `settings.json.tmp` next
-    /// to the target, then rename over it (same directory, so the rename
-    /// never crosses a volume boundary). The directory is created if
-    /// missing. No `.tmp` file is left behind on failure.
+    /// Save to an explicit path, atomically: create parent dirs if needed,
+    /// write and sync a sibling temporary file, and atomically replace `path`.
+    /// No temp file is left behind on failure.
     pub fn save_to(&self, path: &Path) -> Result<(), SeloraError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| SeloraError::Config(format!("failed to serialize settings: {e}")))?;
-
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
-        let mut tmp = OsString::from(path.as_os_str());
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-
-        std::fs::write(&tmp, json.as_bytes())?;
-        match std::fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Never leave the temp file behind on a failed rename.
-                let _ = std::fs::remove_file(&tmp);
-                Err(SeloraError::Io(e))
-            }
-        }
+        write_atomic(path, json.as_bytes())
     }
 
     /// `%APPDATA%\selora-ide\settings.json` (PLAN.md §7). Honors
@@ -696,6 +676,47 @@ impl Settings {
     pub fn settings_dir() -> Result<PathBuf, SeloraError> {
         settings_dir()
     }
+}
+
+/// Persist `bytes` to `path` atomically: create missing parent directories,
+/// write and sync a sibling temporary file in the same directory, and perform
+/// a replace-safe atomic replacement of `path`. Temporary files are cleaned up
+/// automatically on failure.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SeloraError> {
+    if path.file_name().is_none() {
+        return Err(SeloraError::Config(
+            "cannot atomically write a path without a file name".into(),
+        ));
+    }
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)?;
+
+    let mut temp = tempfile::Builder::new()
+        .prefix(".selora-tmp-")
+        .tempfile_in(parent)?;
+    temp.as_file_mut().write_all(bytes)?;
+    temp.as_file().sync_all()?;
+
+    let mut pending = temp;
+    for attempt in 0..4 {
+        match pending.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                // On Windows, transient sharing violations from AV/indexers can occur on replace.
+                let is_sharing_violation = err.error.raw_os_error() == Some(32);
+                if is_sharing_violation && attempt < 3 {
+                    pending = err.file;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                return Err(SeloraError::Io(err.error));
+            }
+        }
+    }
+    unreachable!("loop returns on Ok or Err")
 }
 
 /// Pure resolution of the settings directory, parameterized for tests (env
@@ -901,6 +922,31 @@ pub(crate) mod tests {
             Settings::load_from(&path).expect("load").editor.font_size,
             12
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_atomic_replaces_existing_file_repeatedly_and_cleans_up_on_failure() {
+        let dir = temp_settings_dir("write-atomic-repeated");
+        let path = dir.join("nested").join("prefs.json");
+
+        for i in 0..10 {
+            let payload = format!(r#"{{"revision":{i}}}"#);
+            write_atomic(&path, payload.as_bytes()).expect("repeated atomic replace succeeds");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), payload);
+        }
+
+        // Failure case (destination is an existing directory): returns error and leaves no temp file.
+        let dir_target = dir.join("is-a-dir");
+        std::fs::create_dir_all(&dir_target).unwrap();
+        assert!(write_atomic(&dir_target, b"{}").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".selora-tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
 
         let _ = std::fs::remove_dir_all(dir);
     }

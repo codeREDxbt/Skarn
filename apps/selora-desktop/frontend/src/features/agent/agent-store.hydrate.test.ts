@@ -774,4 +774,164 @@ describe('store hydrate and event regressions', () => {
     agentStore.selectSessionLocally(PARENT);
     expect(agentStore.getSnapshot().messages[1]).toMatchObject({ status: 'error', content: 'Parent failure' });
   });
+
+  it('registers first prompt session without fabricated thought and preserves empty active assistant row until turn ends', () => {
+    agentStore.hydrate(bootstrap({
+      active_session_id: '',
+      sessions: [],
+      messages: [],
+    }));
+    expect(agentStore.sendUserMessage('first prompt')).toBe(true);
+
+    const afterSend = agentStore.getSnapshot();
+    expect(afterSend.activeSessionId).toBe('sess_default');
+    expect(afterSend.messages).toHaveLength(2);
+    expect(afterSend.messages[1]!.thought).toBeUndefined();
+    expect(afterSend.messages[1]!.thoughtDurationSeconds).toBeUndefined();
+    expect(agentStore.needsRequestHydration({ request_id: REQUEST, session_id: 'sess_default' })).toBe(false);
+
+    // First call with activeSessionId === '' & matching workspace_id: 'ws'
+    agentStore.hydrateAgents({
+      protocol_version: 1,
+      core_instance_id: 'core-0001',
+      workspace_id: 'ws',
+      snapshot_sequence: 1,
+      selected_session_id: 'sess_default',
+      sessions: [{
+        session_id: 'sess_default',
+        title: 'Default session',
+        created_at: null,
+        updated_at: null,
+        model_id: 'test-model',
+        mode: 'execute',
+        durable: false,
+        active_request_id: REQUEST,
+        active_turn_id: null,
+        state: 'thinking',
+        messages: [{ message_id: 'msg-u-1', session_id: 'sess_default', role: 'user', text: 'first prompt' }],
+        timeline: [],
+        approvals: [],
+        plan_phase: 'executing',
+        plan: null,
+        todos: [],
+        queue: [],
+        subagents: [],
+      }],
+    });
+
+    const afterHydrate = agentStore.getSnapshot();
+    expect(afterHydrate.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(afterHydrate.messages[1]!.id).toMatch(/^msg_.*_a$/);
+
+    agentStore.handleAgentTurnDone({
+      request_id: REQUEST,
+      session_id: 'sess_default',
+      turn_id: 'turn-1',
+      completed: false,
+      end_message: 'Model call failed cleanly',
+      total_tokens: 0,
+      cost_usd: 0,
+      num_tools: 0,
+      approved: 0,
+      denied: 0,
+    });
+
+    const afterDone = agentStore.getSnapshot();
+    expect(afterDone.inFlight).toBe(false);
+    expect(afterDone.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      status: 'error',
+      content: 'Model call failed cleanly',
+    });
+
+    // A separate view hydrating mid-turn without an optimistic local row also keeps an active streaming slot.
+    agentStore.reset();
+    agentStore.hydrate(bootstrap({
+      active_session_id: '',
+      sessions: [],
+      messages: [],
+    }));
+    agentStore.hydrateAgents({
+      protocol_version: 1,
+      core_instance_id: 'core-0001',
+      workspace_id: 'ws',
+      snapshot_sequence: 2,
+      selected_session_id: 'sess_default',
+      sessions: [{
+        session_id: 'sess_default',
+        title: 'Default session',
+        created_at: null,
+        updated_at: null,
+        model_id: 'test-model',
+        mode: 'execute',
+        durable: false,
+        active_request_id: REQUEST,
+        active_turn_id: null,
+        state: 'thinking',
+        messages: [{ message_id: 'msg-u-1', session_id: 'sess_default', role: 'user', text: 'first prompt' }],
+        timeline: [],
+        approvals: [],
+        plan_phase: 'executing',
+        plan: null,
+        todos: [],
+        queue: [],
+        subagents: [],
+      }],
+    });
+    expect(agentStore.getSnapshot().messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(agentStore.getSnapshot().messages[1]!.id).toBe(`msg_${REQUEST}_a`);
+  });
+
+  it('surfaces IPC rejection from sendAgent even if optimistic assistant tail was missing', async () => {
+    let rejectIpc!: (err: unknown) => void;
+    vi.mocked(sendAgent).mockReturnValue({
+      requestId: REQUEST,
+      promise: new Promise((_resolve, reject) => {
+        rejectIpc = reject;
+      }),
+    });
+    agentStore.hydrate(bootstrap({ active_session_id: '', sessions: [], messages: [] }));
+    expect(agentStore.sendUserMessage('run check')).toBe(true);
+
+    // Simulate an intermediate hydrateAgents snapshot before the IPC promise rejects.
+    agentStore.hydrateAgents({
+      protocol_version: 1,
+      core_instance_id: 'core-0001',
+      workspace_id: 'ws',
+      snapshot_sequence: 1,
+      selected_session_id: 'sess_default',
+      sessions: [{
+        session_id: 'sess_default',
+        title: 'Default session',
+        created_at: null,
+        updated_at: null,
+        model_id: 'test-model',
+        mode: 'execute',
+        durable: false,
+        active_request_id: REQUEST,
+        active_turn_id: null,
+        state: 'thinking',
+        messages: [{ message_id: 'msg-u-1', session_id: 'sess_default', role: 'user', text: 'run check' }],
+        timeline: [],
+        approvals: [],
+        plan_phase: 'executing',
+        plan: null,
+        todos: [],
+        queue: [],
+        subagents: [],
+      }],
+    });
+
+    rejectIpc({ code: 'model_capability_unknown', message: 'Probe timed out' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const snap = agentStore.getSnapshot();
+    expect(snap.inFlight).toBe(false);
+    expect(snap.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      status: 'error',
+    });
+    expect(snap.messages.at(-1)!.content).toContain('Probe timed out');
+  });
 });

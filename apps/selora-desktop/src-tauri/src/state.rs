@@ -1368,6 +1368,9 @@ pub(crate) struct WorkflowHostSettings {
     pub(crate) api_key: String,
     pub(crate) model: String,
     pub(crate) model_metadata: Option<selora_ai::Model>,
+    pub(crate) model_error: Option<String>,
+    pub(crate) catalog_models: Vec<selora_ai::Model>,
+    pub(crate) capability_cache: Arc<crate::sessions::ToolCapabilityCache>,
     pub(crate) caps: selora_ai::TurnCaps,
     pub(crate) workspace_trusted: bool,
     pub(crate) on_approval: crate::workflows_host::WorkflowApprovalHandler,
@@ -1398,6 +1401,7 @@ fn production_workflow_host(root: PathBuf, settings: WorkflowHostSettings) -> Wo
     )
     .with_turn_caps(settings.caps)
     .with_workspace_trusted(settings.workspace_trusted)
+    .with_capability_context(settings.capability_cache, settings.catalog_models)
     .with_tool_effect_ledger(
         selora_workflow::tool_effects_path(
             &ledger_root,
@@ -1408,6 +1412,9 @@ fn production_workflow_host(root: PathBuf, settings: WorkflowHostSettings) -> Wo
     .with_approval_handler(settings.on_approval);
     if let Some(model) = settings.model_metadata {
         config = config.with_model(model);
+    }
+    if let Some(error) = settings.model_error {
+        config = config.with_model_error(Some(error));
     }
     let host = crate::workflows_host::WorkflowHost::new(root, config);
     let cancel_host = Arc::clone(&host);
@@ -2113,6 +2120,9 @@ pub struct DesktopState {
     /// snapshot stores this digest so restore can prove the disk file did not
     /// move on.
     hot_exit_digests: Arc<Mutex<HashMap<PathBuf, HotExitDigest>>>,
+    /// Path to `agent-preferences.json` alongside `settings.json` (None for
+    /// purely in-memory test states that must not touch `%APPDATA%`).
+    preferences_path: Option<PathBuf>,
 }
 
 /// How [`DesktopState::launch_workflow`] should open the durable run.
@@ -2171,27 +2181,66 @@ impl DesktopState {
     /// flow (Ã‚Â§3.4) delivers it, and its sequence is Ã¢â€°Â¤ the bootstrap's
     /// `snapshot_sequence`.
     pub fn from_settings_path(settings_path: PathBuf) -> Self {
+        Self::from_settings_path_with_key(settings_path, ApiKeySource::Keyring)
+    }
+
+    #[cfg(test)]
+    pub fn from_settings_path_with_mutable_key(
+        settings_path: PathBuf,
+        key: Arc<Mutex<Result<Option<String>, ProtocolErrorDto>>>,
+    ) -> Self {
+        Self::from_settings_path_with_key(settings_path, ApiKeySource::Mutable(key))
+    }
+
+    fn from_settings_path_with_key(settings_path: PathBuf, key_source: ApiKeySource) -> Self {
         let layout_store = Arc::new(LayoutStore::new(settings_path.clone()));
         // Hot-exit snapshots live beside `settings.json` in the app-data
         // root (`<app-data>/hot-exit`); the settings path is the one place
         // that already resolves `SELORA_SETTINGS_DIR` and `%APPDATA%`.
-        let hot_exit_dir = settings_path
+        let parent_dir = settings_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map(std::path::Path::to_path_buf);
+        let hot_exit_dir = parent_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        let preferences_path = parent_dir.map(|dir| dir.join("agent-preferences.json"));
         // Same semantics as `Settings::load_or_default`: fall back to the
         // defaults and keep the error for the caller to toast.
-        let (settings, load_error) = match selora_settings::Settings::load_from(&settings_path) {
+        let (mut settings, load_error) = match selora_settings::Settings::load_from(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (selora_settings::Settings::default(), Some(error)),
         };
-        let state = Self::from_parts(settings, layout_store, ApiKeySource::Keyring, hot_exit_dir);
+        let reconcile_warning = match preferences_path.as_deref() {
+            Some(prefs_path) => crate::agents_preferences::reconcile_startup_at(
+                &settings_path,
+                &mut settings,
+                prefs_path,
+            )
+            .err(),
+            None => None,
+        };
+        let state = Self::from_parts(
+            settings,
+            layout_store,
+            key_source,
+            hot_exit_dir,
+            preferences_path,
+        );
         if let Some(error) = load_error {
             state.log.push(
                 FrontendEvent::Toast(ToastDto {
                     severity: ToastSeverity::Error,
                     message: format!("Settings could not be loaded: {error}"),
+                }),
+                None,
+                None,
+            );
+        } else if let Some(warning) = reconcile_warning {
+            state.log.push(
+                FrontendEvent::Toast(ToastDto {
+                    severity: ToastSeverity::Warning,
+                    message: format!(
+                        "Agent preferences could not be reconciled at startup: {warning}"
+                    ),
                 }),
                 None,
                 None,
@@ -2214,6 +2263,7 @@ impl DesktopState {
             Arc::new(LayoutStore::new(selora_settings::Settings::default_path())),
             ApiKeySource::Fixed(Some("sk-gw-desktop-test-key".into())),
             test_hot_exit_dir(),
+            None,
         )
     }
 
@@ -2225,6 +2275,7 @@ impl DesktopState {
             Arc::new(LayoutStore::new(selora_settings::Settings::default_path())),
             ApiKeySource::Fixed(None),
             test_hot_exit_dir(),
+            None,
         )
     }
 
@@ -2233,6 +2284,7 @@ impl DesktopState {
         layout_store: Arc<LayoutStore>,
         key_source: ApiKeySource,
         hot_exit_dir: PathBuf,
+        preferences_path: Option<PathBuf>,
     ) -> Self {
         let core_instance_id =
             CoreInstanceId::new(Uuid::new_v4().to_string()).expect("uuid is valid");
@@ -2266,6 +2318,7 @@ impl DesktopState {
             hot_exit_dir: Arc::new(Mutex::new(hot_exit_dir)),
             hot_exit_writer: HotExitWriter::new(),
             hot_exit_digests: Arc::new(Mutex::new(HashMap::new())),
+            preferences_path,
         }
     }
 
@@ -3003,19 +3056,132 @@ impl DesktopState {
         Arc::clone(&self.sessions)
     }
 
-    pub fn update_selora_settings(
+    /// Apply the process-wide active-model selection.
+    ///
+    /// The shared Agents preference, the persisted gateway setting, the live
+    /// session engine, and the published bootstrap must never disagree. This
+    /// method is the one write path that keeps those four facts in sync.
+    /// `model_id: None` clears the fallback; an explicit per-request model
+    /// still takes precedence in [`SessionEngine::resolve_model`].
+    pub(crate) fn set_active_model_state<R: tauri::Runtime>(
         &self,
-        base_url: Option<String>,
+        app: &tauri::AppHandle<R>,
+        model_id: Option<&str>,
+    ) -> Result<Option<String>, ProtocolErrorDto> {
+        let requested = match model_id {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(ProtocolErrorDto {
+                        code: "invalid_model".into(),
+                        message: "The active model id cannot be empty.".into(),
+                        retryable: false,
+                    });
+                }
+                if trimmed.len() > 512 {
+                    return Err(ProtocolErrorDto {
+                        code: "invalid_model".into(),
+                        message: "The active model id is too long.".into(),
+                        retryable: false,
+                    });
+                }
+                Some(trimmed)
+            }
+            None => None,
+        };
+
+        // Resolve catalog aliases (including display names) to the provider's
+        // real model id. An id that is not in the catalog is still allowed:
+        // custom providers can expose a model only after a manual override.
+        let canonical = match requested {
+            Some(id) => Some(self.sessions.resolve_model(Some(id))?.id),
+            None => None,
+        };
+
+        let mut settings = self.layout_store.load_settings().map_err(|error| {
+            ProtocolErrorDto {
+                code: "model_selection_failed".into(),
+                message: format!("Could not load settings while selecting the model: {error}"),
+                retryable: true,
+            }
+        })?;
+        settings.selora.active_model = canonical.clone();
+        self.layout_store.save_settings(&settings).map_err(|error| {
+            ProtocolErrorDto {
+                code: "model_selection_failed".into(),
+                message: format!("Could not save the selected model: {error}"),
+                retryable: true,
+            }
+        })?;
+
+        // Persistence succeeded: update the live fallback before publishing the
+        // authoritative bootstrap to either window.
+        self.sessions.set_active_model_id(canonical.clone());
+        let snapshot = self.bootstrap();
+        self.record_event(
+            app,
+            FrontendEvent::BootstrapState(Box::new(snapshot)),
+            None,
+        );
+        Ok(canonical)
+    }
+
+    /// Select a non-empty active model and return its canonical provider id.
+    pub(crate) fn set_active_model<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        model_id: &str,
+    ) -> Result<String, ProtocolErrorDto> {
+        self.set_active_model_state(app, Some(model_id))?
+            .ok_or_else(|| ProtocolErrorDto {
+                code: "invalid_model".into(),
+                message: "The active model id cannot be empty.".into(),
+                retryable: false,
+            })
+    }
+
+    pub(crate) fn persist_selora_connection(
+        &self,
+        base_url: &str,
         active_model: Option<String>,
     ) -> Result<(), selora_settings::SeloraError> {
         let mut settings = self.layout_store.load_settings().unwrap_or_default();
-        if let Some(url) = base_url {
-            settings.selora.base_url = url;
-        }
-        if let Some(model) = active_model {
-            settings.selora.active_model = Some(model);
-        }
+        settings.selora.base_url = base_url.to_owned();
+        settings.selora.active_model = active_model;
         self.layout_store.save_settings(&settings)
+    }
+
+    pub(crate) fn sync_discovered_active_model<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        active_model: Option<&str>,
+    ) {
+        if let Some(prefs_path) = &self.preferences_path {
+            let _ = crate::agents_preferences::sync_selected_model_to_path(
+                prefs_path,
+                active_model,
+            );
+        }
+        crate::agents_preferences::sync_managed_state(app, active_model);
+    }
+
+    pub(crate) async fn run_boot_probe<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+        let previous = self.sessions.active_model_id();
+        self.sessions
+            .connect_probe(self.event_log(), app.clone())
+            .await;
+        let current = self.sessions.active_model_id();
+        if current != previous {
+            let base_url = self.sessions.base_url();
+            let _ = self.persist_selora_connection(&base_url, current.clone());
+            self.sync_discovered_active_model(&app, current.as_deref());
+            let snapshot = self.bootstrap();
+            self.record_event(
+                &app,
+                FrontendEvent::BootstrapState(Box::new(snapshot)),
+                None,
+            );
+        }
     }
 
     /// Apply a validated settings patch through the one persistence seam:
@@ -4524,7 +4690,15 @@ impl DesktopState {
         // does not block the run: the host's `ask` reports it at the failing
         // step and the run finishes `failed` with that error.
         let approval_stream = Arc::clone(&stream);
-        let model_metadata = self.sessions.resolve_model(None).ok();
+        let resolved_model = self.sessions.resolve_model_for_dispatch(None);
+        let active_model = resolved_model
+            .as_ref()
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|_| self.sessions.active_model_id().unwrap_or_default());
+        let (model_metadata, model_error) = match resolved_model {
+            Ok(model) => (Some(model), None),
+            Err(err) => (None, Some(err.message)),
+        };
         let caps = self.sessions.workflow_turn_caps(
             model_metadata
                 .as_ref()
@@ -4540,8 +4714,11 @@ impl DesktopState {
             WorkflowHostSettings {
                 base_url: self.sessions.base_url(),
                 api_key: self.sessions.fetch_api_key().unwrap_or_default(),
-                model: self.sessions.active_model_id().unwrap_or_default(),
+                model: active_model,
                 model_metadata,
+                model_error,
+                catalog_models: self.sessions.catalog_models(),
+                capability_cache: self.sessions.tool_capability_cache(),
                 caps,
                 workspace_trusted,
                 on_approval: Arc::new(move |id, card| approval_stream.on_approval(id, card)),
@@ -5367,6 +5544,62 @@ mod tests {
         let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
         assert!(persisted.ui.reduce_motion);
         assert_eq!(persisted.ui.theme, "light");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn active_model_selection_updates_engine_settings_and_bootstrap() {
+        let app = mock_app_handle();
+        let path = temp_settings_path("active-model-selection");
+        let _ = std::fs::remove_file(&path);
+        let state = DesktopState::from_settings_path(path.clone());
+        state.sessions().set_models_and_connection(
+            vec![selora_ai::Model {
+                id: "provider/new-model".into(),
+                display_name: "New Model".into(),
+                context_window: 32_000,
+                price_per_1k_input: 0.0,
+                price_per_1k_output: 0.0,
+                supports_streaming: true,
+                tool_capability: selora_ai::ToolCapability::Supported,
+                reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                available: true,
+                family: String::new(),
+            }],
+            selora_protocol::ConnectionStatus::Connected,
+            Some("provider/old-model".into()),
+        );
+
+        let canonical = state
+            .set_active_model(&app, "provider/new-model")
+            .expect("model selection succeeds");
+
+        assert_eq!(canonical, "provider/new-model");
+        assert_eq!(
+            state.sessions().active_model_id().as_deref(),
+            Some("provider/new-model"),
+            "the live request fallback follows the selection"
+        );
+        assert_eq!(
+            state.bootstrap().active_model_id.as_deref(),
+            Some("provider/new-model"),
+            "the bootstrap reports the selected model"
+        );
+        let persisted = selora_settings::Settings::load_from(&path).expect("reload settings");
+        assert_eq!(
+            persisted.selora.active_model.as_deref(),
+            Some("provider/new-model"),
+            "the selection is durable"
+        );
+        assert!(
+            state.events_after(0).iter().any(|event| matches!(
+                &event.payload,
+                FrontendEvent::BootstrapState(snapshot)
+                    if snapshot.active_model_id.as_deref() == Some("provider/new-model")
+            )),
+            "both windows receive the authoritative selection"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -11107,5 +11340,56 @@ mod tests {
         state.hot_exit_capture();
         state.hot_exit_flush();
         assert!(state.bootstrap().workspace.root.is_none());
+    }
+
+    #[test]
+    fn startup_reconciles_preferences_and_syncs_chat_agent_and_workflow_fallback_without_frontend_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let prefs_path = dir.path().join("agent-preferences.json");
+
+        let mut settings = selora_settings::Settings::default();
+        settings.selora.active_model = Some("stale/settings-model".into());
+        settings.save_to(&settings_path).expect("save settings");
+
+        crate::agents_preferences::save_to_path(
+            &prefs_path,
+            &crate::agents_preferences::AgentPreferences {
+                selected_model: "mistralai/mistral-large-4-1t-a52b".into(),
+                ..Default::default()
+            },
+        )
+        .expect("save prefs");
+
+        // Startup alone must reconcile without calling get_agent_preferences.
+        let state = DesktopState::from_settings_path(settings_path.clone());
+        assert_eq!(
+            state.sessions().active_model_id().as_deref(),
+            Some("mistralai/mistral-large-4-1t-a52b")
+        );
+        assert_eq!(
+            state.bootstrap().active_model_id.as_deref(),
+            Some("mistralai/mistral-large-4-1t-a52b")
+        );
+        assert_eq!(
+            selora_settings::Settings::load_from(&settings_path)
+                .expect("reload settings")
+                .selora
+                .active_model
+                .as_deref(),
+            Some("mistralai/mistral-large-4-1t-a52b")
+        );
+
+        // Chat, Agent, and Workflow all resolve the same synchronized fallback model,
+        // while explicit request model_id continues to win.
+        let chat_model = state.sessions().resolve_model_for_dispatch(None).unwrap();
+        let agent_model = state.sessions().resolve_model_for_dispatch(None).unwrap();
+        assert_eq!(chat_model.id, "mistralai/mistral-large-4-1t-a52b");
+        assert_eq!(agent_model.id, "mistralai/mistral-large-4-1t-a52b");
+        let explicit = state
+            .sessions()
+            .resolve_model_for_dispatch(Some("custom/explicit-request-model"))
+            .unwrap();
+        assert_eq!(explicit.id, "custom/explicit-request-model");
     }
 }

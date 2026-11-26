@@ -19,7 +19,8 @@ use selora_ai::{
     run_agent_turn, AgentDecision, AgentEvent, AgentToolSettings, AgentTurnReport, AgentTurnState,
     BashAbortHandle, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, ChatStream,
     ClientChatStream, Model, Role, RouterToolRunner, SeloraClient, SubagentPolicy, ToolCall,
-    ToolContext, ToolOutcome, ToolResult, ToolRunner, ToolSpec, TurnCaps, TurnDecision, TurnInput,
+    ToolCapability, ToolContext, ToolOutcome, ToolResult, ToolRunner, ToolSpec, TurnCaps,
+    TurnDecision, TurnInput,
 };
 use selora_workflow::{
     subagent::{AskError, AskExecutor, AskReply, AskRequest},
@@ -486,16 +487,54 @@ impl WorkflowHost {
             return Ok(AskReply::new(reply));
         }
 
-        let model = self.config.model_metadata.clone().unwrap_or_else(|| Model {
-            id: self.config.model.clone(),
-            display_name: self.config.model.clone(),
-            context_window: 0,
-            price_per_1k_input: 0.0,
-            price_per_1k_output: 0.0,
-            supports_streaming: true,
-            supports_tools: true,
-            family: String::new(),
+        if let Some(error) = &self.config.model_error {
+            return Err(HostError::new(error.clone()));
+        }
+        if self.config.model.trim().is_empty() && self.config.model_metadata.is_none() {
+            return Err(HostError::new(
+                "No model selected — select an active model before running workflow agent steps.",
+            ));
+        }
+
+        let mut model = self.config.model_metadata.clone().unwrap_or_else(|| {
+            let mut bare = Model {
+                id: self.config.model.clone(),
+                display_name: self.config.model.clone(),
+                context_window: 0,
+                price_per_1k_input: 0.0,
+                price_per_1k_output: 0.0,
+                supports_streaming: true,
+                tool_capability: ToolCapability::Unknown,
+                reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                available: true,
+                family: String::new(),
+            };
+            selora_ai::apply_model_policy(&self.config.base_url, &mut bare);
+            bare
         });
+
+        #[cfg(test)]
+        let skip_capability_probe = self.config.stream_factory.is_some();
+        #[cfg(not(test))]
+        let skip_capability_probe = false;
+        if !skip_capability_probe {
+            let local_cache;
+            let cache = match &self.config.capability_cache {
+                Some(shared) => shared.as_ref(),
+                None => {
+                    local_cache = crate::sessions::ToolCapabilityCache::default();
+                    &local_cache
+                }
+            };
+            crate::sessions::ensure_tool_capability_ready(
+                cache,
+                &self.config.catalog_models,
+                &self.config.base_url,
+                &self.config.api_key,
+                &mut model,
+            )
+            .map_err(|err| HostError::new(err.message))?;
+        }
         let input = TurnInput::new(model, messages)
             .with_caps(request.caps)
             .with_manifest(manifest())
@@ -783,7 +822,9 @@ mod tests {
             price_per_1k_input: 0.01,
             price_per_1k_output: 0.03,
             supports_streaming: true,
-            supports_tools: true,
+            tool_capability: ToolCapability::Supported,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
             family: "test".to_owned(),
         }
     }
@@ -1664,5 +1705,34 @@ mod tests {
             .expect("tool content")
             .contains("wire evidence"));
         assert_eq!(last["stream"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_ask_blocks_tool_unsupported_model_without_sending_manifest() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let root = tempfile::tempdir().expect("workspace");
+        let mut unsupported_model = model();
+        unsupported_model.id = "chat/no-tools".to_owned();
+        unsupported_model.tool_capability = ToolCapability::Unsupported;
+
+        let host = WorkflowHost::new(
+            root.path().to_owned(),
+            WorkflowHostConfig::new(format!("{}/v1", server.uri()), "nvapi-secret", "chat/no-tools")
+                .with_model(unsupported_model),
+        );
+        let worker = host.clone();
+        let err = tokio::task::spawn_blocking(move || worker.ask("reader", None, "read evidence"))
+            .await
+            .expect("worker")
+            .expect_err("unsupported model must block workflow ask");
+        assert!(err.message.to_lowercase().contains("tool"));
     }
 }

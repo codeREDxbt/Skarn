@@ -101,4 +101,40 @@ describe('shared conversation surface', () => {
     expect(screen.queryByRole('button', { name: 'Remove attachment secret' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Remove attachment valid.ts' })).not.toBeNull();
   });
+
+  it('surfaces native provider thinking modes from model metadata cleanly', () => {
+    const nativeBootstrap = makeBootstrap({
+      workspace: { id: workspaceId, root: 'C:/repo', display_name: 'repo', core_instance_id: 'core-0001' },
+      models: [{
+        id: 'openrouter/thinking-pro',
+        display_name: 'Thinking Pro',
+        available: true,
+        tool_capability: 'supported',
+        reasoning_capability: 'native',
+        reasoning_modes: ['none', 'quick', 'max'],
+      }, {
+        id: 'openai/gpt-4o',
+        display_name: 'GPT-4o',
+        available: true,
+        tool_capability: 'supported',
+        reasoning_capability: 'unsupported',
+        reasoning_modes: [],
+      }],
+      active_model_id: 'openrouter/thinking-pro',
+      chat: {
+        sessions: [{ session_id: sessionId, title: 'Shared session', active: false, message_ids: [] }],
+        messages: [], active_session_id: sessionId, active_request_id: null, active_turn_id: null, pending_approval: null,
+      },
+    });
+    agentStore.hydrate(nativeBootstrap);
+    render(<AgentConversationSurface presentation="agents" />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Standard|Max|Quick|Off/i }));
+    expect(screen.getByText('Native Thinking Mode')).not.toBeNull();
+    expect(screen.getByText('Off')).not.toBeNull();
+    expect(screen.queryByText('Balanced speed and analysis')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Thinking Pro/i }));
+    expect(screen.getAllByText('Thinking').length).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -130,7 +130,16 @@ export type EditorContextDto = {
   selection?: Selection;
   dirty: boolean;
 };
-export type Model = { id: string; display_name: string; available: boolean };
+export type ToolCapability = 'supported' | 'unsupported' | 'unknown';
+export type ReasoningCapability = 'native' | 'unsupported' | 'unknown';
+export type Model = {
+  id: string;
+  display_name: string;
+  available: boolean;
+  tool_capability?: ToolCapability;
+  reasoning_capability?: ReasoningCapability;
+  reasoning_modes?: string[];
+};
 export type SearchQuery = { query: string; case_sensitive: boolean; whole_word: boolean; use_regex: boolean };
 export type SearchHit = { path: string; line: number; column: number; preview: string };
 export type SessionDto = {
@@ -256,6 +265,7 @@ export type ApiKeyStatus = {
   base_url: string;
   key_hint: string | null;
   active_model_id: string | null;
+  last_error?: string | null;
 };
 
 export type Decision = 'approve' | 'answer' | 'deny' | 'approve_all_this_turn' | 'revise' | 'stop';
@@ -485,7 +495,7 @@ export type AgentRequestDto = {
   prompt: string;
   model_id: string | null;
   mode: AgentMode;
-  reasoning_effort?: 'quick' | 'standard' | 'max';
+  reasoning_effort?: 'none' | 'quick' | 'standard' | 'max';
   system_instructions?: string;
   temperature?: number;
   editor_context?: EditorContextDto;
@@ -555,7 +565,7 @@ export type AgentPreferences = {
   systemInstructions: string;
   customModelId: string;
   selectedModel: string;
-  reasoningEffort: 'quick' | 'standard' | 'max';
+  reasoningEffort: 'none' | 'quick' | 'standard' | 'max';
 };
 export type AgentPreferencesPatch = Partial<Omit<AgentPreferences, 'revision'>>;
 export type AgentPreferencesDto = AgentPreferences;
@@ -702,7 +712,7 @@ export type FrontendCommand =
   | { type: 'settings_update'; payload: { patch: SettingsPatch } }
   | { type: 'send_chat'; payload: { request_id: Id; request: { session_id: Id; message: string; model_id: string | null } } }
   | { type: 'stop_chat'; payload: { request_id: Id } }
-  | { type: 'send_agent'; payload: { request_id: Id; request: { session_id: Id; prompt: string; model_id: string | null; mode: AgentMode; reasoning_effort?: 'quick' | 'standard' | 'max'; system_instructions?: string; temperature?: number; editor_context?: EditorContextDto } } }
+  | { type: 'send_agent'; payload: { request_id: Id; request: { session_id: Id; prompt: string; model_id: string | null; mode: AgentMode; reasoning_effort?: 'none' | 'quick' | 'standard' | 'max'; system_instructions?: string; temperature?: number; editor_context?: EditorContextDto } } }
   | { type: 'agent_decision'; payload: { request_id: Id; approval_id: Id; decision: Decision; resolution?: AgentDecisionResolution } }
   | { type: 'retry_message'; payload: { session_id: Id; message_id: Id } }
   | { type: 'switch_session'; payload: { session_id: Id } }
@@ -832,7 +842,10 @@ export type FrontendEvent =
     }
   | { type: 'git_diff_ready'; payload: { path: string; unified_diff: string } }
   | { type: 'models_changed'; payload: { models: Model[]; active_model_id: string | null } }
-  | { type: 'selora_status_changed'; payload: { status: ConnectionStatus; active_model_id: string | null } }
+  | {
+      type: 'selora_status_changed';
+      payload: { status: ConnectionStatus; active_model_id: string | null; error?: string | null };
+    }
   | { type: 'workspace_layout_changed'; payload: Layout }
   | { type: 'workflow_started'; payload: WorkflowStartedPayload }
   | { type: 'workflow_phase'; payload: WorkflowPhasePayload }
@@ -1263,7 +1276,7 @@ export const sendAgent = (
   modelId: string | null,
   ctx: EnvelopeContext,
   options?: {
-    reasoningEffort?: 'quick' | 'standard' | 'max';
+    reasoningEffort?: 'none' | 'quick' | 'standard' | 'max';
     systemInstructions?: string;
     temperature?: number;
     editorContext?: EditorContextDto;
@@ -1276,7 +1289,7 @@ export const sendAgent = (
     prompt: string;
     model_id: string | null;
     mode: AgentMode;
-    reasoning_effort?: 'quick' | 'standard' | 'max';
+    reasoning_effort?: 'none' | 'quick' | 'standard' | 'max';
     system_instructions?: string;
     temperature?: number;
     editor_context?: EditorContextDto;
@@ -1522,8 +1535,16 @@ export const terminalClose = (terminalId: Id, ctx: EnvelopeContext): Promise<unk
 export const getEventsAfter = (afterSequence: number): Promise<EventEnvelope[]> =>
   invoke('get_events_after', { afterSequence });
 
-export const connectApiKey = (apiKey: string, baseUrl?: string): Promise<ConnectResult> =>
-  invoke<ConnectResult>('connect_api_key', { apiKey, baseUrl: baseUrl || null });
+export const connectApiKey = (
+  apiKey: string,
+  baseUrl?: string,
+  useStoredKey?: boolean,
+): Promise<ConnectResult> =>
+  invoke<ConnectResult>('connect_api_key', {
+    apiKey,
+    baseUrl: baseUrl || null,
+    useStoredKey: useStoredKey ?? false,
+  });
 
 export const disconnectApiKey = (): Promise<void> =>
   invoke<void>('disconnect_api_key');

@@ -343,7 +343,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
   const docsUrl = currentPreset.docsUrl ?? '';
   const docsLinkHost = docsHost(docsUrl);
   const docsAllowed = isAllowedDocsUrl(docsUrl);
-  const isConnected = bootstrap.connection === 'connected' || keyStatus?.connected;
+  const isConnected = keyStatus ? keyStatus.connected : bootstrap.connection === 'connected';
   const keyValidation = getKeyValidation(selectedPreset, apiKey, Boolean(keyStatus?.has_key));
 
   const handleDocsClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -381,8 +381,9 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
     setSuccessMsg(null);
 
     try {
+      const usingStored = !apiKey.trim() && selectedPreset !== 'ollama' && Boolean(keyStatus?.has_key);
       const keyToUse = apiKey.trim() || (selectedPreset === 'ollama' ? 'ollama' : '');
-      const result = await connectApiKey(keyToUse, baseUrl.trim() || undefined);
+      const result = await connectApiKey(keyToUse, baseUrl.trim() || undefined, usingStored);
       setTestSuccess(true);
       setSuccessMsg(
         `Successfully connected! Discovered ${result.models_count} model${
@@ -392,9 +393,9 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
       const updatedStatus = await getApiKeyStatus();
       setKeyStatus(updatedStatus);
       await refreshBootstrap();
-      if (result.active_model_id) {
-        agentStore.setSelectedModel(result.active_model_id);
-      }
+      // Keep the user's shared model preference. The refreshed catalog
+      // reconciles it only when that model is no longer available; reconnecting
+      // must not silently replace an explicit selection with the first model.
       setTimeout(() => {
         onClose();
       }, 1300);
@@ -405,6 +406,13 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
           : 'Failed to connect. Check your gateway address, API key, and network status.';
       setError(msg);
       setTestSuccess(false);
+      try {
+        const updatedStatus = await getApiKeyStatus();
+        setKeyStatus(updatedStatus);
+      } catch {
+        // ignore secondary status fetch failure
+      }
+      await refreshBootstrap().catch(() => undefined);
     } finally {
       setLoading(false);
     }
@@ -441,6 +449,13 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
     setSuccessMsg(null);
     try {
       const models = await agentStore.refreshModels();
+      await refreshBootstrap();
+      try {
+        const updatedStatus = await getApiKeyStatus();
+        setKeyStatus(updatedStatus);
+      } catch {
+        // ignore secondary status fetch failure
+      }
       setSuccessMsg(`Refreshed catalog: discovered ${models.length} model${models.length === 1 ? '' : 's'}.`);
     } catch (err: unknown) {
       const msg =
@@ -448,6 +463,13 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
           ? String((err as { message: string }).message)
           : 'Failed to fetch models from provider.';
       setError(msg);
+      try {
+        const updatedStatus = await getApiKeyStatus();
+        setKeyStatus(updatedStatus);
+      } catch {
+        // ignore secondary status fetch failure
+      }
+      await refreshBootstrap().catch(() => undefined);
     } finally {
       setRefreshingModels(false);
     }
@@ -871,11 +893,33 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                   value={agentSnapshot.selectedModel}
                   onChange={(e) => agentStore.setSelectedModel(e.target.value)}
                 >
-                  {agentSnapshot.availableModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.display_name || m.id} {m.id !== m.display_name ? `(${m.id})` : ''}
-                    </option>
-                  ))}
+                  {agentSnapshot.selectedModel.trim() &&
+                    !agentSnapshot.availableModels.some(
+                      (m) =>
+                        m.id === agentSnapshot.selectedModel ||
+                        m.id.toLowerCase() === agentSnapshot.selectedModel.toLowerCase() ||
+                        m.display_name === agentSnapshot.selectedModel,
+                    ) && (
+                      <option value={agentSnapshot.selectedModel} disabled>
+                        {agentSnapshot.selectedModel} [Unavailable in catalog]
+                      </option>
+                    )}
+                  {agentSnapshot.availableModels.map((m) => {
+                    const capabilityNote = !m.available
+                      ? ' [Retired / Unavailable]'
+                      : m.tool_capability === 'unsupported'
+                      ? ' [Chat only — no tools]'
+                      : m.tool_capability === 'unknown' || !m.tool_capability
+                      ? ' [Tools unverified]'
+                      : '';
+                    return (
+                      <option key={m.id} value={m.id} disabled={!m.available}>
+                        {m.display_name || m.id}
+                        {m.id !== m.display_name ? ` (${m.id})` : ''}
+                        {capabilityNote}
+                      </option>
+                    );
+                  })}
                 </select>
               ) : (
                 <div className="connect-input-wrapper">
@@ -891,8 +935,10 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
                 </div>
               )}
               <span className="connect-field-hint">
-                {agentSnapshot.availableModels.length > 0
-                  ? `${agentSnapshot.availableModels.length} models available from connected provider.`
+                {!isConnected && keyStatus?.last_error
+                  ? `Last discovery error: ${keyStatus.last_error}`
+                  : agentSnapshot.availableModels.length > 0
+                  ? `${agentSnapshot.availableModels.filter((m) => m.available).length} active models available from connected provider.`
                   : isConnected
                   ? 'Click "Refresh Models" above to probe provider catalog.'
                   : 'Connect your provider in the Credentials tab to auto-discover models.'}
@@ -927,6 +973,7 @@ export function ConnectModal({ open, onClose, bootstrap }: ConnectModalProps) {
               </span>
               <div className="connect-effort-grid" role="group" aria-labelledby="reasoning-depth-label">
                 {[
+                  { id: 'none' as const, label: 'Off', desc: 'Disable extended thinking when supported by model.' },
                   { id: 'quick' as const, label: 'Quick', desc: 'Minimal thought overhead, fast responses.' },
                   { id: 'standard' as const, label: 'Standard', desc: 'Balanced step-by-step verification.' },
                   { id: 'max' as const, label: 'Max', desc: 'Exhaustive chain of thought & edge-case checks.' },

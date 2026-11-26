@@ -37,7 +37,7 @@
 //! - one in-flight request per session (`session_busy` otherwise);
 //! - every event rides the shared monotonic sequence (the `EventLog`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -47,8 +47,8 @@ use std::sync::{
 use selora_ai::{
     AgentSessionMode, AgentSessionState, AgentSessionStore, AgentSummary, AgentTurnState,
     ApprovalCard, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, CompactionConfig,
-    CompactionError, Model, ParkedCard, RouterToolRunner, ToolContext, ToolRunner, ToolSpec,
-    TranscriptEntry, TurnCaps, TurnInput,
+    CompactionError, Model, ParkedCard, RouterToolRunner, ToolCapability, ToolContext,
+    ToolProbeOutcome, ToolRunner, ToolSpec, TranscriptEntry, TurnCaps, TurnInput,
 };
 use selora_core::SeloraError;
 use selora_protocol::{
@@ -60,7 +60,7 @@ use selora_protocol::{
     ProtocolErrorDto, QuestionPromptOptionDto, RequestId, SeloraStatusDto, SessionDto, SessionId,
     SubagentActivityDto, SubagentArtifactDto, SubagentCancelledDto, SubagentCompletedDto,
     SubagentPolicyDto, SubagentRunState, TodoDto, TodoStatusDto, TodosDto, ToolCallStartedDto,
-    ToolResultDto, TurnId, WorkflowApprovalDto,
+    ToolCapabilityDto, ToolResultDto, TurnId, WorkflowApprovalDto,
 };
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -133,7 +133,7 @@ pub(crate) enum ApiKeySource {
 }
 
 impl ApiKeySource {
-    fn get(&self) -> Result<Option<String>, ProtocolErrorDto> {
+    pub(crate) fn get(&self) -> Result<Option<String>, ProtocolErrorDto> {
         match self {
             Self::Keyring => {
                 match selora_settings::keyring::api_key_get() {
@@ -171,6 +171,101 @@ impl ApiKeySource {
             #[cfg(test)]
             Self::Mutable(key) => key.lock().unwrap().clone(),
         }
+    }
+
+    pub(crate) fn set(&self, value: &str) -> Result<(), ProtocolErrorDto> {
+        match self {
+            Self::Keyring => selora_settings::keyring::api_key_set(value).map_err(|err| {
+                ProtocolErrorDto {
+                    code: "keyring_write_failed".into(),
+                    message: format!("Could not save API key to secure credential manager: {err}"),
+                    retryable: true,
+                }
+            }),
+            #[cfg(test)]
+            Self::Fixed(_) => Err(ProtocolErrorDto {
+                code: "keyring_write_failed".into(),
+                message: "Cannot overwrite fixed test API key.".into(),
+                retryable: false,
+            }),
+            #[cfg(test)]
+            Self::Mutable(slot) => {
+                *slot.lock().unwrap() = Ok(Some(value.to_owned()));
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn delete(&self) -> Result<(), ProtocolErrorDto> {
+        match self {
+            Self::Keyring => selora_settings::keyring::api_key_delete().map_err(|err| {
+                ProtocolErrorDto {
+                    code: "keyring_delete_failed".into(),
+                    message: format!("Could not remove API key from keyring: {err}"),
+                    retryable: true,
+                }
+            }),
+            #[cfg(test)]
+            Self::Fixed(_) => Ok(()),
+            #[cfg(test)]
+            Self::Mutable(slot) => {
+                *slot.lock().unwrap() = Ok(None);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn is_test_override(&self) -> bool {
+        match self {
+            Self::Keyring => false,
+            #[cfg(test)]
+            Self::Fixed(_) | Self::Mutable(_) => true,
+        }
+    }
+}
+
+/// Process-wide cache of runtime tool-capability probe outcomes, keyed by
+/// `(normalized_base_url, lowercase_model_id)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CachedCapabilityEntry {
+    Supported,
+    Unsupported(String),
+}
+
+#[derive(Default)]
+pub(crate) struct ToolCapabilityCache {
+    entries: Mutex<HashMap<(String, String), CachedCapabilityEntry>>,
+}
+
+impl ToolCapabilityCache {
+    fn key(base_url: &str, model_id: &str) -> (String, String) {
+        (
+            base_url.trim().trim_end_matches('/').to_ascii_lowercase(),
+            model_id.trim().to_ascii_lowercase(),
+        )
+    }
+
+    pub(crate) fn get(&self, base_url: &str, model_id: &str) -> Option<CachedCapabilityEntry> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&Self::key(base_url, model_id))
+            .cloned()
+    }
+
+    pub(crate) fn insert(&self, base_url: &str, model_id: &str, entry: CachedCapabilityEntry) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(Self::key(base_url, model_id), entry);
+    }
+
+    pub(crate) fn clear_base_url(&self, base_url: &str) {
+        let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(url, _), _| url != &normalized);
     }
 }
 
@@ -361,6 +456,7 @@ struct EngineInner {
     active: BTreeMap<RequestId, ActiveRequest>,
     models: Vec<Model>,
     connection: ConnectionStatus,
+    last_connection_error: Option<String>,
     activity_counter: u64,
     /// The session the user explicitly selected (new/switch/send). While a
     /// turn is live, `chat_state` prefers that turn's session so the frontend
@@ -383,6 +479,7 @@ pub(crate) struct SessionEngine {
     pub(crate) action_results:
         Mutex<BTreeMap<RequestId, (serde_json::Value, selora_protocol::CommandResultDto)>>,
     config: EngineConfig,
+    tool_capability_cache: Arc<ToolCapabilityCache>,
     /// Phase 9e: the session-scoped background subagent runtime. It
     /// outlives individual turns, so a child started by one turn can finish
     /// while the user edits in another. The `wait` tool reads it through
@@ -411,26 +508,15 @@ pub(crate) struct SessionEngine {
 impl SessionEngine {
     pub(crate) fn new(config: EngineConfig) -> Self {
         let initial_key = config.key_source.get().ok().flatten();
-        // The key stays in the keyring / engine config: it is never copied
-        // into the process environment, so LSP servers and tool children
-        // cannot inherit it.
-        let (initial_connection, initial_models) = if initial_key.is_some() {
-            let models = crate::commands::synthesize_provider_models(&config.base_url);
-            (ConnectionStatus::Connected, models)
-        } else {
-            (ConnectionStatus::Disconnected, Vec::new())
-        };
-
+        // Never fabricate models or report Connected before real discovery.
+        let initial_connection = ConnectionStatus::Disconnected;
+        let initial_models = Vec::new();
         let initial_active_model = config
             .active_model
-            .clone()
-            .filter(|m| {
-                initial_models
-                    .iter()
-                    .any(|model| model.id == *m || model.id.eq_ignore_ascii_case(m))
-            })
-            .or_else(|| initial_models.first().map(|m| m.id.clone()))
-            .or_else(|| config.active_model.clone());
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
 
         let runtime = selora_ai::SubagentRuntime::new();
         let (tx, rx) = mpsc::channel(256);
@@ -450,10 +536,12 @@ impl SessionEngine {
                 active: BTreeMap::new(),
                 models: initial_models,
                 connection: initial_connection,
+                last_connection_error: None,
                 activity_counter: 0,
                 active_session: None,
             }),
             config,
+            tool_capability_cache: Arc::new(ToolCapabilityCache::default()),
             workspace_root: Mutex::new(None),
             subagents: runtime,
             subagent_events: Mutex::new(Some(rx)),
@@ -1011,10 +1099,64 @@ impl SessionEngine {
     }
 
     pub(crate) fn set_base_url(&self, base_url: String) {
+        self.tool_capability_cache.clear_base_url(&base_url);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.tool_capability_cache.clear_base_url(&inner.base_url);
+        inner.base_url = base_url;
+    }
+
+    pub(crate) fn key_source(&self) -> &ApiKeySource {
+        &self.config.key_source
+    }
+
+    pub(crate) fn tool_capability_cache(&self) -> Arc<ToolCapabilityCache> {
+        Arc::clone(&self.tool_capability_cache)
+    }
+
+    pub(crate) fn catalog_models(&self) -> Vec<Model> {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .base_url = base_url;
+            .models
+            .clone()
+    }
+
+    pub(crate) fn last_connection_error(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_connection_error
+            .clone()
+    }
+
+    pub(crate) fn set_last_connection_error(&self, error: Option<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_connection_error = error;
+    }
+
+    pub(crate) fn clear_capability_cache_for(&self, base_url: &str) {
+        self.tool_capability_cache.clear_base_url(base_url);
+    }
+
+    pub(crate) fn update_catalog_tool_capability(
+        &self,
+        model_id: &str,
+        capability: ToolCapability,
+    ) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for model in &mut inner.models {
+            if model.id == model_id || model.id.eq_ignore_ascii_case(model_id) {
+                model.tool_capability = capability;
+            }
+        }
     }
 
     pub(crate) fn set_models_and_connection(
@@ -1029,6 +1171,9 @@ impl SessionEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.models = models;
         inner.connection = connection;
+        if connection == ConnectionStatus::Connected {
+            inner.last_connection_error = None;
+        }
         inner.active_model = active_model;
     }
 
@@ -1059,6 +1204,19 @@ impl SessionEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .active_model
             .clone()
+    }
+
+    /// Replace the process-wide fallback model used by plain chat, workflows,
+    /// and any request that does not carry an explicit model id.
+    ///
+    /// The desktop shell owns this value so every request path observes the
+    /// same model. `None` clears the fallback; an explicit per-request model
+    /// still wins in the normal resolver.
+    pub(crate) fn set_active_model_id(&self, model: Option<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_model = model;
     }
 
     /// The bootstrap's `chat` block: every session, the flattened
@@ -1537,11 +1695,8 @@ impl SessionEngine {
             return Err(stale_session());
         }
         let api_key = self.fetch_api_key()?;
-        let model_id = payload
-            .model_id
-            .clone()
-            .or_else(|| self.active_model_id())
-            .ok_or_else(no_model_selected)?;
+        let model = self.resolve_model_for_dispatch(payload.model_id.as_deref())?;
+        let model_id = model.id;
 
         let mut inner = self
             .inner
@@ -1891,13 +2046,27 @@ impl SessionEngine {
             return Err(stale_session());
         }
         let api_key = self.fetch_api_key()?;
-        let model = self.resolve_model(payload.model_id.as_deref())?;
+        let mut model = self.resolve_model_for_dispatch(payload.model_id.as_deref())?;
         let root = self
             .workspace_root
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(no_workspace)?;
+        let base_url = self.base_url();
+        let catalog_snapshot = self.catalog_models();
+        let previous_cap = model.tool_capability;
+        let check_result = ensure_tool_capability_ready(
+            &self.tool_capability_cache,
+            &catalog_snapshot,
+            &base_url,
+            &api_key,
+            &mut model,
+        );
+        if model.tool_capability != previous_cap {
+            self.update_catalog_tool_capability(&model.id, model.tool_capability);
+        }
+        check_result?;
         let turn_id = fresh_turn_id();
 
         let mut inner = self
@@ -2590,7 +2759,8 @@ impl SessionEngine {
     /// Read the key, probe the gateway (`list_models` — connected means up
     /// AND the key is valid), cache the catalog, and announce it through
     /// `ModelsChanged` + `SeloraStatusChanged`. A missing key or a failed
-    /// probe is a silent `Disconnected` (the egui boot's precedent).
+    /// probe is a quiet `Disconnected` (never fabricates a catalog and never
+    /// overwrites an explicit persisted model selection).
     pub(crate) async fn connect_probe<R: tauri::Runtime>(
         self: &Arc<Self>,
         log: Arc<EventLog>,
@@ -2598,12 +2768,24 @@ impl SessionEngine {
     ) {
         let key = match self.fetch_api_key() {
             Ok(key) => key,
-            Err(_) => {
-                self.set_connection(ConnectionStatus::Disconnected);
+            Err(err) => {
+                let reason = if err.code == "not_connected" {
+                    None
+                } else {
+                    Some(err.message)
+                };
+                {
+                    let mut inner = self
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inner.connection = ConnectionStatus::Disconnected;
+                    inner.last_connection_error = reason.clone();
+                }
                 let active = self.active_model_id();
                 log.record(
                     &app,
-                    status_changed(ConnectionStatus::Disconnected, &active),
+                    status_changed_with_error(ConnectionStatus::Disconnected, &active, reason),
                     None,
                 );
                 return;
@@ -2613,25 +2795,68 @@ impl SessionEngine {
         let client = selora_ai::SeloraClient::new(&base_url, &key);
         let models = match client.list_models().await {
             Ok(models) if !models.is_empty() => models,
-            _ => crate::commands::synthesize_provider_models(&base_url),
+            Ok(_) => {
+                let reason = discovery_error_message(
+                    &base_url,
+                    &key,
+                    &SeloraError::Ai("provider returned an empty model catalog".into()),
+                );
+                {
+                    let mut inner = self
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inner.connection = ConnectionStatus::Disconnected;
+                    inner.last_connection_error = Some(reason.clone());
+                }
+                let active = self.active_model_id();
+                log.record(
+                    &app,
+                    status_changed_with_error(
+                        ConnectionStatus::Disconnected,
+                        &active,
+                        Some(reason),
+                    ),
+                    None,
+                );
+                return;
+            }
+            Err(err) => {
+                let reason = discovery_error_message(&base_url, &key, &err);
+                {
+                    let mut inner = self
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inner.connection = ConnectionStatus::Disconnected;
+                    inner.last_connection_error = Some(reason.clone());
+                }
+                let active = self.active_model_id();
+                log.record(
+                    &app,
+                    status_changed_with_error(
+                        ConnectionStatus::Disconnected,
+                        &active,
+                        Some(reason),
+                    ),
+                    None,
+                );
+                return;
+            }
         };
-        let active_model = self
-            .active_model_id()
-            .filter(|current| {
-                models
-                    .iter()
-                    .any(|m| m.id == *current || m.id.eq_ignore_ascii_case(current))
-            })
-            .or_else(|| models.first().map(|m| m.id.clone()));
-        {
+        self.clear_capability_cache_for(&base_url);
+        let active_model = {
             let mut inner = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let active_model = reconcile_catalog_active_model(inner.active_model.clone(), &models);
             inner.models = models.clone();
             inner.connection = ConnectionStatus::Connected;
+            inner.last_connection_error = None;
             inner.active_model = active_model.clone();
-        }
+            active_model
+        };
         log.record(
             &app,
             FrontendEvent::ModelsChanged(ModelsDto {
@@ -2647,7 +2872,7 @@ impl SessionEngine {
         );
     }
 
-    fn set_connection(&self, status: ConnectionStatus) {
+    pub(crate) fn set_connection(&self, status: ConnectionStatus) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2773,8 +2998,14 @@ impl SessionEngine {
 
     pub(crate) fn resolve_model(&self, preferred: Option<&str>) -> Result<Model, ProtocolErrorDto> {
         let id = preferred
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_owned)
-            .or_else(|| self.active_model_id())
+            .or_else(|| {
+                self.active_model_id()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
             .ok_or_else(no_model_selected)?;
         let inner = self
             .inner
@@ -2787,20 +3018,76 @@ impl SessionEngine {
         }) {
             return Ok(found.clone());
         }
-        // An unknown id (no catalog yet, or a model the gateway no longer
-        // lists): a bare model — no context cap (never a false abort), no
-        // price fallback (cost stays receipt-verbatim).
-        drop(inner);
-        Ok(Model {
+        let mut bare = Model {
             display_name: id.clone(),
             id,
             context_window: 0,
             price_per_1k_input: 0.0,
             price_per_1k_output: 0.0,
             supports_streaming: true,
-            supports_tools: true,
+            tool_capability: ToolCapability::Unknown,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
             family: String::new(),
-        })
+        };
+        selora_ai::apply_model_policy(&inner.base_url, &mut bare);
+        Ok(bare)
+    }
+
+    /// Resolve a model for live dispatch (plain chat, agent turn, or workflow ask).
+    ///
+    /// - Explicit `preferred` model IDs win for that request.
+    /// - Without `preferred`, uses the synchronized active fallback model.
+    /// - Refuses retired/unavailable models (e.g. HTTP 410 models).
+    /// - Refuses an active fallback model that disappeared from a non-empty
+    ///   discovered catalog instead of silently swapping it.
+    pub(crate) fn resolve_model_for_dispatch(
+        &self,
+        preferred: Option<&str>,
+    ) -> Result<Model, ProtocolErrorDto> {
+        let explicit = preferred.map(str::trim).filter(|value| !value.is_empty());
+        let id = explicit
+            .map(str::to_owned)
+            .or_else(|| {
+                self.active_model_id()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+            .ok_or_else(no_model_selected)?;
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(found) = inner.models.iter().find(|model| {
+            model.id == id
+                || model.id.eq_ignore_ascii_case(&id)
+                || model.display_name.eq_ignore_ascii_case(&id)
+        }) {
+            if !found.is_available() {
+                return Err(model_unavailable_error(&found.id, &inner.models, true));
+            }
+            return Ok(found.clone());
+        }
+        if explicit.is_none() && !inner.models.is_empty() {
+            return Err(model_unavailable_error(&id, &inner.models, false));
+        }
+        let mut bare = Model {
+            display_name: id.clone(),
+            id,
+            context_window: 0,
+            price_per_1k_input: 0.0,
+            price_per_1k_output: 0.0,
+            supports_streaming: true,
+            tool_capability: ToolCapability::Unknown,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
+            family: String::new(),
+        };
+        selora_ai::apply_model_policy(&inner.base_url, &mut bare);
+        if !bare.is_available() {
+            return Err(model_unavailable_error(&bare.id, &inner.models, true));
+        }
+        Ok(bare)
     }
 
     /// Workflow asks inherit the same per-turn limits, but not session approval grants.
@@ -3914,6 +4201,7 @@ impl selora_ai::SubagentBackend for DesktopSubagentBackend {
 /// tools read the bytes).
 fn system_prompt(payload: &selora_protocol::AgentRequestDto, root: &Path) -> String {
     let depth_instructions = match payload.reasoning_effort.as_deref() {
+        Some("none") => "\nReasoning depth: Off. Provide direct answers without extended thinking preamble.",
         Some("max") => "\nReasoning depth: Maximum. Provide deep, rigorous chain of thought. Analyze all edge cases, potential failure modes, and architectural implications before executing actions.",
         Some("quick") => "\nReasoning depth: Quick. Be concise and direct. Focus on immediate solution without excessive explanation.",
         _ => "\nReasoning depth: Standard. Balanced reasoning with clear explanations and thorough verification.",
@@ -4338,7 +4626,299 @@ pub(crate) fn model_dto(model: &Model) -> ModelDto {
         } else {
             model.display_name.clone()
         },
-        available: model.supports_streaming,
+        available: model.is_available(),
+        tool_capability: match model.tool_capability {
+            ToolCapability::Supported => ToolCapabilityDto::Supported,
+            ToolCapability::Unsupported => ToolCapabilityDto::Unsupported,
+            ToolCapability::Unknown => ToolCapabilityDto::Unknown,
+        },
+        reasoning_capability: match model.reasoning_capability {
+            selora_ai::ReasoningCapability::Native => selora_protocol::ReasoningCapabilityDto::Native,
+            selora_ai::ReasoningCapability::Unsupported => {
+                selora_protocol::ReasoningCapabilityDto::Unsupported
+            }
+            selora_ai::ReasoningCapability::Unknown => {
+                selora_protocol::ReasoningCapabilityDto::Unknown
+            }
+        },
+        reasoning_modes: model
+            .reasoning_modes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    }
+}
+
+/// Preserve an existing explicit model selection across catalog refreshes and
+/// reconnects (canonicalizing casing if matched). Only pick an initial default
+/// when there is genuinely no prior selection, skipping unavailable/retired models.
+pub(crate) fn reconcile_catalog_active_model(
+    current: Option<String>,
+    models: &[Model],
+) -> Option<String> {
+    if let Some(existing) = current
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if let Some(matched) = models
+            .iter()
+            .find(|model| model.id == existing || model.id.eq_ignore_ascii_case(existing))
+        {
+            return Some(matched.id.clone());
+        }
+        return Some(existing.to_owned());
+    }
+    models
+        .iter()
+        .find(|model| model.is_available() && model.tool_capability == ToolCapability::Supported)
+        .or_else(|| {
+            models
+                .iter()
+                .find(|model| model.is_available() && model.tool_capability != ToolCapability::Unsupported)
+        })
+        .or_else(|| models.iter().find(|model| model.is_available()))
+        .map(|model| model.id.clone())
+}
+
+fn compatible_model_hint(models: &[Model]) -> String {
+    let mut suggested: Vec<&str> = models
+        .iter()
+        .filter(|model| model.is_available() && model.tool_capability == ToolCapability::Supported)
+        .map(|model| model.id.as_str())
+        .take(3)
+        .collect();
+    if suggested.is_empty() {
+        "Refresh the model catalog and select a verified tool-capable model.".to_owned()
+    } else {
+        suggested.dedup();
+        format!("Try a tool-capable model such as {}.", suggested.join(", "))
+    }
+}
+
+fn model_unavailable_error(model_id: &str, catalog: &[Model], retired: bool) -> ProtocolErrorDto {
+    let available_hint: Vec<&str> = catalog
+        .iter()
+        .filter(|model| model.is_available())
+        .map(|model| model.id.as_str())
+        .take(3)
+        .collect();
+    let suggestion = if available_hint.is_empty() {
+        "Refresh the model catalog or choose an active model.".to_owned()
+    } else {
+        format!(
+            "Refresh the model catalog or select an available model such as {}.",
+            available_hint.join(", ")
+        )
+    };
+    let detail = if retired {
+        format!(
+            "Model '{model_id}' is retired/end-of-life or unavailable and cannot be used. {suggestion}"
+        )
+    } else {
+        format!(
+            "Selected model '{model_id}' is no longer present in the provider's model catalog. {suggestion}"
+        )
+    };
+    ProtocolErrorDto {
+        code: "model_unavailable".into(),
+        message: detail,
+        retryable: false,
+    }
+}
+
+fn run_blocking_probe<F, T>(future: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send,
+{
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("selora-capability-probe".into())
+            .spawn_scoped(scope, || tauri::async_runtime::block_on(future))
+            .map_err(|err| format!("Could not start capability validation worker: {err}"))?
+            .join()
+            .map_err(|_| "Capability validation worker panicked".to_owned())
+    })
+}
+
+/// Gate an agent turn or workflow ask before sending a tool manifest:
+/// - `Supported`: allowed.
+/// - `Unsupported`: rejected locally (`model_capability_unsupported`) with no manifest sent.
+/// - `Unknown`: runs a cached non-streaming `complete_chat` probe; fails closed
+///   with `model_capability_unknown` / `model_capability_unsupported` if validation fails.
+pub(crate) fn ensure_tool_capability_ready(
+    cache: &ToolCapabilityCache,
+    catalog_models: &[Model],
+    base_url: &str,
+    api_key: &str,
+    model: &mut Model,
+) -> Result<(), ProtocolErrorDto> {
+    if !model.is_available() {
+        return Err(model_unavailable_error(&model.id, catalog_models, true));
+    }
+    match model.tool_capability {
+        ToolCapability::Supported => Ok(()),
+        ToolCapability::Unsupported => {
+            let hint = compatible_model_hint(catalog_models);
+            Err(ProtocolErrorDto {
+                code: "model_capability_unsupported".into(),
+                message: format!(
+                    "Model '{}' does not support tool calling and cannot run agent turns. {hint}",
+                    model.id
+                ),
+                retryable: false,
+            })
+        }
+        ToolCapability::Unknown => {
+            if let Some(cached) = cache.get(base_url, &model.id) {
+                match cached {
+                    CachedCapabilityEntry::Supported => {
+                        model.tool_capability = ToolCapability::Supported;
+                        return Ok(());
+                    }
+                    CachedCapabilityEntry::Unsupported(reason) => {
+                        return Err(ProtocolErrorDto {
+                            code: "model_capability_unsupported".into(),
+                            message: reason,
+                            retryable: false,
+                        });
+                    }
+                }
+            }
+
+            let client = selora_ai::SeloraClient::new(base_url, api_key);
+            let probe = run_blocking_probe(client.probe_tool_capability(&model.id)).map_err(|err| {
+                ProtocolErrorDto {
+                    code: "model_capability_unknown".into(),
+                    message: format!(
+                        "Could not verify tool-calling capability for model '{}': {err}",
+                        model.id
+                    ),
+                    retryable: true,
+                }
+            })?;
+
+            match probe {
+                Ok(ToolProbeOutcome::Supported) => {
+                    cache.insert(base_url, &model.id, CachedCapabilityEntry::Supported);
+                    model.tool_capability = ToolCapability::Supported;
+                    Ok(())
+                }
+                Ok(ToolProbeOutcome::Unsupported(reason)) => {
+                    let message = format!(
+                        "Model '{}' does not support tool calling: {reason} {}",
+                        model.id,
+                        compatible_model_hint(catalog_models)
+                    );
+                    cache.insert(
+                        base_url,
+                        &model.id,
+                        CachedCapabilityEntry::Unsupported(message.clone()),
+                    );
+                    model.tool_capability = ToolCapability::Unsupported;
+                    Err(ProtocolErrorDto {
+                        code: "model_capability_unsupported".into(),
+                        message,
+                        retryable: false,
+                    })
+                }
+                Ok(ToolProbeOutcome::Inconclusive(reason)) => {
+                    let message = format!(
+                        "Tool-calling capability for model '{}' could not be confirmed: {reason} {}",
+                        model.id,
+                        compatible_model_hint(catalog_models)
+                    );
+                    Err(ProtocolErrorDto {
+                        code: "model_capability_unknown".into(),
+                        message,
+                        retryable: true,
+                    })
+                }
+                Err(err) => {
+                    if selora_ai::classify_failure(&err) == selora_ai::GatewayFailure::Auth {
+                        return Err(to_protocol_error(&err, api_key));
+                    }
+                    let retryable = matches!(
+                        selora_ai::classify_failure(&err),
+                        selora_ai::GatewayFailure::Timeout
+                            | selora_ai::GatewayFailure::Network
+                            | selora_ai::GatewayFailure::Unavailable
+                    );
+                    Err(ProtocolErrorDto {
+                        code: "model_capability_unknown".into(),
+                        message: redact(
+                            &format!(
+                                "Could not verify tool-calling capability for model '{}': {}. {}",
+                                model.id,
+                                selora_ai::user_message(&err),
+                                compatible_model_hint(catalog_models)
+                            ),
+                            api_key,
+                        ),
+                        retryable,
+                    })
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn discovery_error_message(base_url: &str, api_key: &str, error: &SeloraError) -> String {
+    let provider = selora_ai::safe_provider_label(base_url);
+    let safe_err = redact(&selora_ai::user_message(error), api_key);
+    let detail = match selora_ai::classify_failure(error) {
+        selora_ai::GatewayFailure::Auth => {
+            let raw = redact(&error.to_string(), api_key);
+            format!(
+                "Model discovery failed at {provider}: credentials were rejected ({raw}). Check your API key and account access."
+            )
+        }
+        selora_ai::GatewayFailure::Timeout => format!(
+            "Model discovery failed at {provider}: request timed out ({safe_err}). Credentials could not be verified."
+        ),
+        selora_ai::GatewayFailure::Network => format!(
+            "Model discovery failed at {provider}: could not reach the provider ({safe_err}). Credentials could not be verified."
+        ),
+        selora_ai::GatewayFailure::Unavailable => format!(
+            "Model discovery failed at {provider}: provider unavailable ({safe_err}). Credentials could not be verified."
+        ),
+        selora_ai::GatewayFailure::ModelUnavailable
+        | selora_ai::GatewayFailure::ToolUnsupported
+        | selora_ai::GatewayFailure::Rejected
+        | selora_ai::GatewayFailure::InvalidResponse => format!(
+            "Model discovery failed at {provider}: {safe_err}. Credentials could not be verified against the model catalog."
+        ),
+    };
+    redact(&detail, api_key)
+}
+
+pub(crate) fn discovery_protocol_error(
+    base_url: &str,
+    api_key: &str,
+    error: &SeloraError,
+) -> ProtocolErrorDto {
+    let retryable = matches!(
+        selora_ai::classify_failure(error),
+        selora_ai::GatewayFailure::Timeout
+            | selora_ai::GatewayFailure::Network
+            | selora_ai::GatewayFailure::Unavailable
+    );
+    ProtocolErrorDto {
+        code: "model_discovery_failed".into(),
+        message: discovery_error_message(base_url, api_key, error),
+        retryable,
+    }
+}
+
+pub(crate) fn empty_catalog_protocol_error(base_url: &str) -> ProtocolErrorDto {
+    let provider = selora_ai::safe_provider_label(base_url);
+    ProtocolErrorDto {
+        code: "model_discovery_failed".into(),
+        message: format!(
+            "Model discovery failed at {provider}: the provider returned an empty model catalog."
+        ),
+        retryable: false,
     }
 }
 
@@ -4601,9 +5181,18 @@ fn map_decision(decision: DecisionDto, answer: Option<String>) -> selora_ai::Age
 }
 
 fn status_changed(status: ConnectionStatus, active_model: &Option<String>) -> FrontendEvent {
+    status_changed_with_error(status, active_model, None)
+}
+
+pub(crate) fn status_changed_with_error(
+    status: ConnectionStatus,
+    active_model: &Option<String>,
+    error: Option<String>,
+) -> FrontendEvent {
     FrontendEvent::SeloraStatusChanged(SeloraStatusDto {
         status,
         active_model_id: active_model.clone(),
+        error,
     })
 }
 
@@ -4620,6 +5209,8 @@ fn to_protocol_error(error: &SeloraError, api_key: &str) -> ProtocolErrorDto {
         selora_ai::GatewayFailure::Auth => ("auth_failed", false),
         selora_ai::GatewayFailure::Network => ("network_error", true),
         selora_ai::GatewayFailure::Unavailable => ("gateway_unavailable", true),
+        selora_ai::GatewayFailure::ModelUnavailable => ("model_unavailable", false),
+        selora_ai::GatewayFailure::ToolUnsupported => ("model_capability_unsupported", false),
         selora_ai::GatewayFailure::Rejected => ("gateway_error", false),
         selora_ai::GatewayFailure::InvalidResponse => match error {
             SeloraError::Auth(_) => ("auth_failed", false),
@@ -4819,6 +5410,25 @@ mod tests {
         let mut settings = selora_settings::Settings::default();
         settings.selora.base_url = base_url;
         settings
+    }
+
+    fn seed_supported_test_model(state: &DesktopState) {
+        state.sessions().set_models_and_connection(
+            vec![Model {
+                id: "test-model".into(),
+                display_name: "Test Model".into(),
+                context_window: 128_000,
+                price_per_1k_input: 0.0,
+                price_per_1k_output: 0.0,
+                supports_streaming: true,
+                tool_capability: ToolCapability::Supported,
+                reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                available: true,
+                family: "test".into(),
+            }],
+            ConnectionStatus::Connected,
+            Some("test-model".into()),
+        );
     }
 
     fn envelope(
@@ -5746,6 +6356,7 @@ mod tests {
         let new_content = "notes-body-xyz\nappended line\n";
         let server = mock_gateway(agent_rounds(new_content), true);
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -5914,6 +6525,7 @@ mod tests {
             true,
         );
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -6005,6 +6617,7 @@ mod tests {
             true,
         );
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -6109,6 +6722,7 @@ mod tests {
         let new_content = "notes-body-xyz\nauto-applied line\n";
         let server = mock_gateway(agent_rounds(new_content), true);
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         let mut command = send_agent("agent-auto", "session-auto", "append a line");
@@ -6157,6 +6771,7 @@ mod tests {
         let new_content = "notes-body-xyz\nappended line\n";
         let server = mock_gateway(agent_rounds(new_content), true);
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -6223,6 +6838,7 @@ mod tests {
         let new_content = "notes-body-xyz\nappended line\n";
         let server = mock_gateway(agent_rounds(new_content), false);
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -6285,6 +6901,7 @@ mod tests {
             true,
         );
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         let mut command = send_agent("agent-1", "session-1", "explore the notes");
@@ -6461,6 +7078,7 @@ mod tests {
             true,
         );
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
 
         state
@@ -7571,6 +8189,7 @@ mod tests {
             true,
         );
         let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
         state.sessions().set_workspace_root(Some(root.clone()));
         let session = SessionId::new("sess-retry").expect("id");
         state
@@ -8512,5 +9131,218 @@ mod tests {
         assert_eq!(card.subagent_id.as_deref(), Some("child-1"));
         assert_eq!(card.session_id, parent);
         assert_eq!(card.request_id, RequestId::new("subagent-child-1").unwrap());
+    }
+
+    #[tokio::test]
+    async fn agent_gates_tool_capability_caches_probe_and_keeps_plain_chat_usable() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        // Unknown model probe succeeds once (non-streaming, max_tokens: 160), then agent streams.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "unknown/probed-ok",
+                "stream": false,
+                "max_tokens": 160
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_probe",
+                            "type": "function",
+                            "function": { "name": "selora_probe_echo", "arguments": "{\"value\":\"ok\"}" }
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let done_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "stream": true })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(done_sse),
+            )
+            .mount(&server)
+            .await;
+
+        let unknown_plain = server.uri();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let engine = Arc::new(SessionEngine::new(EngineConfig {
+            base_url: format!("{}/v1", unknown_plain),
+            active_model: Some("chat/only".into()),
+            agent: Default::default(),
+            key_source: ApiKeySource::Fixed(Some("nvapi-secret-key".into())),
+        }));
+        engine.set_workspace_root(Some(workspace.path().to_path_buf()));
+        engine.set_models_and_connection(
+            vec![
+                Model {
+                    id: "chat/only".into(),
+                    display_name: "Chat Only".into(),
+                    context_window: 32_000,
+                    price_per_1k_input: 0.0,
+                    price_per_1k_output: 0.0,
+                    supports_streaming: true,
+                    tool_capability: ToolCapability::Unsupported,
+                    reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                    available: true,
+                    family: String::new(),
+                },
+                Model {
+                    id: "unknown/probed-ok".into(),
+                    display_name: "Unknown Ok".into(),
+                    context_window: 32_000,
+                    price_per_1k_input: 0.0,
+                    price_per_1k_output: 0.0,
+                    supports_streaming: true,
+                    tool_capability: ToolCapability::Unknown,
+                    reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                    available: true,
+                    family: String::new(),
+                },
+                Model {
+                    id: "meta/muse-glimmer-30b".into(),
+                    display_name: "Muse Glimmer 30B".into(),
+                    context_window: 32_000,
+                    price_per_1k_input: 0.0,
+                    price_per_1k_output: 0.0,
+                    supports_streaming: true,
+                    tool_capability: ToolCapability::Unsupported,
+                    reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+                    available: false,
+                    family: String::new(),
+                },
+            ],
+            ConnectionStatus::Connected,
+            Some("chat/only".into()),
+        );
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let log = Arc::new(EventLog::new(
+            selora_protocol::CoreInstanceId::new("core-sess-gate").unwrap(),
+        ));
+        let session_id = engine.new_session().expect("create session");
+
+        // 1. Agent turn on Unsupported model is rejected locally without touching gateway.
+        let agent_err = engine
+            .send_agent(
+                Arc::clone(&log),
+                handle.clone(),
+                Some(session_id.clone()),
+                RequestId::new("req-unsup").unwrap(),
+                selora_protocol::AgentRequestDto {
+                    session_id: session_id.clone(),
+                    prompt: "edit".into(),
+                    mode: selora_protocol::AgentModeDto::Execute,
+                    model_id: Some("chat/only".into()),
+                    reasoning_effort: None,
+                    system_instructions: None,
+                    temperature: None,
+                    editor_context: None,
+                },
+            )
+            .expect_err("unsupported model blocked for agent");
+        assert_eq!(agent_err.code, "model_capability_unsupported");
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+
+        // 2. Plain chat remains usable on Unsupported model without running any tool probe.
+        engine
+            .send_chat(
+                Arc::clone(&log),
+                handle.clone(),
+                Some(session_id.clone()),
+                RequestId::new("req-chat").unwrap(),
+                selora_protocol::ChatRequestDto {
+                    session_id: session_id.clone(),
+                    message: "hello".into(),
+                    model_id: Some("chat/only".into()),
+                },
+            )
+            .expect("plain chat succeeds on unsupported model");
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while Instant::now() < deadline {
+            if server
+                .received_requests()
+                .await
+                .map(|r| !r.is_empty())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // 3. Retired/unavailable model fails cleanly before any request.
+        let retired_err = engine
+            .send_agent(
+                Arc::clone(&log),
+                handle.clone(),
+                Some(session_id.clone()),
+                RequestId::new("req-retired").unwrap(),
+                selora_protocol::AgentRequestDto {
+                    session_id: session_id.clone(),
+                    prompt: "hi".into(),
+                    mode: selora_protocol::AgentModeDto::Execute,
+                    model_id: Some("meta/muse-glimmer-30b".into()),
+                    reasoning_effort: None,
+                    system_instructions: None,
+                    temperature: None,
+                    editor_context: None,
+                },
+            )
+            .expect_err("retired model unavailable");
+        assert_eq!(retired_err.code, "model_unavailable");
+
+        // 4. Unknown model probes ONCE (wiremock expect(1) on probe!) and caches for second turn.
+        for idx in 0..2 {
+            engine
+                .send_agent(
+                    Arc::clone(&log),
+                    handle.clone(),
+                    Some(session_id.clone()),
+                    RequestId::new(format!("req-probe-{idx}")).unwrap(),
+                    selora_protocol::AgentRequestDto {
+                        session_id: session_id.clone(),
+                        prompt: format!("run {idx}"),
+                        mode: selora_protocol::AgentModeDto::Execute,
+                        model_id: Some("unknown/probed-ok".into()),
+                        reasoning_effort: None,
+                        system_instructions: None,
+                        temperature: None,
+                        editor_context: None,
+                    },
+                )
+                .expect("probed/cached unknown model dispatches");
+            // Wait for streaming request to finish before starting second turn.
+            let turn_deadline = Instant::now() + TEST_TIMEOUT;
+            while Instant::now() < turn_deadline {
+                if !engine
+                    .live_sessions()
+                    .iter()
+                    .any(|s| s.active_request_id.is_some())
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
     }
 }

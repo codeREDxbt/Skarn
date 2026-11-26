@@ -9,8 +9,11 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::chat_types::ToolCall;
-use crate::types::{ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model, SeloraStatus};
+use crate::chat_types::{ToolCall, ToolSpec};
+use crate::types::{
+    extract_explicit_tool_capability, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model,
+    SeloraStatus, ToolCapability,
+};
 
 /// 15s to establish the connection (ARCHITECTURE.md §6.1). A host that
 /// cannot answer a TCP/TLS handshake in this window is unreachable, not slow.
@@ -68,10 +71,333 @@ pub enum GatewayFailure {
     Network,
     /// The gateway answered 408/429/5xx even after the retry budget.
     Unavailable,
+    /// The model or deployment is retired/end-of-life (HTTP 410) or unavailable.
+    ModelUnavailable,
+    /// The provider rejected tool calling / function calling (HTTP 400/422).
+    ToolUnsupported,
     /// The gateway refused a non-transient request (400/404/422/...).
     Rejected,
     /// The gateway answered with something this client cannot parse.
     InvalidResponse,
+}
+
+/// Result of the non-streaming tool-capability runtime probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolProbeOutcome {
+    /// The model accepted the probe tool manifest and emitted a tool call.
+    Supported,
+    /// The provider explicitly rejected tools/function calling for this model.
+    Unsupported(String),
+    /// Validation failed or was inconclusive (e.g. 404/410 or plain text with no tool call).
+    Inconclusive(String),
+}
+
+#[derive(Debug, Clone)]
+struct PayloadAdaptation {
+    include_reasoning_effort: bool,
+    include_openrouter_reasoning: bool,
+    include_thinking_toggle: bool,
+    omit_temperature: bool,
+    use_max_completion_tokens: bool,
+    drop_max_tokens: bool,
+    inject_reasoning_content: bool,
+    has_max_tokens: bool,
+}
+
+impl PayloadAdaptation {
+    fn for_request(base_url: &str, req: &ChatRequest) -> Self {
+        let base_lower = base_url.trim().to_ascii_lowercase();
+        let model_lower = req.model.trim().to_ascii_lowercase();
+        let leaf = model_lower.rsplit('/').next().unwrap_or(model_lower.as_str());
+
+        let is_openrouter = base_lower.contains("openrouter.ai");
+        let is_anthropic = base_lower.contains("api.anthropic.com");
+        let is_deepseek = base_lower.contains("api.deepseek.com")
+            || leaf.starts_with("deepseek-reasoner")
+            || leaf.starts_with("deepseek-r1");
+        let is_glm = base_lower.contains("bigmodel.cn")
+            || base_lower.contains("z.ai")
+            || leaf.starts_with("glm-4.5")
+            || leaf.starts_with("glm-4.6")
+            || leaf.starts_with("glm-5")
+            || leaf.starts_with("glm-z1");
+        let is_kimi_thinking =
+            leaf.starts_with("kimi-k2-thinking") || leaf.starts_with("kimi-k2.5");
+        let is_openai_reasoning = !is_openrouter
+            && !leaf.starts_with("gpt-5-chat")
+            && (leaf.starts_with("o1")
+                || leaf.starts_with("o3")
+                || leaf.starts_with("o4")
+                || leaf.starts_with("gpt-5"));
+
+        let has_effort = req.reasoning_effort.is_some();
+        let active_effort = req
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|effort| effort != "none");
+
+        let include_openrouter_reasoning = has_effort && is_openrouter;
+        let include_thinking_toggle = has_effort && !is_openrouter && (is_deepseek || is_glm);
+        let suppress_none_effort = !active_effort
+            && (is_anthropic
+                || (is_openai_reasoning
+                    && (leaf.starts_with("o1") || leaf.starts_with("o3") || leaf.starts_with("o4"))));
+        let include_reasoning_effort =
+            has_effort && !include_openrouter_reasoning && !include_thinking_toggle && !suppress_none_effort;
+
+        Self {
+            include_reasoning_effort,
+            include_openrouter_reasoning,
+            include_thinking_toggle,
+            omit_temperature: is_openai_reasoning || (is_anthropic && active_effort),
+            use_max_completion_tokens: is_openai_reasoning && req.max_tokens.is_some(),
+            drop_max_tokens: false,
+            inject_reasoning_content: is_deepseek || is_glm || is_kimi_thinking,
+            has_max_tokens: req.max_tokens.is_some(),
+        }
+    }
+
+    fn is_passthrough(&self, req: &ChatRequest) -> bool {
+        self.include_reasoning_effort == req.reasoning_effort.is_some()
+            && !self.include_openrouter_reasoning
+            && !self.include_thinking_toggle
+            && !self.omit_temperature
+            && !self.use_max_completion_tokens
+            && !self.drop_max_tokens
+            && !self.inject_reasoning_content
+    }
+
+    fn adapt_on_rejection(&mut self, message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        let is_rejection = lower.contains("400")
+            || lower.contains("422")
+            || lower.contains("unknown")
+            || lower.contains("unsupported")
+            || lower.contains("unrecognized")
+            || lower.contains("not allowed")
+            || lower.contains("not permitted")
+            || lower.contains("does not support")
+            || lower.contains("extra_forbidden")
+            || lower.contains("invalid");
+        if !is_rejection {
+            return false;
+        }
+
+        if self.include_reasoning_effort && lower.contains("reasoning_effort") {
+            self.include_reasoning_effort = false;
+            return true;
+        }
+        if self.include_openrouter_reasoning && lower.contains("reasoning") {
+            self.include_openrouter_reasoning = false;
+            return true;
+        }
+        if self.include_thinking_toggle && lower.contains("thinking") {
+            self.include_thinking_toggle = false;
+            return true;
+        }
+        if !self.drop_max_tokens
+            && !self.use_max_completion_tokens
+            && self.has_max_tokens
+            && lower.contains("max_tokens")
+        {
+            self.use_max_completion_tokens = true;
+            return true;
+        }
+        if !self.drop_max_tokens
+            && self.use_max_completion_tokens
+            && lower.contains("max_completion_tokens")
+        {
+            self.drop_max_tokens = true;
+            return true;
+        }
+        if !self.omit_temperature && lower.contains("temperature") {
+            self.omit_temperature = true;
+            return true;
+        }
+        false
+    }
+}
+
+fn split_leading_think_blocks(content: &str) -> (String, String) {
+    let mut rest = content.trim_start();
+    let mut collected = String::new();
+    loop {
+        let (open_len, close_tag) = if rest.starts_with("<think>") {
+            ("<think>".len(), "</think>")
+        } else if rest.starts_with("<thinking>") {
+            ("<thinking>".len(), "</thinking>")
+        } else {
+            break;
+        };
+        let after_open = &rest[open_len..];
+        let Some(end_idx) = after_open.find(close_tag) else {
+            break;
+        };
+        let block = after_open[..end_idx].trim();
+        if !block.is_empty() {
+            if !collected.is_empty() {
+                collected.push_str("\n\n");
+            }
+            collected.push_str(block);
+        }
+        rest = after_open[end_idx + close_tag.len()..].trim_start();
+    }
+    (collected, rest.to_owned())
+}
+
+fn build_chat_payload(req: &ChatRequest, adapt: &PayloadAdaptation) -> serde_json::Value {
+    let mut val = serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        // Preserve f32's crisp Ryū formatting (e.g. `0.7` instead of `0.699999988079071`).
+        if !adapt.omit_temperature {
+            if let Ok(temp_json) = serde_json::to_string(&req.temperature) {
+                if let Ok(temp_val) = serde_json::from_str::<serde_json::Value>(&temp_json) {
+                    obj.insert("temperature".into(), temp_val);
+                }
+            }
+        }
+        if !adapt.include_reasoning_effort {
+            obj.remove("reasoning_effort");
+        }
+        if adapt.include_openrouter_reasoning {
+            if let Some(eff) = req.reasoning_effort.as_deref() {
+                let reasoning_val = if eff == "none" {
+                    serde_json::json!({ "enabled": false })
+                } else {
+                    serde_json::json!({ "effort": eff })
+                };
+                obj.insert("reasoning".into(), reasoning_val);
+            }
+        }
+        if adapt.include_thinking_toggle {
+            if let Some(eff) = req.reasoning_effort.as_deref() {
+                let mode = if eff == "none" { "disabled" } else { "enabled" };
+                obj.insert("thinking".into(), serde_json::json!({ "type": mode }));
+            }
+        }
+        if adapt.omit_temperature {
+            obj.remove("temperature");
+        }
+        if adapt.drop_max_tokens {
+            obj.remove("max_tokens");
+        } else if adapt.use_max_completion_tokens {
+            if let Some(max_tok) = obj.remove("max_tokens") {
+                obj.insert("max_completion_tokens".into(), max_tok);
+            }
+        }
+        if adapt.inject_reasoning_content {
+            if let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                for msg in messages {
+                    let Some(msg_obj) = msg.as_object_mut() else {
+                        continue;
+                    };
+                    let is_assistant =
+                        msg_obj.get("role").and_then(|r| r.as_str()) == Some("assistant");
+                    let has_tool_calls = msg_obj
+                        .get("tool_calls")
+                        .and_then(|tc| tc.as_array())
+                        .is_some_and(|arr| !arr.is_empty());
+                    if !is_assistant || !has_tool_calls {
+                        continue;
+                    }
+                    let existing = msg_obj
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let (thought, visible) = split_leading_think_blocks(&existing);
+                    msg_obj.insert("reasoning_content".into(), serde_json::Value::String(thought));
+                    msg_obj.insert("content".into(), serde_json::Value::String(visible));
+                }
+            }
+        }
+    }
+    val
+}
+
+fn extract_stream_error_message(val: &serde_json::Value) -> Option<&str> {
+    val.get("error")
+        .and_then(|e| e.get("message").and_then(|m| m.as_str()).or_else(|| e.as_str()))
+        .or_else(|| val.get("detail").and_then(|d| d.as_str()))
+}
+
+fn classify_probe_error(err: SeloraError, _base_url: &str) -> Result<ToolProbeOutcome, SeloraError> {
+    match classify_failure(&err) {
+        GatewayFailure::ToolUnsupported => Ok(ToolProbeOutcome::Unsupported(user_message(&err))),
+        GatewayFailure::ModelUnavailable | GatewayFailure::Rejected => {
+            Ok(ToolProbeOutcome::Inconclusive(user_message(&err)))
+        }
+        GatewayFailure::Auth
+        | GatewayFailure::Network
+        | GatewayFailure::Timeout
+        | GatewayFailure::Unavailable
+        | GatewayFailure::InvalidResponse => Err(err),
+    }
+}
+
+/// Safe, credential-free provider label derived from a gateway base URL.
+pub fn safe_provider_label(base_url: &str) -> String {
+    if let Ok(parsed) = reqwest::Url::parse(base_url.trim()) {
+        if let Some(host) = parsed.host_str() {
+            let host_lower = host.to_ascii_lowercase();
+            let host_port = match parsed.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            if host_lower.contains("nvidia") {
+                return format!("NVIDIA ({host_port})");
+            }
+            return host_port;
+        }
+    }
+    "gateway".to_owned()
+}
+
+/// Apply narrow, evidence-based capability/availability policy when explicit
+/// provider metadata is absent. Unverified models remain [`ToolCapability::Unknown`].
+pub fn apply_model_policy(_base_url: &str, model: &mut Model) {
+    let id_lower = model.id.trim().to_ascii_lowercase();
+    if id_lower == "mistralai/mistral-large-4-1t-a52b" {
+        if model.tool_capability == ToolCapability::Unknown {
+            model.tool_capability = ToolCapability::Supported;
+        }
+    } else if id_lower == "meta/muse-glimmer-30b" {
+        model.available = false;
+        if model.tool_capability == ToolCapability::Unknown {
+            model.tool_capability = ToolCapability::Unsupported;
+        }
+    }
+    if model.reasoning_capability == crate::types::ReasoningCapability::Unknown {
+        model.reasoning_capability = crate::types::infer_reasoning_capability(&model.id);
+    }
+}
+
+/// Apply [`apply_model_policy`] across a discovered catalog.
+pub fn apply_catalog_policy(base_url: &str, models: &mut [Model]) {
+    for model in models {
+        apply_model_policy(base_url, model);
+    }
+}
+
+fn is_tool_capability_error_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let mentions_tools = lower.contains("tool")
+        || lower.contains("function calling")
+        || lower.contains("function_calling")
+        || lower.contains("functions");
+    if !mentions_tools {
+        return false;
+    }
+    lower.contains("not support")
+        || lower.contains("doesn't support")
+        || lower.contains("does not support")
+        || lower.contains("unsupported")
+        || lower.contains("not allowed")
+        || lower.contains("unrecognized")
+        || lower.contains("unknown field")
+        || lower.contains("invalid parameter")
+        || lower.contains("not enabled")
+        || lower.contains("cannot use")
 }
 
 /// Classify a client failure for error codes and user-facing copy.
@@ -83,6 +409,12 @@ pub fn classify_failure(error: &SeloraError) -> GatewayFailure {
         SeloraError::Ai(message) => {
             if message.contains("gateway unavailable") {
                 GatewayFailure::Unavailable
+            } else if message.contains("(HTTP 410") || message.contains("retired/end-of-life") {
+                GatewayFailure::ModelUnavailable
+            } else if message.contains("Tool calling is not supported")
+                || is_tool_capability_error_body(message)
+            {
+                GatewayFailure::ToolUnsupported
             } else if message.contains("gateway rejected") {
                 GatewayFailure::Rejected
             } else {
@@ -115,7 +447,10 @@ pub fn user_message(error: &SeloraError) -> String {
         GatewayFailure::Unavailable => {
             "The AI gateway is temporarily unavailable. Try again in a moment.".into()
         }
-        GatewayFailure::Rejected | GatewayFailure::InvalidResponse => error.to_string(),
+        GatewayFailure::ModelUnavailable
+        | GatewayFailure::ToolUnsupported
+        | GatewayFailure::Rejected
+        | GatewayFailure::InvalidResponse => error.to_string(),
     }
 }
 
@@ -236,39 +571,63 @@ impl SeloraClient {
         }
     }
 
-    fn models_url(&self) -> String {
+    fn resolved_endpoint_url(&self, suffix: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
-        if base.ends_with("/v1") || base.ends_with("/v4") {
-            format!("{base}/models")
+        if base.ends_with(suffix) {
+            return base.to_owned();
+        }
+        const COMPAT_PREFIXES: [&str; 7] = [
+            "/v1beta/openai",
+            "/v1beta",
+            "/openai",
+            "/v1",
+            "/v2",
+            "/v3",
+            "/v4",
+        ];
+        if COMPAT_PREFIXES.iter().any(|prefix| base.ends_with(prefix)) {
+            format!("{base}{suffix}")
         } else {
-            format!("{base}/v1/models")
+            format!("{base}/v1{suffix}")
         }
     }
 
+    fn models_url(&self) -> String {
+        self.resolved_endpoint_url("/models")
+    }
+
     fn chat_completions_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.ends_with("/v1") || base.ends_with("/v4") {
-            format!("{base}/chat/completions")
-        } else {
-            format!("{base}/v1/chat/completions")
+        self.resolved_endpoint_url("/chat/completions")
+    }
+
+    fn apply_provider_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let trimmed_key = self.api_key.trim();
+        if !trimmed_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+            if self
+                .base_url
+                .trim()
+                .to_ascii_lowercase()
+                .contains("api.anthropic.com")
+            {
+                req = req
+                    .header("x-api-key", trimmed_key)
+                    .header("anthropic-version", "2023-06-01");
+            }
         }
+        req.header("HTTP-Referer", "https://selora.ide")
+            .header("X-Title", "Selora IDE")
+            .header("User-Agent", "Selora-IDE/0.1.0")
     }
 
     /// `GET {base_url}/v1/models` — the model catalog, bearer-authenticated.
     pub async fn list_models(&self) -> Result<Vec<Model>, SeloraError> {
         let url = self.models_url();
-        let api_key = self.api_key.clone();
         let http = self.http.clone();
 
         let response_res = self
-            .send_with_retry("model catalog", self.request_timeout, || {
-                let mut req = http.get(&url);
-                if !api_key.trim().is_empty() {
-                    req = req.bearer_auth(&api_key);
-                }
-                req.header("HTTP-Referer", "https://selora.ide")
-                    .header("X-Title", "Selora IDE")
-                    .header("User-Agent", "Selora-IDE/0.1.0")
+            .send_with_retry("model catalog", None, self.request_timeout, || {
+                self.apply_provider_headers(http.get(&url))
             })
             .await;
 
@@ -282,8 +641,9 @@ impl SeloraClient {
                     if let Ok(resp) = self.bounded_get(&tags_url).await {
                         if resp.status().is_success() {
                             if let Ok(tags_text) = self.read_text(resp, "model catalog").await {
-                                let models = parse_models_from_json(&tags_text);
+                                let mut models = parse_models_from_json(&tags_text);
                                 if !models.is_empty() {
+                                    apply_catalog_policy(&self.base_url, &mut models);
                                     return Ok(models);
                                 }
                             }
@@ -324,6 +684,7 @@ impl SeloraClient {
                 model.display_name = model.id.clone();
             }
         }
+        apply_catalog_policy(&self.base_url, &mut models);
         Ok(models)
     }
 
@@ -345,26 +706,39 @@ impl SeloraClient {
         let request_id = Uuid::new_v4();
         let started = Instant::now();
         let url = self.chat_completions_url();
-        let body = req.clone().with_stream(true);
+        let mut body = req.clone().with_stream(true);
+        body.reasoning_effort = body
+            .reasoning_effort
+            .as_deref()
+            .and_then(crate::types::normalize_reasoning_effort);
+        let mut adapt = PayloadAdaptation::for_request(&self.base_url, &body);
 
         let mut stream_retries = 0;
+        let mut param_retries = 0;
         'attempt: loop {
+            let payload = (!adapt.is_passthrough(&body)).then(|| build_chat_payload(&body, &adapt));
             let response = match self
-                .send_with_retry("chat stream", self.stream_response_timeout, || {
-                    let mut http_req = self.http.post(&url);
-                    if !self.api_key.trim().is_empty() {
-                        http_req = http_req.bearer_auth(&self.api_key);
-                    }
-                    http_req
-                        .header("HTTP-Referer", "https://selora.ide")
-                        .header("X-Title", "Selora IDE")
-                        .header("User-Agent", "Selora-IDE/0.1.0")
-                        .json(&body)
-                })
+                .send_with_retry(
+                    "chat stream",
+                    Some(req.model.as_str()),
+                    self.stream_response_timeout,
+                    || {
+                        let req_builder = self.apply_provider_headers(self.http.post(&url));
+                        if let Some(ref custom_payload) = payload {
+                            req_builder.json(custom_payload)
+                        } else {
+                            req_builder.json(&body)
+                        }
+                    },
+                )
                 .await
             {
                 Ok(response) => response,
                 Err(err) => {
+                    if param_retries < 4 && adapt.adapt_on_rejection(&err.to_string()) {
+                        param_retries += 1;
+                        continue 'attempt;
+                    }
                     let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&err)));
                     return Err(err);
                 }
@@ -377,6 +751,7 @@ impl SeloraClient {
             let mut completion_chars: usize = 0;
             let mut in_reasoning = false;
             let mut emitted = false;
+            let mut saw_finish_reason = false;
 
             let mut buffer: Vec<u8> = Vec::new();
             let mut stream = response.bytes_stream();
@@ -415,6 +790,9 @@ impl SeloraClient {
                             let Some(data) = event.data else {
                                 continue; // fieldless/comment-only event
                             };
+                            if data.trim().is_empty() {
+                                continue;
+                            }
                             if data == DONE_SENTINEL {
                                 if in_reasoning {
                                     let _ = send_event(
@@ -439,11 +817,7 @@ impl SeloraClient {
                                     if let Ok(val) =
                                         serde_json::from_str::<serde_json::Value>(&data)
                                     {
-                                        if let Some(msg) = val
-                                            .get("error")
-                                            .and_then(|e| e.get("message"))
-                                            .and_then(|m| m.as_str())
-                                        {
+                                        if let Some(msg) = extract_stream_error_message(&val) {
                                             let error =
                                                 SeloraError::Ai(format!("gateway error: {msg}"));
                                             let _ = send_event(
@@ -464,13 +838,16 @@ impl SeloraClient {
                                 usage = Some(chunk_usage);
                             }
                             let first_choice = chunk.choices.first();
+                            if first_choice
+                                .and_then(|choice| choice.finish_reason.as_deref())
+                                .is_some_and(|reason| !reason.is_empty())
+                            {
+                                saw_finish_reason = true;
+                            }
                             let delta = first_choice.and_then(|choice| choice.delta.as_ref());
 
-                            let reasoning_opt = delta
-                                .and_then(|d| d.reasoning_content.as_deref())
-                                .or_else(|| delta.and_then(|d| d.reasoning.as_deref()))
-                                .or_else(|| delta.and_then(|d| d.thought.as_deref()))
-                                .filter(|s| !s.is_empty());
+                            let reasoning_owned = delta.and_then(ChunkDelta::reasoning_text);
+                            let reasoning_opt = reasoning_owned.as_deref().filter(|s| !s.is_empty());
 
                             let content_opt = delta
                                 .and_then(|d| d.content.as_deref())
@@ -539,14 +916,29 @@ impl SeloraClient {
                 }
             }
 
+            if saw_finish_reason {
+                if in_reasoning {
+                    let _ = send_event(&tx, ChatEvent::Delta("</think>\n\n".to_owned()));
+                }
+                let receipt = build_receipt(
+                    &req,
+                    request_id,
+                    started,
+                    usage,
+                    prompt_chars,
+                    completion_chars,
+                );
+                send_event(&tx, ChatEvent::Done(receipt.clone()))?;
+                return Ok(receipt);
+            }
             if !emitted && !tx.is_closed() && stream_retries < self.max_net_retries {
                 let delay = with_jitter(retry_delay(self.net_retry_delay, stream_retries));
                 stream_retries += 1;
                 tokio::time::sleep(delay).await;
                 continue 'attempt;
             }
-            // The body ended without the `[DONE]` sentinel: the reply was
-            // truncated (RISKS.md §3). Never report a receipt we cannot trust.
+            // The body ended without the `[DONE]` sentinel or a `finish_reason`:
+            // the reply was truncated (RISKS.md §3). Never report a receipt we cannot trust.
             let error = SeloraError::Ai("stream closed before [DONE]".into());
             let _ = send_event(&tx, ChatEvent::Error(duplicate_error(&error)));
             return Err(error);
@@ -582,9 +974,14 @@ impl SeloraClient {
         );
 
         let response = self
-            .send_with_retry("ghost completion", self.request_timeout, || {
-                self.http.post(&url).bearer_auth(&self.api_key).json(&body)
-            })
+            .send_with_retry(
+                "ghost completion",
+                Some(model),
+                self.request_timeout,
+                || {
+                    self.http.post(&url).bearer_auth(&self.api_key).json(&body)
+                },
+            )
             .await?;
         let reply: CompletionResponse = self.read_json(response, "ghost completion").await?;
 
@@ -615,13 +1012,39 @@ impl SeloraClient {
         req: ChatRequest,
     ) -> Result<Option<ChatMessage>, SeloraError> {
         let url = self.chat_completions_url();
-        let body = req.with_stream(false);
+        let mut body = req.with_stream(false);
+        body.reasoning_effort = body
+            .reasoning_effort
+            .as_deref()
+            .and_then(crate::types::normalize_reasoning_effort);
+        let mut adapt = PayloadAdaptation::for_request(&self.base_url, &body);
+        let mut param_retries = 0;
 
-        let response = self
-            .send_with_retry("chat completion", self.request_timeout, || {
-                self.http.post(&url).bearer_auth(&self.api_key).json(&body)
-            })
-            .await?;
+        let response = loop {
+            let payload = (!adapt.is_passthrough(&body)).then(|| build_chat_payload(&body, &adapt));
+            match self
+                .send_with_retry(
+                    "chat completion",
+                    Some(body.model.as_str()),
+                    self.request_timeout,
+                    || {
+                        let req_builder = self.apply_provider_headers(self.http.post(&url));
+                        if let Some(ref custom_payload) = payload {
+                            req_builder.json(custom_payload)
+                        } else {
+                            req_builder.json(&body)
+                        }
+                    },
+                )
+                .await
+            {
+                Ok(response) => break response,
+                Err(err) if param_retries < 4 && adapt.adapt_on_rejection(&err.to_string()) => {
+                    param_retries += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        };
         let reply: CompletionResponse = self.read_json(response, "chat completion").await?;
 
         Ok(reply
@@ -634,6 +1057,90 @@ impl SeloraClient {
                 reply.tool_calls = message.tool_calls;
                 reply
             }))
+    }
+
+    /// Run a non-streaming minimal benign tool-call probe via [`Self::complete_chat`]
+    /// to verify whether `model` accepts a tool manifest and emits `tool_calls`.
+    ///
+    /// Uses a 160-token budget (32 tokens was insufficient for real endpoints
+    /// such as NVIDIA Mistral). Treats 404/410/capability errors or missing
+    /// `tool_calls` as failed validation, never as proof of support.
+    pub async fn probe_tool_capability(&self, model: &str) -> Result<ToolProbeOutcome, SeloraError> {
+        let probe_tool = ToolSpec::new(
+            "selora_probe_echo",
+            "Return the provided text verbatim to verify tool calling support.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Short confirmation word."
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }),
+        );
+        let mut req = ChatRequest::new(
+            model,
+            vec![
+                ChatMessage::system(
+                    "You are verifying tool calling capability. Call the `selora_probe_echo` tool once with {\"text\":\"ok\"}. Do not answer with plain text.",
+                ),
+                ChatMessage::user(
+                    "Verify tool calling by invoking selora_probe_echo with text \"ok\".",
+                ),
+            ],
+        )
+        .with_tools(vec![probe_tool])
+        .with_temperature(0.0);
+        req.max_tokens = Some(160);
+
+        let first = self.complete_chat(req.clone()).await;
+        let outcome = match first {
+            Ok(Some(message)) => {
+                if message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+                {
+                    Ok(ToolProbeOutcome::Supported)
+                } else {
+                    // Reasoning models often burn a 160-token probe budget on internal
+                    // reasoning tokens before emitting `tool_calls`. Retry once with 1024.
+                    let (_, visible) = split_leading_think_blocks(&message.content);
+                    if message.content.trim().is_empty()
+                        || message.content.contains("<think")
+                        || visible.chars().count() < 16
+                    {
+                        let mut expanded = req;
+                        expanded.max_tokens = Some(1024);
+                        match self.complete_chat(expanded).await {
+                            Ok(Some(retry_msg))
+                                if retry_msg
+                                    .tool_calls
+                                    .as_ref()
+                                    .is_some_and(|calls| !calls.is_empty()) =>
+                            {
+                                return Ok(ToolProbeOutcome::Supported);
+                            }
+                            Ok(_) => {}
+                            Err(err) => return classify_probe_error(err, &self.base_url),
+                        }
+                    }
+                    Ok(ToolProbeOutcome::Inconclusive(format!(
+                        "Model '{model}' at {} responded without emitting a tool call during capability verification.",
+                        safe_provider_label(&self.base_url)
+                    )))
+                }
+            }
+            Ok(None) => Ok(ToolProbeOutcome::Inconclusive(format!(
+                "Provider {} returned no choices when verifying tool capability for model '{model}'.",
+                safe_provider_label(&self.base_url)
+            ))),
+            Err(err) => return classify_probe_error(err, &self.base_url),
+        };
+        outcome
     }
 
     /// A cheap reachability ping (ARCHITECTURE.md §10.6): `HEAD {base_url}`,
@@ -670,6 +1177,7 @@ impl SeloraClient {
     async fn send_with_retry(
         &self,
         what: &str,
+        model: Option<&str>,
         budget: Duration,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, SeloraError> {
@@ -692,9 +1200,7 @@ impl SeloraClient {
                     }
                     if status.as_u16() == 401 || status.as_u16() == 403 {
                         let body = self.error_body(response).await;
-                        return Err(SeloraError::Auth(format!(
-                            "key invalid or not authorized (HTTP {status}{body})"
-                        )));
+                        return Err(self.format_http_error(what, model, status, &body));
                     }
                     if is_transient_status(status) {
                         if http_retries < self.max_http_retries {
@@ -708,13 +1214,12 @@ impl SeloraClient {
                         }
                         let body = self.error_body(response).await;
                         return Err(SeloraError::Ai(format!(
-                            "gateway unavailable (HTTP {status}){body}"
+                            "gateway unavailable at {} (HTTP {status}){body}",
+                            safe_provider_label(&self.base_url)
                         )));
                     }
                     let body = self.error_body(response).await;
-                    return Err(SeloraError::Ai(format!(
-                        "gateway rejected request (HTTP {status}){body}"
-                    )));
+                    return Err(self.format_http_error(what, model, status, &body));
                 }
                 Ok(Err(err)) => {
                     if is_transient_transport(&err) && network_retries < self.max_net_retries {
@@ -730,11 +1235,70 @@ impl SeloraClient {
                     }
                     return Err(SeloraError::Net(format!(
                         "cannot reach the AI gateway ({}): request failed",
-                        self.base_url
+                        safe_provider_label(&self.base_url)
                     )));
                 }
             }
         }
+    }
+
+    fn format_http_error(
+        &self,
+        what: &str,
+        model: Option<&str>,
+        status: reqwest::StatusCode,
+        body: &str,
+    ) -> SeloraError {
+        let provider = safe_provider_label(&self.base_url);
+        let model_part = model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(|m| format!(" for model '{m}'"))
+            .unwrap_or_default();
+
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return SeloraError::Auth(format!(
+                "key invalid or not authorized at {provider} (HTTP {status}{body})"
+            ));
+        }
+
+        if status == reqwest::StatusCode::GONE {
+            return SeloraError::Ai(format!(
+                "gateway rejected request{model_part} at {provider} (HTTP {status}){body}. \
+                 This model is retired/end-of-life and cannot be used. \
+                 Refresh the model catalog and select an active model instead."
+            ));
+        }
+
+        if status == reqwest::StatusCode::NOT_FOUND {
+            if what == "model catalog" {
+                return SeloraError::Ai(format!(
+                    "gateway rejected model catalog request at {provider} (HTTP {status}){body}. \
+                     Check the provider base URL."
+                ));
+            }
+            return SeloraError::Ai(format!(
+                "gateway rejected request{model_part} at {provider} (HTTP {status}){body}. \
+                 The selected model or deployment is not available on this provider account at /v1/chat/completions \
+                 (the account may lack entitlement/access, or the provider's model/function mapping may be stale). \
+                 Refresh the model catalog, verify model entitlement/account access, and choose a chat-capable model confirmed available for this account."
+            ));
+        }
+
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY)
+            && is_tool_capability_error_body(body)
+        {
+            return SeloraError::Ai(format!(
+                "gateway rejected request{model_part} at {provider} (HTTP {status}){body}. \
+                 Tool calling is not supported by this model or provider endpoint. \
+                 Choose a tool-capable model for agent turns, or use plain chat."
+            ));
+        }
+
+        SeloraError::Ai(format!(
+            "gateway rejected request{model_part} at {provider} (HTTP {status}){body}"
+        ))
     }
 
     /// One bounded GET, used by the Ollama fallback probes. No retries: a
@@ -938,6 +1502,16 @@ pub fn parse_models_from_json(text: &str) -> Vec<Model> {
                         "default".to_string()
                     };
 
+                    let tool_capability =
+                        extract_explicit_tool_capability(item).unwrap_or(ToolCapability::Unknown);
+                    let reasoning_capability =
+                        crate::types::extract_explicit_reasoning_capability(item)
+                            .unwrap_or_else(|| crate::types::infer_reasoning_capability(id_str));
+                    let available = item
+                        .get("available")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+
                     result.push(Model {
                         id: id_str.to_string(),
                         display_name: if display_name.is_empty() {
@@ -949,7 +1523,9 @@ pub fn parse_models_from_json(text: &str) -> Vec<Model> {
                         price_per_1k_input: 0.0,
                         price_per_1k_output: 0.0,
                         supports_streaming: true,
-                        supports_tools: true,
+                        tool_capability,
+                        reasoning_capability,
+                        available,
                         family,
                     });
                 }
@@ -1001,6 +1577,16 @@ struct ChunkChoice {
     text: Option<String>,
     #[serde(default)]
     message: Option<CompletionMessage>,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningDetail {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1014,12 +1600,48 @@ struct ChunkDelta {
     #[serde(default)]
     thought: Option<String>,
     #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Vec<ReasoningDetail>>,
+    #[serde(default)]
     text: Option<String>,
     /// Streaming tool-call fragments (the OpenAI `delta.tool_calls[]`
     /// array) — emitted as [`ChatEvent::ToolCallDelta`] for the caller's
     /// [`crate::ToolCallAccumulator`] to reassemble.
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallFragment>>,
+}
+
+impl ChunkDelta {
+    fn reasoning_text(&self) -> Option<String> {
+        for candidate in [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.thought.as_deref(),
+            self.thinking.as_deref(),
+        ] {
+            if let Some(text) = candidate.filter(|s| !s.is_empty()) {
+                return Some(text.to_owned());
+            }
+        }
+        if let Some(details) = self.reasoning_details.as_deref() {
+            let mut combined = String::new();
+            for item in details {
+                if let Some(piece) = item
+                    .text
+                    .as_deref()
+                    .or(item.summary.as_deref())
+                    .filter(|s| !s.is_empty())
+                {
+                    combined.push_str(piece);
+                }
+            }
+            if !combined.is_empty() {
+                return Some(combined);
+            }
+        }
+        None
+    }
 }
 
 /// One `delta.tool_calls[]` fragment: `{index?, id?, function:{name?,
@@ -1400,6 +2022,34 @@ mod tests {
         assert!(
             matches!(&err, SeloraError::Ai(msg) if msg.contains("model `nope` not found")),
             "gateway's own words must surface, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_chat_404_explains_provider_model_account_mismatch() {
+        let server = MockServer::start().await;
+        let _mock = Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(
+                "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function 'internal-id': Not found for account 'account-id'\"}",
+            ))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = client.stream_chat(chat_request(), tx).await.unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("Function 'internal-id'"), "provider body: {message}");
+        assert!(
+            message.contains("not available on this provider account"),
+            "account guidance: {message}"
+        );
+        assert!(
+            message.contains("chat-capable model"),
+            "model guidance: {message}"
         );
     }
 
@@ -2257,5 +2907,476 @@ mod tests {
             matches!(client.complete_chat(chat_request()).await, Ok(None)),
             "no choices is Ok(None)"
         );
+    }
+
+    #[tokio::test]
+    async fn nvidia_catalog_applies_narrow_evidence_based_capability_policy() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "mistralai/mistral-large-4-1t-a52b",
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "mistralai"
+                    },
+                    {
+                        "id": "meta/muse-glimmer-30b",
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "meta"
+                    },
+                    {
+                        "id": "qwen/qwen3-coder-480b",
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "qwen"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/v1", server.uri()), "nvapi-secret-key-9999");
+        let models = client.list_models().await.expect("list_models succeeds");
+        assert_eq!(models.len(), 3);
+
+        let mistral = models
+            .iter()
+            .find(|m| m.id == "mistralai/mistral-large-4-1t-a52b")
+            .unwrap();
+        assert_eq!(mistral.tool_capability, ToolCapability::Supported);
+        assert!(mistral.is_available());
+
+        let muse = models
+            .iter()
+            .find(|m| m.id == "meta/muse-glimmer-30b")
+            .unwrap();
+        assert_eq!(muse.tool_capability, ToolCapability::Unsupported);
+        assert!(!muse.is_available());
+
+        // Other NVIDIA models without explicit metadata must stay Unknown, never guessed Supported.
+        let unverified = models
+            .iter()
+            .find(|m| m.id == "qwen/qwen3-coder-480b")
+            .unwrap();
+        assert_eq!(unverified.tool_capability, ToolCapability::Unknown);
+        assert!(!unverified.supports_tools());
+        assert!(unverified.is_available());
+    }
+
+    #[tokio::test]
+    async fn provider_410_and_400_tool_errors_and_404_redact_api_key() {
+        let secret = "nvapi-super-secret-do-not-leak-4321";
+
+        let server_410 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(410).set_body_string("Gone: model retired"))
+            .mount(&server_410)
+            .await;
+        let client_410 = SeloraClient::new(&format!("{}/v1", server_410.uri()), secret);
+        let req_410 = ChatRequest {
+            model: "meta/muse-glimmer-30b".into(),
+            messages: vec![ChatMessage::user("hi")],
+            stream: false,
+            ..chat_request()
+        };
+        let err_410 = client_410.complete_chat(req_410).await.unwrap_err().to_string();
+        assert!(err_410.contains("410") || err_410.contains("retired"));
+        assert!(err_410.contains("meta/muse-glimmer-30b"));
+        assert!(!err_410.contains(secret));
+
+        let server_400 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                "This model does not support tool calling or function_calling",
+            ))
+            .mount(&server_400)
+            .await;
+        let client_400 = SeloraClient::new(&format!("{}/v1", server_400.uri()), secret);
+        let outcome_400 = client_400
+            .probe_tool_capability("chat/only-model")
+            .await
+            .expect("probe returns typed outcome");
+        assert!(
+            matches!(outcome_400, ToolProbeOutcome::Unsupported(ref msg) if !msg.contains(secret)),
+            "expected Unsupported without leaking secret, got {outcome_400:?}"
+        );
+
+        let server_404 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string("Function abc-123: Not found for account"),
+            )
+            .mount(&server_404)
+            .await;
+        let client_404 = SeloraClient::new(&format!("{}/v1", server_404.uri()), secret);
+        let outcome_404 = client_404
+            .probe_tool_capability("unentitled/model")
+            .await
+            .expect("probe returns typed outcome");
+        assert!(
+            matches!(outcome_404, ToolProbeOutcome::Inconclusive(ref msg) if !msg.contains(secret) && msg.contains("unentitled/model")),
+            "404 must fail probe cleanly instead of proving support: {outcome_404:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_tool_capability_uses_160_token_budget_and_requires_real_tool_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "mistralai/mistral-large-4-1t-a52b",
+                "stream": false,
+                "max_tokens": 160
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_probe_1",
+                            "type": "function",
+                            "function": {
+                                "name": "selora_probe_echo",
+                                "arguments": "{\"value\":\"ok\"}"
+                            }
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/v1", server.uri()), "nvapi-secret");
+        let outcome = client
+            .probe_tool_capability("mistralai/mistral-large-4-1t-a52b")
+            .await
+            .expect("probe returns outcome");
+        assert_eq!(outcome, ToolProbeOutcome::Supported);
+    }
+
+    #[tokio::test]
+    async fn stream_chat_normalizes_standard_effort_and_falls_back_when_rejected() {
+        let server_norm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "minimaxai/minimax-m3.1-flash",
+                "reasoning_effort": "medium",
+                "stream": true
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body(&[content_chunk("ok"), finish_chunk("stop")])),
+            )
+            .expect(1)
+            .mount(&server_norm)
+            .await;
+
+        let client_norm = SeloraClient::new(&format!("{}/v1", server_norm.uri()), "nvapi-secret");
+        let mut req = ChatRequest::new(
+            "minimaxai/minimax-m3.1-flash",
+            vec![ChatMessage::user("hi")],
+        );
+        // Simulate raw UI label even if struct field was populated directly.
+        req.reasoning_effort = Some("standard".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        client_norm
+            .stream_chat(req, tx)
+            .await
+            .expect("normalized reasoning_effort succeeds");
+
+        // If gateway rejects reasoning_effort via HTTP 400, client retries once without it.
+        let server_fallback = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "reasoning_effort": "medium" })))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string("Unrecognized request argument: reasoning_effort"),
+            )
+            .expect(1)
+            .mount(&server_fallback)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body(&[content_chunk("recovered"), finish_chunk("stop")])),
+            )
+            .expect(1)
+            .mount(&server_fallback)
+            .await;
+
+        let client_fb = SeloraClient::new(&format!("{}/v1", server_fallback.uri()), "nvapi-secret");
+        let req_fb = ChatRequest::new("m", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("standard".into()));
+        let (tx_fb, _rx_fb) = mpsc::unbounded_channel();
+        client_fb
+            .stream_chat(req_fb, tx_fb)
+            .await
+            .expect("fallback retry without reasoning_effort succeeds");
+        let recorded = server_fallback.received_requests().await.unwrap();
+        let second_body: serde_json::Value = serde_json::from_slice(&recorded[1].body).unwrap();
+        assert!(second_body.get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn gemini_v1beta_openai_url_and_finish_reason_eof_complete_cleanly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/openai/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"thought\":\"plan step\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/v1beta/openai", server.uri()), "goog-key");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let req = ChatRequest::new("gemini-2.5-pro", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("high".into()));
+        let receipt = client
+            .stream_chat(req, tx)
+            .await
+            .expect("stream with finish_reason completes without [DONE]");
+        assert_eq!(receipt.completion_tokens, 3); // "plan step" (9) + "done" (4) = 13 chars -> 13/4 = 3
+        let events = drain(&mut rx);
+        assert_eq!(deltas(&events), ["<think>", "plan step", "</think>\n\n", "done"]);
+        assert!(matches!(events.last(), Some(ChatEvent::Done(_))));
+    }
+
+    #[tokio::test]
+    async fn openrouter_uses_reasoning_object_and_extracts_reasoning_details_without_duplication() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openrouter.ai/api/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "anthropic/claude-sonnet-4",
+                "reasoning": { "effort": "high" }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"text\":\"trace\"}]}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/openrouter.ai/api/v1", server.uri()), "or-key");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let req = ChatRequest::new("anthropic/claude-sonnet-4", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("max".into()));
+        client.stream_chat(req, tx).await.expect("openrouter stream succeeds");
+
+        let recorded = server.received_requests().await.unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&recorded[0].body).unwrap();
+        assert!(wire.get("reasoning_effort").is_none());
+        let events = drain(&mut rx);
+        assert_eq!(deltas(&events), ["<think>", "trace", "</think>\n\n", "answer"]);
+    }
+
+    #[tokio::test]
+    async fn deepseek_uses_thinking_toggle_and_splits_assistant_tool_reasoning_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "deepseek-reasoner",
+                "thinking": { "type": "enabled" }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body(&[content_chunk("ok"), finish_chunk("stop")])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/v1", server.uri()), "ds-key");
+        let mut assistant_with_tools = ChatMessage::assistant("<think>step 1</think>\n\ncalling tool");
+        assistant_with_tools.tool_calls = Some(vec![ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]);
+        let req = ChatRequest::new(
+            "deepseek-reasoner",
+            vec![
+                ChatMessage::user("go"),
+                assistant_with_tools,
+                ChatMessage::tool_result("call_1", "ok"),
+            ],
+        )
+        .with_reasoning_effort(Some("standard".into()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        client.stream_chat(req, tx).await.expect("deepseek stream succeeds");
+
+        let recorded = server.received_requests().await.unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&recorded[0].body).unwrap();
+        assert!(wire.get("reasoning_effort").is_none());
+        assert_eq!(wire["messages"][1]["reasoning_content"], "step 1");
+        assert_eq!(wire["messages"][1]["content"], "calling tool");
+    }
+
+    #[tokio::test]
+    async fn openai_reasoning_model_and_generic_temperature_fallback_succeed() {
+        // Direct OpenAI o3 omits default temperature & maps max_tokens -> max_completion_tokens
+        let o3_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "choices": [{ "message": { "role": "assistant", "content": "hi" } }]
+                    })),
+            )
+            .expect(1)
+            .mount(&o3_server)
+            .await;
+        let o3_client = SeloraClient::new(&format!("{}/v1", o3_server.uri()), "sk-test");
+        let mut o3_req = ChatRequest::new("o3", vec![ChatMessage::user("hi")]);
+        o3_req.max_tokens = Some(512);
+        o3_client.complete_chat(o3_req).await.expect("o3 succeeds");
+        let rec = o3_server.received_requests().await.unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&rec[0].body).unwrap();
+        assert!(wire.get("temperature").is_none());
+        assert!(wire.get("max_tokens").is_none());
+        assert_eq!(wire["max_completion_tokens"], 512);
+
+        // Generic gateway rejecting temperature + max_tokens recovers cleanly on retry
+        let fb_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "max_tokens": 160 })))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string("Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."),
+            )
+            .expect(1)
+            .mount(&fb_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "max_completion_tokens": 160 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "selora_probe_echo", "arguments": "{\"text\":\"ok\"}" }
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&fb_server)
+            .await;
+
+        let fb_client = SeloraClient::new(&format!("{}/v1", fb_server.uri()), "sk-test");
+        let outcome = fb_client.probe_tool_capability("custom-reasoning-model").await.unwrap();
+        assert_eq!(outcome, ToolProbeOutcome::Supported);
+    }
+
+    #[tokio::test]
+    async fn probe_retries_with_1024_budget_when_reasoning_exhausts_160_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "max_tokens": 160 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "role": "assistant", "content": "<think>still thinking" } }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "max_tokens": 1024 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_2",
+                            "type": "function",
+                            "function": { "name": "selora_probe_echo", "arguments": "{\"text\":\"ok\"}" }
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/v1", server.uri()), "sk-test");
+        let outcome = client.probe_tool_capability("thinking-model").await.unwrap();
+        assert_eq!(outcome, ToolProbeOutcome::Supported);
+    }
+
+    #[tokio::test]
+    async fn anthropic_sends_headers_and_omits_temp_when_thinking_or_reasoning_when_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api.anthropic.com/v1/chat/completions"))
+            .and(header("x-api-key", "ant-secret"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body(&[content_chunk("ok"), finish_chunk("stop")])),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = SeloraClient::new(&format!("{}/api.anthropic.com/v1", server.uri()), "ant-secret");
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let req_on = ChatRequest::new("claude-sonnet-4", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("max".into()));
+        client.stream_chat(req_on, tx1).await.expect("anthropic thinking succeeds");
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let req_off = ChatRequest::new("claude-sonnet-4", vec![ChatMessage::user("hi")])
+            .with_reasoning_effort(Some("none".into()));
+        client.stream_chat(req_off, tx2).await.expect("anthropic off succeeds");
+
+        let recs = server.received_requests().await.unwrap();
+        let on_wire: serde_json::Value = serde_json::from_slice(&recs[0].body).unwrap();
+        assert_eq!(on_wire["reasoning_effort"], "high");
+        assert!(on_wire.get("temperature").is_none());
+
+        let off_wire: serde_json::Value = serde_json::from_slice(&recs[1].body).unwrap();
+        assert!(off_wire.get("reasoning_effort").is_none());
+        assert_eq!(off_wire["temperature"], 0.7);
     }
 }

@@ -212,6 +212,9 @@ pub struct WorkflowHostConfig {
     /// Per-run tool-effect ledger: `(path, run id)`.
     tool_effect_ledger: Option<(PathBuf, String)>,
     model_metadata: Option<Model>,
+    model_error: Option<String>,
+    catalog_models: Vec<Model>,
+    capability_cache: Option<Arc<crate::sessions::ToolCapabilityCache>>,
     turn_caps: Option<TurnCaps>,
     approval_handler: Option<WorkflowApprovalHandler>,
     #[cfg(test)]
@@ -239,6 +242,9 @@ impl WorkflowHostConfig {
             chat: None,
             tool_effect_ledger: None,
             model_metadata: None,
+            model_error: None,
+            catalog_models: Vec::new(),
+            capability_cache: None,
             turn_caps: None,
             approval_handler: None,
             #[cfg(test)]
@@ -289,6 +295,26 @@ impl WorkflowHostConfig {
     pub fn with_model(mut self, model: Model) -> Self {
         self.model = model.id.clone();
         self.model_metadata = Some(model);
+        self
+    }
+
+    /// Surface a pre-resolved model error (such as missing or unavailable active model)
+    /// when a workflow executes an `ask` step.
+    #[must_use]
+    pub(crate) fn with_model_error(mut self, error: Option<String>) -> Self {
+        self.model_error = error;
+        self
+    }
+
+    /// Attach the shared capability cache and catalog models for workflow asks.
+    #[must_use]
+    pub(crate) fn with_capability_context(
+        mut self,
+        cache: Arc<crate::sessions::ToolCapabilityCache>,
+        catalog_models: Vec<Model>,
+    ) -> Self {
+        self.capability_cache = Some(cache);
+        self.catalog_models = catalog_models;
         self
     }
 

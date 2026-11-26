@@ -3468,7 +3468,9 @@ mod tests {
             price_per_1k_input: 0.0,
             price_per_1k_output: 0.0,
             supports_streaming: true,
-            supports_tools: false,
+            tool_capability: selora_ai::ToolCapability::Unsupported,
+            reasoning_capability: selora_ai::ReasoningCapability::Unknown,
+            available: true,
             family: "glm".to_owned(),
         }
     }

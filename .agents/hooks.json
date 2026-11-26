@@ -1,0 +1,42 @@
+{
+  "skarn-pre-tool-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command|write_to_file|replace_file_content|multi_replace_file_content|write_file|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"E:/Projects/Selora IDE/.agents/hooks/pre-tool-guard.mjs\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "skarn-post-tool-audit": {
+    "enabled": true,
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|write_file|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"E:/Projects/Selora IDE/.agents/hooks/post-tool-audit.mjs\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  },
+  "skarn-stop-gate": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node \"E:/Projects/Selora IDE/.agents/hooks/stop-verification-gate.mjs\"",
+        "timeout": 120
+      }
+    ]
+  }
+}

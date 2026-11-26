@@ -11,6 +11,7 @@ const transport = vi.hoisted(() => ({
   native: false,
   switchSession: vi.fn().mockResolvedValue(undefined),
   send: vi.fn(),
+  prefs: vi.fn(),
 }));
 
 vi.mock('../bridge/bridge', async (original) => ({
@@ -23,8 +24,9 @@ vi.mock('../bridge/bridge', async (original) => ({
   switchSession: transport.switchSession,
   sendAgent: transport.send,
   subscribeAgentPreferences: vi.fn().mockResolvedValue(() => {}),
-  getAgentPreferences: vi.fn().mockResolvedValue({
-    revision: 0, temperature: 0.3, systemInstructions: '', customModelId: '',
+  getAgentPreferences: transport.prefs,
+  updateAgentPreferences: vi.fn().mockResolvedValue({
+    revision: 1, temperature: 0.3, systemInstructions: '', customModelId: '',
     selectedModel: '', reasoningEffort: 'standard',
   }),
 }));
@@ -71,6 +73,10 @@ beforeEach(() => {
   transport.native = false;
   transport.switchSession.mockClear();
   transport.send.mockClear();
+  transport.prefs.mockReset().mockResolvedValue({
+    revision: 0, temperature: 0.3, systemInstructions: '', customModelId: '',
+    selectedModel: '', reasoningEffort: 'standard',
+  });
 });
 
 afterEach(() => {
@@ -255,5 +261,74 @@ describe('isolated window runtime delivery', () => {
     }
     agents.agentStore.selectSessionLocally('first');
     expect(agents.agentStore.getSnapshot().todos[0]?.text).toBe('First session task');
+  });
+
+  it('never blanks ready UI back to connecting on first prompt or live bootstrap_state events', async () => {
+    transport.native = true;
+    const initialBootstrap = makeBootstrap({
+      workspace: { id: 'ws', core_instance_id: 'core-0001', root: 'C:/repo', display_name: 'repo' },
+      models: [{ id: 'test-model', display_name: 'Test model', available: true }],
+      active_model_id: 'test-model',
+      chat: {
+        sessions: [],
+        messages: [],
+        active_session_id: '',
+        active_request_id: null,
+        active_turn_id: null,
+        pending_approval: null,
+      },
+    });
+    transport.prefs.mockResolvedValue({
+      revision: 0, temperature: 0.3, systemInstructions: '', customModelId: 'test-model',
+      selectedModel: 'test-model', reasoningEffort: 'standard',
+    });
+    transport.bootstrap.mockResolvedValue(initialBootstrap);
+    transport.agents.mockResolvedValue({
+      protocol_version: 1,
+      core_instance_id: 'core-0001',
+      workspace_id: 'ws',
+      snapshot_sequence: 1,
+      selected_session_id: 'sess_default',
+      sessions: [session('sess_default')],
+    });
+    let deliver!: (event: EventEnvelope) => void;
+    transport.listen.mockImplementation(async (listener) => {
+      deliver = listener;
+      return vi.fn();
+    });
+    transport.send.mockReturnValue({ requestId: 'req-live', promise: new Promise(() => {}) });
+
+    const window = await runtime();
+    await window.app.startApp();
+    expect(window.app.getAppSnapshot().phase).toBe('ready');
+
+    transport.agents.mockResolvedValue({
+      protocol_version: 1,
+      core_instance_id: 'core-0001',
+      workspace_id: 'ws',
+      snapshot_sequence: 2,
+      selected_session_id: 'sess_default',
+      sessions: [session('sess_default', { active_request_id: 'req-live', state: 'thinking' })],
+    });
+
+    const phases: string[] = [];
+    const unsubscribe = window.app.subscribeApp(() => {
+      phases.push(window.app.getAppSnapshot().phase);
+    });
+
+    expect(window.agentStore.sendUserMessage('hello')).toBe(true);
+    deliver(makeEvent(1, {
+      type: 'agent_state_changed',
+      payload: { request_id: 'req-live', session_id: 'sess_default', turn_id: 'turn-live', state: 'thinking' },
+    }));
+    deliver(makeEvent(2, {
+      type: 'bootstrap_state',
+      payload: initialBootstrap,
+    }));
+    await vi.advanceTimersByTimeAsync(10);
+    unsubscribe();
+
+    expect(window.app.getAppSnapshot().phase).toBe('ready');
+    expect(phases).not.toContain('connecting');
   });
 });

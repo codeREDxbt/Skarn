@@ -189,7 +189,18 @@ export function markActiveMessageFailed(
   message: string,
 ): ChatMessage[] {
   const index = messages.length - 1;
-  if (index < 0 || messages[index]?.role !== 'assistant') return messages;
+  if (index < 0 || messages[index]?.role !== 'assistant') {
+    const appended: TerminalChatMessage = {
+      id: `msg_${Date.now()}_a_err`,
+      role: 'assistant',
+      content: `[Error: ${message}]`,
+      status: 'error',
+      terminalError: message,
+      timestamp: Date.now(),
+      toolCalls: [],
+    };
+    return [...messages, appended];
+  }
   const last = messages[index]!;
   const updated: TerminalChatMessage = {
     ...last,
@@ -254,6 +265,18 @@ export const NO_WORKSPACE_MESSAGE =
 export const NO_MODEL_MESSAGE =
   'Connect and refresh models: no model is available to send this prompt to.';
 
+export function findCatalogModel(models: readonly Model[], idOrName: string): Model | undefined {
+  const trimmed = idOrName.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  return models.find(
+    (model) =>
+      model.id === trimmed ||
+      model.id.toLowerCase() === lower ||
+      model.display_name === trimmed,
+  );
+}
+
 /**
  * The exact model id a turn may send, or `null` when nothing is known.
  * Only backend-reported catalog entries (or an explicit user-entered override)
@@ -264,9 +287,7 @@ export function resolveModelId(snapshot: AgentState): string | null {
   if (custom) return custom;
   const selected = snapshot.selectedModel.trim();
   if (!selected) return null;
-  const matched = snapshot.availableModels.find(
-    (model) => model.id === selected || model.display_name === selected,
-  );
+  const matched = findCatalogModel(snapshot.availableModels, selected);
   return matched ? matched.id : null;
 }
 
@@ -278,15 +299,60 @@ export function toAgentMode(mode: PermissionMode): AgentMode {
 }
 
 /**
- * Gate a send on a real workspace + a real model. The composer renders the
- * message and disables send; the store refuses the turn for the same reason.
+ * Gate a send on a real workspace + a real, compatible model. The composer
+ * renders the message and disables send; the store refuses the turn for the
+ * same reason.
  */
 export function getComposerGate(snapshot: AgentState): ComposerGate {
   if (!snapshot.workspace) {
     return { ready: false, reason: 'no_workspace', message: NO_WORKSPACE_MESSAGE };
   }
-  if (!resolveModelId(snapshot)) {
+  const custom = snapshot.modelSettings.customModelId.trim();
+  if (custom) {
+    const matched = findCatalogModel(snapshot.availableModels, custom);
+    if (matched && !matched.available) {
+      return {
+        ready: false,
+        reason: 'unavailable_model',
+        message: `Model '${matched.id}' is retired/end-of-life or unavailable. Select an active model from the catalog.`,
+      };
+    }
+    if (matched && matched.tool_capability === 'unsupported') {
+      return {
+        ready: false,
+        reason: 'unsupported_tools',
+        message: `Model '${matched.id}' does not support tool calling for agent turns. Choose a tool-capable model.`,
+      };
+    }
+    return { ready: true, reason: null, message: null };
+  }
+
+  const selected = snapshot.selectedModel.trim();
+  if (!selected || snapshot.availableModels.length === 0) {
     return { ready: false, reason: 'no_model', message: NO_MODEL_MESSAGE };
+  }
+
+  const matched = findCatalogModel(snapshot.availableModels, selected);
+  if (!matched) {
+    return {
+      ready: false,
+      reason: 'missing_model',
+      message: `Selected model '${selected}' is unavailable in the provider catalog. Refresh models or choose another model.`,
+    };
+  }
+  if (!matched.available) {
+    return {
+      ready: false,
+      reason: 'unavailable_model',
+      message: `Model '${matched.id}' is retired/end-of-life or unavailable. Select an active model from the catalog.`,
+    };
+  }
+  if (matched.tool_capability === 'unsupported') {
+    return {
+      ready: false,
+      reason: 'unsupported_tools',
+      message: `Model '${matched.id}' does not support tool calling for agent turns. Choose a tool-capable model.`,
+    };
   }
   return { ready: true, reason: null, message: null };
 }
@@ -1401,8 +1467,13 @@ export const agentStore = {
           terminalRequests.delete(session.active_request_id);
           assistant(session.active_request_id);
         }
-         const visibleMessages = messages.filter((message) =>
-           message.role !== 'assistant' || Boolean(message.content) || Boolean(message.toolCalls?.length));
+        const hasUserTurn = messages.some((message) => message.role === 'user');
+        const activeAssistantId = session.active_request_id ? `msg_${session.active_request_id}_a` : null;
+        const visibleMessages = messages.filter((message) =>
+          message.role !== 'assistant' ||
+          Boolean(message.content) ||
+          Boolean(message.toolCalls?.length) ||
+          (hasUserTurn && activeAssistantId !== null && message.id === activeAssistantId));
         const todos = todosFromSnapshot(session.todos);
         const plan = session.plan ?? null;
         const planPhase = session.plan_phase;
@@ -1545,10 +1616,15 @@ export const agentStore = {
 
     const models = bootstrap.models ?? [];
     let modelToSelect = '';
-    if (bootstrap.active_model_id && models.some((model) => model.id === bootstrap.active_model_id)) {
-      modelToSelect = bootstrap.active_model_id;
+    const backendActive = bootstrap.active_model_id?.trim() ?? '';
+    if (backendActive) {
+      const matched = findCatalogModel(models, backendActive);
+      modelToSelect = matched ? matched.id : backendActive;
     } else if (models.length > 0) {
-      const available = models.find((model) => model.available) ?? models[0];
+      const available =
+        models.find((model) => model.available && model.tool_capability === 'supported') ??
+        models.find((model) => model.available && model.tool_capability !== 'unsupported') ??
+        models.find((model) => model.available);
       modelToSelect = available ? available.id : '';
     }
 
@@ -1850,7 +1926,10 @@ export const agentStore = {
     state = {
       ...state,
       availableModels: models,
-      selectedModel: isNativeFrontend() && preferencesRevision >= 0 ? state.selectedModel : modelToSelect,
+      selectedModel:
+        isNativeFrontend() && preferencesRevision >= 0 && state.selectedModel.trim()
+          ? state.selectedModel
+          : modelToSelect,
       workspace,
       sessions,
       transcripts,
@@ -1879,16 +1958,28 @@ export const agentStore = {
     notify();
   },
 
-  setAvailableModels(models: Model[]) {
-    // Reconcile against the backend catalog only. An empty catalog clears the
-    // selection instead of keeping a stale (fabricated) model id.
+  setAvailableModels(models: Model[], activeModelId?: string | null) {
+    // Reconcile against the backend catalog while preserving explicit selections
+    // even when temporarily absent from the catalog (never silently switching
+    // to catalog[0]).
     let modelToSelect = '';
-    if (models.length > 0) {
-      const hasCurrent = models.some(
-        (m) => m.id === state.selectedModel || m.display_name === state.selectedModel,
-      );
-      const firstAvail = models.find((m) => m.available) ?? models[0];
-      modelToSelect = hasCurrent ? state.selectedModel : firstAvail?.id ?? '';
+    const candidate =
+      activeModelId !== undefined
+        ? activeModelId?.trim() ?? ''
+        : state.selectedModel.trim();
+    if (candidate) {
+      if (models.length > 0) {
+        const matched = findCatalogModel(models, candidate);
+        modelToSelect = matched ? matched.id : candidate;
+      } else if (activeModelId !== undefined && activeModelId) {
+        modelToSelect = candidate;
+      }
+    } else if (models.length > 0) {
+      const firstAvail =
+        models.find((m) => m.available && m.tool_capability === 'supported') ??
+        models.find((m) => m.available && m.tool_capability !== 'unsupported') ??
+        models.find((m) => m.available);
+      modelToSelect = firstAvail?.id ?? '';
     }
     state = {
       ...state,
@@ -2700,10 +2791,12 @@ export const agentStore = {
     // model. The composer surfaces the same message and disables send.
     const gate = getComposerGate(state);
     const sessionContext = sessionEnvelopeContext();
-    if (!gate.ready || !sessionContext) return false;
+    const modelToSend = resolveModelId(state);
+    if (!gate.ready || !sessionContext || !modelToSend) return false;
 
     this.addPromptToHistory(trimmed);
 
+    const targetSessionId = sessionContext.session_id ?? 'sess_default';
     const userMsg: ChatMessage = {
       id: `msg_${Date.now()}_u`,
       role: 'user',
@@ -2717,43 +2810,22 @@ export const agentStore = {
       id: `msg_${Date.now()}_a`,
       role: 'assistant',
       content: '',
-      thought: isSteer
-        ? 'Course correcting and steering execution based on immediate directive...'
-        : 'Analyzing request and inspecting relevant codebase context...',
-      thoughtDurationSeconds: isSteer ? 1 : 2,
       status: 'streaming',
       timestamp: Date.now(),
       toolCalls: [],
     };
-
-// The backend owns the transcript; these are the live render rows only.
-    // Todos are NOT seeded from the prompt — `manage_todo` is the only writer.
-    const updatedSubagents = state.subagents;
-
-    state = {
-      ...state,
-      messages: [...state.messages, userMsg, assistantMsg],
-      subagents: updatedSubagents,
-      inFlight: true,
-      thinkingState: 'working',
-      streamingActivityLevel: isSteer ? 0.9 : 0.7,
-    };
-    if (getFrontendSurface().kind === 'main') playCue('send');
-    notify();
 
     const promptToSend = isSteer
       ? `[STEERING DIRECTIVE - IMMEDIATE COURSE CORRECTION]: ${trimmed}`
       : trimmed;
 
     const mode = toAgentMode(state.permissionMode);
-    const modelToSend = resolveModelId(state);
-    if (!modelToSend) return false;
 
     const { requestId, promise } = sendAgent(
       promptToSend,
       mode,
       modelToSend,
-      sessionContext,
+      { ...sessionContext, session_id: targetSessionId },
       {
         reasoningEffort: state.reasoningEffort,
         systemInstructions: state.modelSettings.systemInstructions,
@@ -2762,8 +2834,35 @@ export const agentStore = {
       },
     );
     activeRequestId = requestId;
-    // Persist request routing before a tab switch or bootstrap can read the
-    // session view saved by the optimistic render above.
+
+    // The backend owns the transcript; these are the live render rows only.
+    // Todos are NOT seeded from the prompt — `manage_todo` is the only writer.
+    const nextSessions =
+      state.activeSessionId || state.sessions.some((session) => session.id === targetSessionId)
+        ? state.sessions
+        : [
+            {
+              id: targetSessionId,
+              title: trimmed.slice(0, 48),
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              tokenCount: 0,
+              costUsd: 0,
+              isRunning: true,
+            },
+            ...state.sessions,
+          ];
+    state = {
+      ...state,
+      sessions: nextSessions,
+      activeSessionId: state.activeSessionId || targetSessionId,
+      messages: [...state.messages, userMsg, assistantMsg],
+      inFlight: true,
+      thinkingState: 'working',
+      streamingActivityLevel: isSteer ? 0.9 : 0.7,
+    };
+    selectedSessionId = state.activeSessionId;
+    if (getFrontendSurface().kind === 'main') playCue('send');
     notify();
     promise.catch((err: unknown) => {
       // The command can reject after the user switches tabs or workspaces,
@@ -2772,39 +2871,45 @@ export const agentStore = {
           context?.core_instance_id !== sessionContext.core_instance_id || terminalRequests.has(requestId)) return;
       if (sessionContext.session_id && sessionContext.session_id !== state.activeSessionId &&
           sessionViews.get(sessionContext.session_id)?.requestId !== requestId) return;
-      const payload = { request_id: requestId, session_id: sessionContext.session_id };
+      const payload = { request_id: requestId, session_id: targetSessionId };
       const applyFailure = () => {
         if (!isActiveEvent(payload)) return;
         const errObj = err as { code?: string; message?: string } | undefined;
-        const lastIdx = state.messages.length - 1;
-        if (lastIdx >= 0 && state.messages[lastIdx].role === 'assistant') {
-          const content =
-            errObj?.code === 'not_connected'
-              ? 'No AI provider is connected yet. Click the "connect" button in the bottom status bar or open Settings to configure your API key.'
-              : errObj?.code === 'no_workspace'
-              ? 'No workspace is currently open. Open a folder to start using the autonomous coding agent.'
-              : `Could not reach the assistant: ${errObj?.message || 'Connection unavailable.'}`;
+        const content =
+          errObj?.code === 'not_connected'
+            ? 'No AI provider is connected yet. Click the "connect" button in the bottom status bar or open Settings to configure your API key.'
+            : errObj?.code === 'no_workspace'
+            ? 'No workspace is currently open. Open a folder to start using the autonomous coding agent.'
+            : `Could not reach the assistant: ${errObj?.message || 'Connection unavailable.'}`;
 
-          const updated = {
-            ...state.messages[lastIdx],
-            content,
-            status: 'error' as const,
-            terminalError: content,
-          };
-          const newMsgs = [...state.messages];
-          newMsgs[lastIdx] = updated;
-          state = {
-            ...state,
-            messages: newMsgs,
-            inFlight: false,
-            thinkingState: 'breathing',
-            streamingActivityLevel: 0,
-          };
-          terminalRequests.add(requestId);
-          activeRequestId = null;
-          notify();
-          this.checkAndExecuteNextQueued();
-        }
+        const lastIdx = state.messages.length - 1;
+        const nextMessages =
+          lastIdx >= 0 &&
+          state.messages[lastIdx].role === 'assistant' &&
+          !state.messages[lastIdx].content
+            ? state.messages.map((message, index) =>
+                index === lastIdx
+                  ? {
+                      ...message,
+                      content,
+                      status: 'error' as const,
+                      terminalError: content,
+                    }
+                  : message,
+              )
+            : markActiveMessageFailed(state.messages, content);
+
+        state = {
+          ...state,
+          messages: nextMessages,
+          inFlight: false,
+          thinkingState: 'breathing',
+          streamingActivityLevel: 0,
+        };
+        terminalRequests.add(requestId);
+        activeRequestId = null;
+        notify();
+        this.checkAndExecuteNextQueued();
       };
       if (!this.routeSessionEvent(payload, applyFailure)) applyFailure();
     });
@@ -3485,6 +3590,20 @@ export const agentStore = {
       const newMessages = [...state.messages];
       newMessages[lastMsgIndex] = updated;
       state = { ...state, messages: newMessages };
+    } else if (!payload.completed || (payload.end_message && payload.end_message.trim())) {
+      const fallbackContent = payload.end_message?.trim()
+        ? payload.end_message
+        : 'The assistant completed without output. Please check your model settings and connection.';
+      const appended: CancelledChatMessage = {
+        id: `msg_${payload.request_id}_a`,
+        role: 'assistant',
+        content: fallbackContent,
+        status: payload.completed || stoppedByUser ? 'complete' : 'error',
+        cancelled: stoppedByUser || undefined,
+        timestamp: Date.now(),
+        toolCalls: [],
+      };
+      state = { ...state, messages: [...state.messages, appended] };
     }
 
 // Todos are not rewritten here: the plan stays exactly what the backend

@@ -89,17 +89,7 @@
 }
 
 .agent-welcome-brand-ambient {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: calc(var(--space-6) * 4.5);
-  height: calc(var(--space-6) * 4.5);
-  transform: translate(-50%, -50%);
-  border-radius: var(--radius-pill);
-  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.18) 0%, rgba(34, 197, 94, 0.08) 45%, transparent 72%);
-  filter: blur(24px);
-  pointer-events: none;
-  animation: float-subtle 4.5s ease-in-out infinite;
+  display: none;
 }
 
 .agent-welcome-brand-stage {
@@ -107,17 +97,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transform-style: preserve-3d;
-  animation: float-subtle 3.5s ease-in-out infinite;
 }
 
 .agent-welcome-pulse-ring {
-  position: absolute;
-  inset: -14px;
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  animation: ripple-ring 2.8s cubic-bezier(0.2, 0.8, 0.4, 1) infinite;
-  pointer-events: none;
+  display: none;
 }
 
 .agent-welcome-brand-mark {

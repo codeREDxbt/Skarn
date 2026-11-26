@@ -207,11 +207,9 @@ fn main() {
             // unreachable gateway is a silent `Disconnected` (the egui
             // boot's precedent).
             let desktop = app.state::<state::DesktopState>().inner().clone();
-            let log = desktop.event_log();
-            let engine = desktop.sessions();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                engine.connect_probe(log, handle).await;
+                desktop.run_boot_probe(handle).await;
             });
 
             // P1 hot-exit: a 2 s safety-net snapshot of dirty buffers. Edits

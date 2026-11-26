@@ -47,11 +47,14 @@ pub use agent::{
 };
 pub use chat_types::{ToolCall, ToolCallAccumulator, ToolCallId, ToolResult, ToolSpec};
 pub use client::{
-    classify_failure, is_timeout, user_message, GatewayFailure, SeloraClient, TIMEOUT_MARKER,
+    apply_catalog_policy, apply_model_policy, classify_failure, is_timeout,
+    safe_provider_label, user_message, GatewayFailure, SeloraClient, ToolProbeOutcome,
+    TIMEOUT_MARKER,
 };
 pub use sse::{parse_sse_event, SseEvent, MAX_DATA_FIELD_BYTES};
 pub use types::{
-    compute_cost_usd, ChatEvent, ChatMessage, ChatReceipt, ChatRequest, Model, ModelId, Role,
-    SeloraStatus,
+    compute_cost_usd, infer_reasoning_capability, normalize_reasoning_effort, ChatEvent,
+    ChatMessage, ChatReceipt, ChatRequest, Model, ModelId, ReasoningCapability, Role,
+    SeloraStatus, ToolCapability,
 };
 pub use updates::{check_latest_release, ReleaseInfo};

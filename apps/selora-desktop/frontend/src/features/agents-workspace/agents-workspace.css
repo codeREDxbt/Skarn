@@ -424,31 +424,20 @@
 
 /* Elevated Cockpit Composer in Agents Window */
 .agents-workspace .hero-composer-card {
-  max-width: 900px;
+  max-width: min(900px, 100%);
   width: 100%;
   margin: var(--space-2, 8px) auto var(--space-3, 12px) auto;
-  background: linear-gradient(180deg, rgba(22, 22, 30, 0.92) 0%, rgba(13, 13, 18, 0.96) 100%);
-  border: 1px solid var(--agents-border-card, rgba(255, 255, 255, 0.09));
-  border-radius: var(--agents-radius-card, 12px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 16px 44px -8px rgba(0, 0, 0, 0.75),
-    0 4px 16px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(24px) saturate(140%);
-  transition: all var(--dur-instant, 80ms) var(--ease-calm);
+  background: var(--surface-ground, var(--ink-base));
+  border: 1px solid var(--agents-border-card, var(--ink-rule));
+  border-radius: var(--agents-radius-card, var(--radius-2));
+  transition: border-color var(--dur-instant, 80ms) var(--ease-calm);
 }
 
 .agents-workspace .hero-composer-card:hover {
-  border-color: var(--agents-border-hover, rgba(255, 255, 255, 0.18));
-  transform: translateY(-0.5px);
+  border-color: var(--agents-border-hover, var(--ink-line));
 }
 
 .agents-workspace .hero-composer-card.is-focused,
 .agents-workspace .hero-composer-card:focus-within {
-  border-color: rgba(167, 139, 250, 0.5);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 0 0 1px rgba(167, 139, 250, 0.35),
-    0 0 24px rgba(139, 92, 246, 0.2),
-    0 20px 48px rgba(0, 0, 0, 0.8);
+  border-color: var(--ink-focus);
 }

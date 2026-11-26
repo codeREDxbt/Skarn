@@ -26,7 +26,12 @@ export type AgentWorkspace = {
   displayName: string;
 };
 
-export type ComposerGateReason = 'no_model' | 'no_workspace';
+export type ComposerGateReason =
+  | 'no_model'
+  | 'no_workspace'
+  | 'missing_model'
+  | 'unavailable_model'
+  | 'unsupported_tools';
 
 /**
  * Whether a turn can be started at all. `ready: false` means the composer must
@@ -38,7 +43,7 @@ export type ComposerGate = {
   message: string | null;
 };
 
-export type ReasoningEffort = 'max' | 'standard' | 'quick';
+export type ReasoningEffort = 'none' | 'quick' | 'standard' | 'max';
 
 export type ToolType =
   | 'read_file'

@@ -942,11 +942,39 @@ pub struct ApprovalDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_prompt: Option<DecisionPromptDto>,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCapabilityDto {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningCapabilityDto {
+    Native,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModelDto {
     pub id: String,
     pub display_name: String,
     pub available: bool,
+    /// Additive tri-state tool-calling capability. Defaults to `unknown` for
+    /// backwards compatibility with older payloads.
+    #[serde(default)]
+    pub tool_capability: ToolCapabilityDto,
+    /// Additive tri-state native thinking/reasoning capability.
+    #[serde(default)]
+    pub reasoning_capability: ReasoningCapabilityDto,
+    /// Native effort/toggle modes supported by this model (`none`, `quick`, `standard`, `max`).
+    #[serde(default)]
+    pub reasoning_modes: Vec<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChatStateDto {
@@ -2181,6 +2209,9 @@ pub struct ModelsDto {
 pub struct SeloraStatusDto {
     pub status: ConnectionStatus,
     pub active_model_id: Option<String>,
+    /// Safe, redacted reason when disconnected after a discovery/auth failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToastDto {
@@ -2216,6 +2247,9 @@ pub struct ApiKeyStatusDto {
     pub base_url: String,
     pub key_hint: Option<String>,
     pub active_model_id: Option<String>,
+    /// Safe, redacted reason from the latest discovery/connection failure, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 // ---------------------------------------------------------------------------
 // Phase 10 — the embedded terminal's payloads.
@@ -4411,5 +4445,19 @@ mod tests {
         };
         assert_eq!(request_id, rid("request-1"));
         assert_eq!((cols, rows), (80, 24));
+    }
+
+    #[test]
+    fn model_dto_defaults_absent_tool_capability_to_unknown() {
+        let legacy: ModelDto =
+            serde_json::from_str(r#"{"id":"m1","display_name":"Model 1","available":true}"#)
+                .unwrap();
+        assert_eq!(legacy.tool_capability, ToolCapabilityDto::Unknown);
+
+        let modern: ModelDto = serde_json::from_str(
+            r#"{"id":"m2","display_name":"Model 2","available":true,"tool_capability":"supported"}"#,
+        )
+        .unwrap();
+        assert_eq!(modern.tool_capability, ToolCapabilityDto::Supported);
     }
 }
