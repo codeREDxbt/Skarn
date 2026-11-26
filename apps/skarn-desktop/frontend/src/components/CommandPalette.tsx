@@ -32,7 +32,6 @@ const COMMAND_CATEGORIES: Record<string, CategoryMeta> = {
   'selora.showGit': { id: 'files', label: 'File Actions' },
   'selora.showProblems': { id: 'agent', label: 'Agent Tools' },
   'selora.showSettings': { id: 'view', label: 'View & Layout' },
-  'selora.showOutput': { id: 'view', label: 'View & Layout' },
   'selora.showTerminal': { id: 'view', label: 'View & Layout' },
   'selora.saveLayout': { id: 'view', label: 'View & Layout' },
 };
@@ -46,7 +45,6 @@ const COMMAND_ICONS: Record<string, IconName> = {
   'selora.showGit': 'git-branch',
   'selora.showProblems': 'error',
   'selora.showSettings': 'settings',
-  'selora.showOutput': 'command',
   'selora.showTerminal': 'command',
   'selora.saveLayout': 'check',
 };
@@ -377,7 +375,7 @@ export function CommandPalette({ open, commands, onRun, onClose }: CommandPalett
         {/* Raycast / Spotlight Style Keyboard Hints Footer */}
         <div className="palette-footer" aria-hidden="true">
           <div className="palette-footer-left">
-            <span className="palette-footer-brand">Selora IDE</span>
+            <span className="palette-footer-brand">Skarn</span>
           </div>
           <div className="palette-footer-shortcuts">
             <span className="palette-footer-item">

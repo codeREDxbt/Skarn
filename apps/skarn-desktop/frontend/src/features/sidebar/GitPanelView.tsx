@@ -257,7 +257,7 @@ function diffLines(text: string, label: string) {
   );
 }
 
-const CONNECTING = 'Selora is still connecting. Try again in a moment.';
+const CONNECTING = 'Skarn is still connecting. Try again in a moment.';
 const HISTORY_LIMIT = 50;
 
 export interface GitPanelViewProps {

@@ -374,13 +374,13 @@ pub struct LayoutSettings {
     #[serde(default)]
     pub bottom_dock_open: bool,
 
-    #[serde(default = "default_bottom_view")]
+    #[serde(default = "default_bottom_view", deserialize_with = "skarn_protocol::deserialize_bottom_view")]
     pub bottom_view: skarn_protocol::SurfaceId,
 
     #[serde(default = "default_editor_splits")]
     pub editor_splits: u8,
 
-    #[serde(default = "default_activity_view")]
+    #[serde(default = "default_activity_view", deserialize_with = "skarn_protocol::deserialize_activity_view")]
     pub activity_view: skarn_protocol::SurfaceId,
 
     #[serde(default = "default_primary_sidebar_open")]
@@ -461,7 +461,7 @@ fn default_bottom_dock_height_px() -> f32 {
 }
 
 fn default_bottom_view() -> skarn_protocol::SurfaceId {
-    skarn_protocol::SurfaceId::Output
+    skarn_protocol::SurfaceId::Terminal
 }
 
 fn default_editor_splits() -> u8 {
@@ -1274,7 +1274,7 @@ pub(crate) mod tests {
             skarn_protocol::BOTTOM_DOCK_DEFAULT_PX
         );
         assert!(!layout.bottom_dock_open, "bottom dock closed first-run");
-        assert_eq!(layout.bottom_view, skarn_protocol::SurfaceId::Output);
+        assert_eq!(layout.bottom_view, skarn_protocol::SurfaceId::Terminal);
         assert_eq!(layout.editor_splits, skarn_protocol::EDITOR_SPLITS_MIN);
         assert_eq!(layout.activity_view, skarn_protocol::SurfaceId::Files);
         assert!(layout.primary_sidebar_open, "sidebar open first-run");
@@ -1411,7 +1411,7 @@ pub(crate) mod tests {
             agent_dock_open: true,
             bottom_dock_height_px: 640.0,
             bottom_dock_open: true,
-            bottom_view: skarn_protocol::SurfaceId::TerminalPlaceholder,
+            bottom_view: skarn_protocol::SurfaceId::Terminal,
             editor_splits: 4,
             activity_view: skarn_protocol::SurfaceId::Search,
             primary_sidebar_open: false,
@@ -1419,6 +1419,33 @@ pub(crate) mod tests {
         let dto: skarn_protocol::LayoutDto = settings.clone().into();
         let back: LayoutSettings = dto.into();
         assert_eq!(settings, back);
+    }
+
+    #[test]
+    fn persisted_legacy_surfaces_normalize_on_load() {
+        let dir = temp_settings_dir("z2-legacy-surfaces");
+        let path = dir.join(SETTINGS_FILE_NAME);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"layout":{"activity_view":"problems","bottom_view":"output"}}"#,
+        )
+        .expect("write legacy layout");
+
+        let s = Settings::load_from(&path).expect("legacy layout loads cleanly");
+        assert_eq!(s.layout.activity_view, skarn_protocol::SurfaceId::Files);
+        assert_eq!(s.layout.bottom_view, skarn_protocol::SurfaceId::Terminal);
+
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"layout":{"activity_view":"settings","bottom_view":"terminal_placeholder"}}"#,
+        )
+        .expect("write legacy placeholder layout");
+        let s2 = Settings::load_from(&path).expect("legacy placeholder layout loads cleanly");
+        assert_eq!(s2.layout.activity_view, skarn_protocol::SurfaceId::Files);
+        assert_eq!(s2.layout.bottom_view, skarn_protocol::SurfaceId::Terminal);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

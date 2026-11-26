@@ -239,7 +239,7 @@ export function TitleBar({
           <SkarnMark size={16} />
         </span>
         <span className="titlebar-title" data-tauri-drag-region="">
-          Selora IDE
+          Skarn
         </span>
       </div>
 

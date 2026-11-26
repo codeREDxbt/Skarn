@@ -13,7 +13,7 @@ import type { ThinkingState } from '../types';
 const VERB_ROTATION_MS = 4000;
 
 const VERBS: Record<ThinkingState, readonly string[]> = {
-  breathing: ['Selora is breathing', 'Selora is here', 'Ready'],
+  breathing: ['Skarn is breathing', 'Skarn is here', 'Ready'],
   working: ['Thinking', 'Cooking', 'Brewing', 'Reasoning', 'Working it out'],
   searching: ['Searching the codebase', 'Scanning files', 'Hunting references'],
   solving: ['Cooking changes', 'Applying the plan', 'Editing files'],

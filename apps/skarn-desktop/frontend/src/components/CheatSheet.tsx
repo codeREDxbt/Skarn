@@ -125,7 +125,7 @@ export function CheatSheet({ open, commands, onClose }: CheatSheetProps) {
               Keyboard Shortcuts
             </h2>
             <p id="cheatsheet-description" className="cheatsheet-subtitle">
-              Every Selora command, grouped by area. Type to filter.
+              Every Skarn command, grouped by area. Type to filter.
             </p>
           </div>
           <button

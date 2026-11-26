@@ -20,6 +20,8 @@ export type EditorTabView = {
   isPreview?: boolean;
   /** P2 gap 3: the file changed on disk while this tab held unsaved edits. */
   externallyChanged?: boolean;
+  /** Persistent blocking issue surfaced on tab, Problems, and StatusBar. */
+  blockingIssue?: { summary: string; detail: string; actionLabel: string } | null;
 };
 
 export type EditorTabBarProps = {
@@ -254,19 +256,30 @@ export function EditorTabBar({
                 role="tab"
                 aria-selected={isActive}
                 aria-label={
-                  tab.externallyChanged
+                  tab.blockingIssue
+                    ? `${tab.filename}, ${tab.blockingIssue.summary}`
+                    : tab.externallyChanged
                     ? `${tab.filename}, changed on disk`
                     : tab.filename
                 }
                 aria-description={tab.isPreview ? 'Preview tab' : undefined}
                 aria-controls="editor-surface"
                 tabIndex={isActive ? 0 : -1}
-                className={`editor-tab${isActive ? ' is-active' : ''}${tab.isDirty ? ' is-dirty' : ''}${tab.externallyChanged ? ' is-externally-changed' : ''}`}
+                className={`editor-tab${isActive ? ' is-active' : ''}${tab.isDirty ? ' is-dirty' : ''}${tab.externallyChanged ? ' is-externally-changed' : ''}${tab.blockingIssue ? ' is-blocking' : ''}`}
                 onClick={() => selectAndFocus(tab.id)}
                 onKeyDown={(e) => handleKeyDown(e, tab.id, idx)}
               >
                 <FileTypeIcon language={tab.language} filename={tab.filename} />
                 <span className="tab-title">{tab.filename}</span>
+                {tab.blockingIssue ? (
+                  <span
+                    className="tab-blocking-indicator"
+                    title={tab.blockingIssue.detail}
+                    aria-hidden="true"
+                  >
+                    !
+                  </span>
+                ) : null}
                 {tab.externallyChanged ? (
                   <span
                     className="tab-conflict-indicator"

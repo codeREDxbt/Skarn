@@ -37,7 +37,7 @@ describe('main sidebar and detached conversation composition', () => {
     const layout = layoutStore.getSnapshot();
     const editor = editorStore.getSnapshot();
     const transcript = agentStore.getSnapshot().messages;
-    expect(screen.getByRole('button', { name: 'Editor view' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Editor only' })).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Split view' })).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Plan (0/1)' })).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open Agents window' }));
@@ -54,7 +54,6 @@ describe('main sidebar and detached conversation composition', () => {
 
   it('keeps main task controls and composer mounted across plan navigation', () => {
     render(<AgentDock bootstrap={snapshot} />);
-    fireEvent.click(screen.getByRole('button', { name: /Tasks \(0\/1\).*View tasks/ }));
     expect(screen.getByText('Existing main transcript')).not.toBeNull();
     expect(screen.getByRole('textbox')).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Plan (0/1)' }));
@@ -69,7 +68,7 @@ describe('main sidebar and detached conversation composition', () => {
     expect(screen.getByText('Existing main transcript')).not.toBeNull();
     expect(screen.getByRole('textbox')).not.toBeNull();
     expect(screen.queryByRole('button', { name: 'Open Agents window' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Editor view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Editor only' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Split view' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Session history' })).toBeNull();
     expect(screen.queryByRole('tablist')).toBeNull();

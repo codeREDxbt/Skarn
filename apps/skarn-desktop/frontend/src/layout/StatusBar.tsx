@@ -1,21 +1,27 @@
 // Skarn — Phase Z2 status bar (DESIGN §3.7, ARCHITECTURE §8.1).
 //
-// 24px, 1px top hairline, --type-xs.
-// Left: Workspace display name + Git branch with sync spinner + language/file info.
-// Center: Agent activity pill / status (interactive toggle for agent dock).
-// Right: LSP diagnostics summary (errors/warnings) + UTF-8 encoding + line/col + Core epoch + Provider connection status with live green pulse radar ring.
-import { useState, useSyncExternalStore } from 'react';
+// Live or Absent policy: every displayed item reflects real live state.
+import { useSyncExternalStore } from 'react';
 import type { BootstrapState, ConnectionStatus } from '../bridge/bridge';
 import { getAppSnapshot, subscribeApp } from '../app/app-store';
 import { layoutStore } from '../features/layout/layout-store';
 import { agentStore } from '../features/agent/agent-store';
+import { editorStore, type EditorBlockingIssue } from '../features/editor/editor-store';
 import { SkarnMark } from '../components/SkarnMark';
 import {
   GitBranch,
-  RefreshCw,
   DangerIcon,
   AlertCircle,
 } from '../components/icons';
+
+const subscribeEditorStore = (listener: () => void) =>
+  typeof editorStore.subscribe === 'function' ? editorStore.subscribe(listener) : () => undefined;
+
+const EMPTY_BLOCKING_ISSUES: EditorBlockingIssue[] = [];
+const getBlockingIssuesSnapshot = () =>
+  typeof editorStore.getSnapshot === 'function'
+    ? editorStore.getSnapshot().blockingIssues
+    : EMPTY_BLOCKING_ISSUES;
 
 function ConnectionStatusView({
   status,
@@ -46,7 +52,7 @@ function ConnectionStatusView({
           <span className="statusbar-radar-ring" />
           <span className="statusbar-dot" />
         </span>
-        provider connected
+        Provider connected
       </button>
     );
   }
@@ -63,13 +69,13 @@ function ConnectionStatusView({
           onClick={onOpenConnect}
           title={connectionError}
         >
-          {isKeyringError ? 'keyring error · re-enter key' : 'connection error · retry'}
+          {isKeyringError ? 'Keyring error · Re-enter key' : 'Connection error · Retry'}
         </button>
       </span>
     );
   }
 
-  const label = status === 'connecting' ? 'provider connecting' : 'provider disconnected';
+  const label = status === 'connecting' ? 'Provider connecting' : 'Provider disconnected';
   return (
     <span className="statusbar-connection is-disconnected">
       <span className="statusbar-dot" aria-hidden="true" />
@@ -82,9 +88,9 @@ function ConnectionStatusView({
         className="statusbar-connect"
         disabled={!onOpenConnect}
         onClick={onOpenConnect}
-        title={onOpenConnect ? 'Connect API key / provider' : 'Settings editing lands in a later slice'}
+        title={onOpenConnect ? 'Connect API key / provider' : undefined}
       >
-        connect
+        Connect
       </button>
     </span>
   );
@@ -99,16 +105,15 @@ export function StatusBar({
 }) {
   const appState = useSyncExternalStore(subscribeApp, getAppSnapshot);
   const agentState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
-  const [syncing, setSyncing] = useState(false);
+  const blockingIssues = useSyncExternalStore(subscribeEditorStore, getBlockingIssuesSnapshot);
 
-  const epoch = bootstrap.core_instance_id.slice(0, 8);
-  const gitBranch = bootstrap.git?.branch || 'main';
+  const gitBranch = bootstrap.git?.branch || null;
 
-  // Active buffer language
+  // Active buffer language (absent when no buffer is open)
   const activeBuffer = bootstrap.buffers?.find((b) => b.buffer_id === bootstrap.active_buffer_id);
   const activeLanguage = activeBuffer?.language
     ? activeBuffer.language.charAt(0).toUpperCase() + activeBuffer.language.slice(1)
-    : 'TypeScript';
+    : null;
 
   // Diagnostics summary
   const errorCount = bootstrap.diagnostics?.filter((d) => d.severity === 'error').length ?? 0;
@@ -123,16 +128,11 @@ export function StatusBar({
     ? 'Approval Required'
     : 'Agent';
 
-  const handleGitSync = () => {
-    setSyncing(true);
-    setTimeout(() => {
-      setSyncing(false);
-    }, 1200);
-  };
+  const firstBlockingIssue = blockingIssues[0] ?? null;
 
   return (
     <footer className="statusbar">
-      {/* Left zone: Workspace, Git branch with sync spinner, language */}
+      {/* Left zone: Workspace, live Git branch, active language */}
       <div className="statusbar-zone statusbar-left">
         <button
           type="button"
@@ -144,30 +144,24 @@ export function StatusBar({
           <span>{bootstrap.workspace.display_name}</span>
         </button>
 
-        <button
-          type="button"
-          className="statusbar-item statusbar-git"
-          aria-label="Git sync"
-          onClick={handleGitSync}
-          title={`Git Branch: ${gitBranch} (click to sync)`}
-        >
-          <GitBranch size={11} className="git-icon" aria-hidden="true" />
-          <span>{gitBranch}</span>
-          <RefreshCw
-            size={10}
-            className={`sync-icon ${syncing ? 'is-spinning' : ''}`}
-            aria-hidden="true"
-          />
-        </button>
+        {gitBranch ? (
+          <button
+            type="button"
+            className="statusbar-item statusbar-git"
+            aria-label={`Git branch ${gitBranch}`}
+            onClick={() => void layoutStore.toggle('git')}
+            title={`Git branch: ${gitBranch} (click to toggle Git)`}
+          >
+            <GitBranch size={11} className="git-icon" aria-hidden="true" />
+            <span>{gitBranch}</span>
+          </button>
+        ) : null}
 
-        <button
-          type="button"
-          className="statusbar-item statusbar-lang"
-          onClick={() => void layoutStore.toggle('files')}
-          title="Active Language Mode"
-        >
-          <span>{activeLanguage}</span>
-        </button>
+        {activeLanguage ? (
+          <span className="statusbar-item statusbar-lang" title="Active Language Mode">
+            <span>{activeLanguage}</span>
+          </span>
+        ) : null}
       </div>
 
       {/* Center zone: Agent activity pill / status */}
@@ -192,8 +186,25 @@ export function StatusBar({
         </span>
       </div>
 
-      {/* Right zone: LSP diagnostics, UTF-8, Line/Col, Core epoch, Connection status */}
+      {/* Right zone: Blocking file errors, LSP diagnostics, Connection status */}
       <div className="statusbar-zone statusbar-right">
+        {firstBlockingIssue ? (
+          <button
+            type="button"
+            className="statusbar-item statusbar-blocking"
+            role="status"
+            title={firstBlockingIssue.detail}
+            onClick={() => editorStore.setActive?.(firstBlockingIssue.bufferId)}
+          >
+            <DangerIcon size={11} aria-hidden="true" />
+            <span>
+              {blockingIssues.length === 1
+                ? `${firstBlockingIssue.filename}: ${firstBlockingIssue.summary}`
+                : `${blockingIssues.length} files need sync`}
+            </span>
+          </button>
+        ) : null}
+
         <button
           type="button"
           className="statusbar-item statusbar-diagnostics"
@@ -210,18 +221,6 @@ export function StatusBar({
             <span>{warningCount}</span>
           </span>
         </button>
-
-        <span className="statusbar-item statusbar-encoding" title="File Encoding">
-          UTF-8
-        </span>
-
-        <span className="statusbar-item statusbar-coords" title="Cursor Line and Column">
-          Ln 1, Col 1
-        </span>
-
-        <span className="statusbar-epoch" title={`Core instance ${bootstrap.core_instance_id}`}>
-          core {epoch}
-        </span>
 
         <ConnectionStatusView
           status={bootstrap.connection}

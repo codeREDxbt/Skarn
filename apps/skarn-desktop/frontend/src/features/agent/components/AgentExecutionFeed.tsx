@@ -130,7 +130,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
 
           <h2 className="welcome-heading agent-feed-empty-heading">Ask anything</h2>
           <p className="welcome-subline agent-feed-empty-subline">
-            <em>Ask about the code, or tell Selora what to change.</em>
+            <em>Ask about the code, or tell Skarn what to change.</em>
           </p>
 
           <PromptSuggestions
@@ -345,9 +345,9 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                       role="orchestrator"
                       status={msg.status === 'streaming' ? 'working' : 'default'}
                       size={16}
-                      name="Selora Coding Agent"
+                      name="Skarn Coding Agent"
                     />
-                    <span className="assistant-meta-label agent-feed-role-label">Selora Agent</span>
+                    <span className="assistant-meta-label agent-feed-role-label">Skarn Agent</span>
                   </div>
 
                   {/* 1. Reasoning Accordion (Cursor/Windsurf parity) */}
@@ -501,7 +501,7 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
           <div className="agent-active-status-line">
             <div className="status-line-left agent-feed-status-left">
               <ThinkingOrb state={thinkingState} size={20} />
-              <BotAvatar role="orchestrator" status="working" size={20} name="Selora Orchestrator" />
+              <BotAvatar role="orchestrator" status="working" size={20} name="Skarn Orchestrator" />
               <span className="status-text">{getStatusText()}</span>
             </div>
             <button

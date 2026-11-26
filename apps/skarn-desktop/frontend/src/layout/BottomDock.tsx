@@ -1,9 +1,7 @@
-// Selora IDE — Phase Z2/Z3 bottom dock (DESIGN §3.6, ARCHITECTURE §8.1).
+// Skarn — Phase Z2/Z3 bottom dock (DESIGN §3.6, ARCHITECTURE §8.1).
 //
-// Spans the editor column only. Tab strip: PROBLEMS / OUTPUT / TERMINAL
-// (problems is a bottom-dock view in Z2, §2.2) plus the close ×. Every tab
-// click and the × dispatch ToggleSurface per the routing table; content
-// renders rich modular developer panels: ProblemsPanel, OutputPanel, TerminalPanel.
+// Spans the editor column only. Tab strip: PROBLEMS / TERMINAL plus the close ×.
+// Every tab click and the × dispatch ToggleSurface per the routing table.
 // The active view comes from the live layout store.
 import { lazy, Suspense, useEffect, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
 import type { SurfaceId } from '../bridge/bridge';
@@ -11,7 +9,6 @@ import { getLayoutSnapshot, subscribeLayout, type LayoutState } from '../feature
 import { layoutStore } from '../features/layout/layout-store';
 import { Icon } from '../components/Icon';
 import { ProblemsPanel } from '../features/dock/ProblemsPanel';
-import { OutputPanel } from '../features/dock/OutputPanel';
 // xterm is a substantial dependency; keep it out of the dock chunk until the
 // terminal view is actually selected.
 const TerminalPanel = lazy(async () => {
@@ -25,28 +22,25 @@ import '../styles/dock.css';
 
 const BOTTOM_TABS: Array<{ surface: SurfaceId; label: string }> = [
   { surface: 'problems', label: 'Problems' },
-  { surface: 'output', label: 'Output' },
-  { surface: 'terminal_placeholder', label: 'Terminal' },
+  { surface: 'terminal', label: 'Terminal' },
 ];
 
 function BottomDockContent({ view }: { view: SurfaceId }) {
+  const isTerminal = view !== 'problems';
   // Once the terminal view is opened, keep it mounted while the dock shows
   // another view. Unmounting would dispose xterm and lose the scrollback;
   // TerminalCreated/TerminalOutput carry no replay, so the buffer cannot be
   // rebuilt from the backend.
-  const [terminalMounted, setTerminalMounted] = useState(view === 'terminal_placeholder');
+  const [terminalMounted, setTerminalMounted] = useState(isTerminal);
   useEffect(() => {
-    if (view === 'terminal_placeholder') setTerminalMounted(true);
-  }, [view]);
+    if (isTerminal) setTerminalMounted(true);
+  }, [isTerminal]);
 
   return (
     <>
       {view === 'problems' ? <ProblemsPanel /> : null}
-      {view === 'output' || (view !== 'problems' && view !== 'terminal_placeholder') ? (
-        <OutputPanel />
-      ) : null}
-      {terminalMounted || view === 'terminal_placeholder' ? (
-        <div className="terminal-host" hidden={view !== 'terminal_placeholder'}>
+      {terminalMounted || isTerminal ? (
+        <div className="terminal-host" hidden={!isTerminal}>
           <Suspense
             fallback={
               <div className="dock-panel terminal-panel" data-testid="terminal-panel" role="status">

@@ -139,10 +139,10 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
       const release = await checkForUpdate();
       if (release.newer) {
         setNote(`Version ${release.tag} is available.`);
-        toastStore.pushLocal('info', `Selora IDE ${release.tag} is available.`);
+        toastStore.pushLocal('info', `Skarn ${release.tag} is available.`);
       } else {
         setNote(`You are on the latest release (${release.tag}).`);
-        toastStore.pushLocal('success', `Selora IDE is up to date (${release.tag}).`);
+        toastStore.pushLocal('success', `Skarn is up to date (${release.tag}).`);
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -222,7 +222,7 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
       >
         <MetalBrand size="about" />
         <h2 id="about-title" className="about-title">
-          Selora IDE
+          Skarn
         </h2>
         <p className="about-version">Lite Edition · v{__APP_VERSION__}</p>
         <span className="about-rule" aria-hidden="true" />

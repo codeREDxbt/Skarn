@@ -20,7 +20,19 @@ import {
   type Selection,
 } from '../../bridge/bridge';
 import { toastStore } from '../toasts/toast-store';
-import { beginEditorClose, finishEditorClose, hasPendingBufferEdits, isEditorPathClosing, reconcileEditorCloses, reconcilePendingEditorEdits, rejectEditorClose, retryPendingEditorEdits } from './pending-edits';
+import { beginEditorClose, finishEditorClose, hasPendingBufferEdits, isEditorClosing, isEditorPathClosing, reconcileEditorCloses, reconcilePendingEditorEdits, rejectEditorClose, retryPendingEditorEdits } from './pending-edits';
+
+export type EditorBlockingIssueKind = 'unsynchronized' | 'close_locked';
+
+export type EditorBlockingIssue = {
+  bufferId: string;
+  path: string;
+  filename: string;
+  kind: EditorBlockingIssueKind;
+  summary: string;
+  detail: string;
+  actionLabel: 'Retry sync' | 'Retry close';
+};
 
 export type EditorTab = {
   id: string;
@@ -30,6 +42,8 @@ export type EditorTab = {
   isDirty: boolean;
   /** P2 gap 3: the file also changed on disk (local edits were kept). */
   externallyChanged: boolean;
+  /** Persistent blocking error (unsynchronized edits or unconfirmed close lock). */
+  blockingIssue: EditorBlockingIssue | null;
   version: number;
   /** Single-click preview tab: replaced by the next single-click open. */
   isPreview: boolean;
@@ -58,6 +72,8 @@ export type EditorStoreState = {
   fileTree: FileTreeNode | null;
   /** P2 gap 3: buffer id → path for tabs with an unresolved disk conflict. */
   conflicts: Record<string, string>;
+  /** Persistent blocking file issues surfaced on tab, Problems, and StatusBar. */
+  blockingIssues: EditorBlockingIssue[];
 };
 
 type Listener = () => void;
@@ -82,8 +98,61 @@ let pinnedPaths = new Set<string>();
 // The preview tab is the transient tab a single click in the explorer opens.
 // At most one tab is a preview; opening another replaces it.
 let previewPath: string | null = null;
+const blockingIssuesById = new Map<string, EditorBlockingIssue>();
 let state: EditorStoreState = deriveState(appSnapshot, localActiveId, revealTarget);
 let appUnsubscribe: (() => void) | null = null;
+
+function setBlockingIssue(
+  bufferId: string,
+  path: string,
+  kind: EditorBlockingIssueKind,
+): void {
+  const filename = filenameOf(path);
+  const issue: EditorBlockingIssue =
+    kind === 'close_locked'
+      ? {
+          bufferId,
+          path,
+          filename,
+          kind,
+          summary: 'Close unconfirmed',
+          detail: `${filename} did not confirm closing. Editing is paused to protect your contents.`,
+          actionLabel: 'Retry close',
+        }
+      : {
+          bufferId,
+          path,
+          filename,
+          kind,
+          summary: 'Unsynchronized edits',
+          detail: `Edits in ${filename} did not reach the workspace. Keep this tab open — your local text is safe.`,
+          actionLabel: 'Retry sync',
+        };
+  blockingIssuesById.set(bufferId, issue);
+}
+
+function clearBlockingIssue(bufferId: string): void {
+  blockingIssuesById.delete(bufferId);
+}
+
+function reconcileBlockingIssues(bootstrap: BootstrapState | null): void {
+  if (!bootstrap) {
+    blockingIssuesById.clear();
+    return;
+  }
+  const buffers = new Set(bootstrap.buffers.map((buffer) => buffer.buffer_id));
+  for (const [id, issue] of blockingIssuesById) {
+    if (!buffers.has(id)) {
+      blockingIssuesById.delete(id);
+      continue;
+    }
+    if (issue.kind === 'unsynchronized' && !hasPendingBufferEdits(bootstrap, id)) {
+      blockingIssuesById.delete(id);
+    } else if (issue.kind === 'close_locked' && !isEditorClosing(id)) {
+      blockingIssuesById.delete(id);
+    }
+  }
+}
 
 function filenameOf(path: string): string {
   const segments = path.split(/[\\/]/);
@@ -127,6 +196,7 @@ function deriveState(
   reveal: RevealTarget | null,
 ): EditorStoreState {
   const bootstrap: BootstrapState | null = app.bootstrap;
+  reconcileBlockingIssues(bootstrap);
   const buffers = bootstrap?.buffers ?? [];
   const conflicts = app.bufferConflicts ?? {};
   const tabs: EditorTab[] = buffers.map((buffer) => ({
@@ -136,6 +206,7 @@ function deriveState(
     language: buffer.language,
     isDirty: buffer.dirty,
     externallyChanged: Object.prototype.hasOwnProperty.call(conflicts, buffer.buffer_id),
+    blockingIssue: blockingIssuesById.get(buffer.buffer_id) ?? null,
     version: buffer.version,
     isPreview: Boolean(previewPath && pathsEqual(previewPath, buffer.path)),
   }));
@@ -174,6 +245,9 @@ function deriveState(
     workspaceName: bootstrap?.workspace.display_name ?? null,
     fileTree: bootstrap?.file_tree.root ?? null,
     conflicts,
+    blockingIssues: tabs
+      .map((tab) => tab.blockingIssue)
+      .filter((issue): issue is EditorBlockingIssue => issue !== null),
   };
 }
 
@@ -272,19 +346,25 @@ function classifyCloseRejection(cause: unknown): CloseRejection {
 
 function closeWhenSynchronized(id: string, context: EnvelopeContext): boolean {
   const bootstrap = getAppSnapshot().bootstrap;
+  const targetPath = bootstrap?.buffers.find((candidate) => candidate.buffer_id === id)?.path ?? id;
   if (!bootstrap || !beginEditorClose(bootstrap, id)) return false;
   void closeBufferCommand(id, context).then(() => {
     finishEditorClose(id, true);
+    clearBlockingIssue(id);
     reconcileEditorCloses(getAppSnapshot().bootstrap);
+    rebuild();
   }).catch((cause: unknown) => {
     const rejection = classifyCloseRejection(cause);
     rejectEditorClose(id, rejection);
     if (rejection === 'ambiguous') {
       finishEditorClose(id, false);
-      toastStore.pushLocal('warning', 'The close result is unknown. This editor remains locked to protect its contents.');
+      setBlockingIssue(id, targetPath, 'close_locked');
+      rebuild();
       return;
     }
+    clearBlockingIssue(id);
     reconcileEditorCloses(getAppSnapshot().bootstrap);
+    rebuild();
     if (rejection === 'still-open') {
       toastStore.pushLocal('warning', 'The workspace rejected the close. The file is still open; retry when the workspace is ready.');
     }
@@ -368,6 +448,7 @@ export const editorStore = {
     liveSelections.clear();
     pinnedPaths = new Set();
     previewPath = null;
+    blockingIssuesById.clear();
     appSnapshot = getAppSnapshot();
     reconcilePendingEditorEdits(appSnapshot.bootstrap);
     protocolActiveId = appSnapshot.bootstrap?.active_buffer_id ?? null;
@@ -478,15 +559,19 @@ export const editorStore = {
       // so never discard it in the same click.
       void retryPendingEditorEdits(bootstrap, id).then((recovered) => {
         if (!recovered) {
-          toastStore.pushLocal('warning', 'Editor changes are still unsynchronized. Keep this file open until the workspace reconnects.');
+          setBlockingIssue(id, tab.path, 'unsynchronized');
+          rebuild();
           return;
         }
+        clearBlockingIssue(id);
+        rebuild();
         toastStore.pushLocal('info', 'Editor changes were recovered. Save the file, or close again to discard them.');
       });
       return;
     }
     if (!closeWhenSynchronized(id, context)) {
-      toastStore.pushLocal('warning', 'Cannot close this file while editor changes are unsynchronized.');
+      setBlockingIssue(id, tab.path, isEditorClosing(id) ? 'close_locked' : 'unsynchronized');
+      rebuild();
     }
   },
 
@@ -539,16 +624,20 @@ export const editorStore = {
    */
   async saveBuffer(id: string): Promise<boolean> {
     syncFromApp();
-    if (!state.tabs.some((tab) => tab.id === id)) return false;
+    const tab = state.tabs.find((candidate) => candidate.id === id);
+    if (!tab) return false;
     const bootstrap = appSnapshot.bootstrap;
     if (bootstrap && hasPendingBufferEdits(bootstrap, id)) {
       // Saving is the user-visible retry: republish the local document at the
       // backend's current version instead of leaving the buffer locked.
       const recovered = await retryPendingEditorEdits(bootstrap, id);
       if (!recovered) {
-        toastStore.pushLocal('warning', 'This file still has unsynchronized changes; saving is blocked to protect them.');
+        setBlockingIssue(id, tab.path, 'unsynchronized');
+        rebuild();
         return false;
       }
+      clearBlockingIssue(id);
+      rebuild();
     }
     const context = currentEditorContext();
     if (!context) {
@@ -560,6 +649,51 @@ export const editorStore = {
       return true;
     } catch {
       return false;
+    }
+  },
+
+  /** Retry recovering an unsynchronized buffer or confirming a locked close. */
+  async retryBlockingIssue(id: string): Promise<boolean> {
+    syncFromApp();
+    const issue = blockingIssuesById.get(id);
+    const tab = state.tabs.find((candidate) => candidate.id === id);
+    const bootstrap = appSnapshot.bootstrap;
+    if (!issue || !tab || !bootstrap) {
+      clearBlockingIssue(id);
+      rebuild();
+      return true;
+    }
+    if (issue.kind === 'unsynchronized') {
+      const recovered = await retryPendingEditorEdits(bootstrap, id);
+      if (recovered) clearBlockingIssue(id);
+      else setBlockingIssue(id, tab.path, 'unsynchronized');
+      rebuild();
+      return recovered;
+    }
+    const context = currentEditorContext();
+    if (!context) {
+      reportMissingContext();
+      return false;
+    }
+    try {
+      await closeBufferCommand(id, context);
+      finishEditorClose(id, true);
+      clearBlockingIssue(id);
+      reconcileEditorCloses(getAppSnapshot().bootstrap);
+      rebuild();
+      return true;
+    } catch (cause: unknown) {
+      const rejection = classifyCloseRejection(cause);
+      rejectEditorClose(id, rejection);
+      if (rejection === 'ambiguous') {
+        setBlockingIssue(id, tab.path, 'close_locked');
+        rebuild();
+        return false;
+      }
+      clearBlockingIssue(id);
+      reconcileEditorCloses(getAppSnapshot().bootstrap);
+      rebuild();
+      return true;
     }
   },
 

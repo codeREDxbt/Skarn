@@ -240,6 +240,7 @@ export function EditorRegion() {
   const active = editor.activeBuffer;
   const activeTab = editor.tabs.find((tab) => tab.id === editor.activeBufferId) ?? null;
   const conflictTab = activeTab?.externallyChanged ? activeTab : null;
+  const blockingIssue = activeTab?.blockingIssue ?? null;
   const recentFiles = useMemo(() => topLevelFiles(editor.fileTree), [editor.fileTree]);
   const breadcrumbs = useMemo(
     () => (active ? breadcrumbSegments(editor.workspaceRoot, editor.workspaceName, active.path) : []),
@@ -338,6 +339,27 @@ export function EditorRegion() {
       />
 
       <EditorBreadcrumbs segments={breadcrumbs} />
+
+      {blockingIssue ? (
+        <div
+          className="editor-conflict-banner is-blocking"
+          role="alert"
+          aria-label={`${blockingIssue.filename}: ${blockingIssue.summary}`}
+        >
+          <span className="editor-conflict-message">
+            <strong>{blockingIssue.summary}:</strong> {blockingIssue.detail}
+          </span>
+          <span className="editor-conflict-actions">
+            <button
+              type="button"
+              className="editor-conflict-action is-primary"
+              onClick={() => void editorStore.retryBlockingIssue(blockingIssue.bufferId)}
+            >
+              {blockingIssue.actionLabel}
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       {conflictTab ? (
         <div

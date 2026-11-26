@@ -36,12 +36,10 @@ export type SurfaceId =
   | 'files'
   | 'search'
   | 'git'
-  | 'problems'
-  | 'settings'
-  | 'agent'
   | 'workflows'
-  | 'output'
-  | 'terminal_placeholder';
+  | 'problems'
+  | 'terminal'
+  | 'agent';
 export type RegionId = 'primary_sidebar' | 'agent_dock' | 'bottom_dock';
 export type ToastSeverity = 'info' | 'success' | 'warning' | 'error';
 

@@ -320,7 +320,7 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
       if (!picked) return;
       const context = currentEnvelopeContext();
       if (!context) {
-        throw new Error('Selora is still connecting. Try Open Folder again in a moment.');
+        throw new Error('Skarn is still connecting. Try Open Folder again in a moment.');
       }
       await openFolderAt(picked, context);
     } catch (cause) {
@@ -336,7 +336,7 @@ export function FileTreeView({ bootstrap }: FileTreeViewProps) {
   const handleRefresh = async () => {
     const context = currentEnvelopeContext();
     if (!context) {
-      setStatus({ kind: 'error', text: 'Selora is still connecting. Try Refresh again in a moment.' });
+      setStatus({ kind: 'error', text: 'Skarn is still connecting. Try Refresh again in a moment.' });
       return;
     }
     setStatus(null);

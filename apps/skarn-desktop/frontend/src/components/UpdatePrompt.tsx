@@ -133,7 +133,7 @@ export function UpdatePrompt({ autoCheck }: UpdatePromptProps) {
       >
         <p className="update-eyebrow">Update available</p>
         <h2 id="update-title" className="update-title">
-          Selora IDE {release.latest_tag}
+          Skarn {release.latest_tag}
         </h2>
         <p id="update-body" className="update-body">
           You are on v{release.current_version}.{' '}

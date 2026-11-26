@@ -139,7 +139,7 @@ export const SearchPanelView: FC<SearchPanelViewProps> = ({ bootstrap, onNavigat
           setIsSearching(false);
           setError({
             code: null,
-            message: 'Selora is still connecting. Try the search again in a moment.',
+            message: 'Skarn is still connecting. Try the search again in a moment.',
           });
         }
         return;

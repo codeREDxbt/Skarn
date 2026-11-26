@@ -4947,17 +4947,16 @@ impl DesktopState {
         })
     }
 
-    /// Ã‚Â§2.2's routing table.
+    /// Region-strict routing table: Project (left), Process (bottom), Task (right).
     fn apply_toggle(&self, surface: SurfaceId) -> LayoutDto {
         let mut layout = self.layout.lock().expect("layout lock");
         match surface {
             SurfaceId::Files
             | SurfaceId::Search
             | SurfaceId::Git
-            | SurfaceId::Workflows
-            | SurfaceId::Settings => {
+            | SurfaceId::Workflows => {
                 if layout.primary_sidebar_open && layout.activity_view == surface {
-                    // Open and already showing this view Ã¢â€ â€™ close the sidebar.
+                    // Open and already showing this view -> close the sidebar.
                     layout.primary_sidebar_open = false;
                 } else {
                     layout.primary_sidebar_open = true;
@@ -4967,9 +4966,9 @@ impl DesktopState {
             SurfaceId::Agent => {
                 layout.agent_dock_open = !layout.agent_dock_open;
             }
-            SurfaceId::Problems | SurfaceId::Output | SurfaceId::TerminalPlaceholder => {
+            SurfaceId::Problems | SurfaceId::Terminal => {
                 if layout.bottom_dock_open && layout.bottom_view == surface {
-                    // Open and already showing this view Ã¢â€ â€™ close the dock.
+                    // Open and already showing this view -> close the dock.
                     layout.bottom_dock_open = false;
                 } else {
                     layout.bottom_dock_open = true;
@@ -5192,7 +5191,7 @@ mod tests {
             SurfaceId::Files,
             SurfaceId::Search,
             SurfaceId::Git,
-            SurfaceId::Settings,
+            SurfaceId::Workflows,
         ] {
             let state = DesktopState::with_settings(skarn_settings::Settings::default());
             let step = |state: &DesktopState, expect_open: bool, note: &str| {
@@ -5243,11 +5242,10 @@ mod tests {
         assert!(!layout(&state).agent_dock_open, "open Ã¢â€ â€™ closed");
 
         // Bottom-dock surfaces, from the default (closed, bottom_view =
-        // Output): the same three cases.
+        // Terminal): the same three cases.
         for surface in [
             SurfaceId::Problems,
-            SurfaceId::Output,
-            SurfaceId::TerminalPlaceholder,
+            SurfaceId::Terminal,
         ] {
             let state = DesktopState::with_settings(skarn_settings::Settings::default());
             let step = |state: &DesktopState, expect_open: bool, note: &str| {
@@ -5261,24 +5259,24 @@ mod tests {
                     "{surface:?}: {note} keeps the view"
                 );
             };
-            // (c) closed Ã¢â€ â€™ open on this view.
-            step(&state, true, "closed Ã¢â€ â€™ open");
-            // (a) open + same view Ã¢â€ â€™ closed.
-            step(&state, false, "same-view open Ã¢â€ â€™ closed");
-            // (c) closed Ã¢â€ â€™ open.
-            step(&state, true, "closed Ã¢â€ â€™ open (second lap)");
+            // (c) closed -> open on this view.
+            step(&state, true, "closed -> open");
+            // (a) open + same view -> closed.
+            step(&state, false, "same-view open -> closed");
+            // (c) closed -> open.
+            step(&state, true, "closed -> open (second lap)");
         }
-        // (b) open + different view Ã¢â€ â€™ switched.
+        // (b) open + different view -> switched.
         let state = DesktopState::with_settings(skarn_settings::Settings::default());
         state
             .dispatch(&app, envelope(&state, toggle(SurfaceId::Problems)))
             .expect("open problems");
         state
-            .dispatch(&app, envelope(&state, toggle(SurfaceId::Output)))
-            .expect("switch to output");
+            .dispatch(&app, envelope(&state, toggle(SurfaceId::Terminal)))
+            .expect("switch to terminal");
         let after = layout(&state);
         assert!(after.bottom_dock_open, "different view stays open");
-        assert_eq!(after.bottom_view, SurfaceId::Output);
+        assert_eq!(after.bottom_view, SurfaceId::Terminal);
     }
 
     #[test]
@@ -6272,10 +6270,38 @@ mod tests {
         );
         assert_eq!(
             boot.bottom_view,
-            SurfaceId::Output,
+            SurfaceId::Terminal,
             "reset into the valid set"
         );
         assert_eq!(boot.editor_splits, 1, "clamped to the split floor");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persisted_removed_surfaces_normalize_on_state_load() {
+        let path = temp_settings_path("legacy-surfaces-load");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"layout":{"activity_view":"problems","bottom_view":"output","primary_sidebar_open":true,"bottom_dock_open":true}}"#,
+        )
+        .expect("write legacy settings");
+
+        let state = DesktopState::from_settings_path(path.clone());
+        let boot = state.bootstrap().layout;
+        assert_eq!(boot.activity_view, SurfaceId::Files);
+        assert_eq!(boot.bottom_view, SurfaceId::Terminal);
+
+        std::fs::write(
+            &path,
+            br#"{"_v":1,"layout":{"activity_view":"settings","bottom_view":"terminal_placeholder"}}"#,
+        )
+        .expect("write placeholder settings");
+        let state2 = DesktopState::from_settings_path(path.clone());
+        let boot2 = state2.bootstrap().layout;
+        assert_eq!(boot2.activity_view, SurfaceId::Files);
+        assert_eq!(boot2.bottom_view, SurfaceId::Terminal);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -6304,7 +6330,7 @@ mod tests {
             )
             .expect("resize");
         state
-            .dispatch(&app, envelope(&state, toggle(SurfaceId::Output)))
+            .dispatch(&app, envelope(&state, toggle(SurfaceId::Terminal)))
             .expect("toggle 2");
 
         let events = state.events_after(0);
@@ -6333,7 +6359,7 @@ mod tests {
         // successive commands converge on the last one (Ã‚Â§3.2).
         match &events.last().expect("three events").payload {
             FrontendEvent::WorkspaceLayoutChanged(payload) => {
-                assert_eq!(payload.bottom_view, SurfaceId::Output);
+                assert_eq!(payload.bottom_view, SurfaceId::Terminal);
                 assert_eq!(payload, &layout(&state));
             }
             other => panic!("unexpected payload: {other:?}"),

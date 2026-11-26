@@ -20,8 +20,10 @@ import { Icon, type IconName } from '../components/Icon';
 import { Zap } from '../components/icons';
 import type { BootstrapState, SurfaceId } from '../bridge/bridge';
 
+type ActivityTarget = SurfaceId | 'settings';
+
 type Activity = {
-  surface: SurfaceId;
+  surface: ActivityTarget;
   label: string;
   icon: IconName;
   /** Empty when the view has no keybind yet — the tooltip then omits the hint. */
@@ -33,13 +35,12 @@ type Activity = {
  * owned (and outside this slice), so the id is asserted once, here, and
  * reused by the panel mount — one literal, not two.
  */
-export const WORKFLOWS_SURFACE: SurfaceId = 'workflows' as SurfaceId;
+export const WORKFLOWS_SURFACE: SurfaceId = 'workflows';
 
 const ACTIVITIES: Activity[] = [
   { surface: 'files', label: 'Files', icon: 'file', shortcut: 'Ctrl+Shift+E' },
   { surface: 'search', label: 'Search', icon: 'search', shortcut: 'Ctrl+Shift+F' },
   { surface: 'git', label: 'Git', icon: 'git-branch', shortcut: 'Ctrl+Shift+G' },
-  { surface: 'problems', label: 'Problems', icon: 'error', shortcut: 'Ctrl+Shift+M' },
   { surface: 'agent', label: 'Agent', icon: 'chat', shortcut: 'Ctrl+L' },
   // No keybind ships with the panel slice (ROADMAP 8d is the panel, not the
   // keymap), so the tooltip shows the label alone.
@@ -57,6 +58,8 @@ export type ActivityBarProps = {
   viewMode?: 'agent' | 'split' | 'editor';
   onSelectViewMode?: (mode: 'agent' | 'split' | 'editor') => void;
   bootstrap?: BootstrapState;
+  settingsOpen?: boolean;
+  onOpenSettings?: () => void;
 };
 
 type BadgeInfo = {
@@ -119,7 +122,13 @@ function ActivityButton({
   );
 }
 
-export function ActivityBar({ viewMode, onSelectViewMode, bootstrap: initialBootstrap }: ActivityBarProps = {}) {
+export function ActivityBar({
+  viewMode,
+  onSelectViewMode,
+  bootstrap: initialBootstrap,
+  settingsOpen = false,
+  onOpenSettings,
+}: ActivityBarProps = {}) {
   const layoutState: LayoutState = useSyncExternalStore(subscribeLayout, getLayoutSnapshot);
   const appState = useSyncExternalStore(subscribeApp, getAppSnapshot);
   const agentState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
@@ -135,21 +144,19 @@ export function ActivityBar({ viewMode, onSelectViewMode, bootstrap: initialBoot
   const layout = layoutState.layout;
   if (!layout) return null;
 
-  const handleActivityClick = (surface: SurfaceId) => {
+  const handleActivityClick = (surface: ActivityTarget) => {
     if (surface === 'agent') {
-      // One click opens or focuses the Agent workbench; it never closes the
-      // dock. The shell's view-mode handler opens a closed dock and selects
-      // the agent view, so asking it first and toggling again here would
-      // close the dock in the same click (the old split-then-toggle bug).
-      // Without a handler (an isolated bar), only a closed dock is opened —
-      // closing stays with the title-bar and status pills.
       if (onSelectViewMode) {
         onSelectViewMode('agent');
       } else if (!layout.agent_dock_open) {
         void layoutStore.toggle('agent');
       }
     } else if (surface === 'settings') {
-      void layoutStore.toggle('settings');
+      if (onOpenSettings) {
+        onOpenSettings();
+      } else {
+        window.dispatchEvent(new CustomEvent('skarn:open-settings'));
+      }
     } else {
       if (viewMode === 'agent' && onSelectViewMode) {
         onSelectViewMode('split');
@@ -176,24 +183,14 @@ export function ActivityBar({ viewMode, onSelectViewMode, bootstrap: initialBoot
     ...(bootstrap?.git?.changed_paths ?? []),
     ...(bootstrap?.git?.staged_paths ?? []),
   ]).size;
-  const diagnosticsErrors = bootstrap?.diagnostics?.filter((d) => d.severity === 'error').length ?? 0;
-  const diagnosticsWarnings = bootstrap?.diagnostics?.filter((d) => d.severity === 'warning').length ?? 0;
-  const totalProblems = diagnosticsErrors + diagnosticsWarnings;
 
   const agentInFlight = agentState.inFlight || agentState.thinkingState !== 'breathing';
   const agentWaitingApproval = Boolean(bootstrap?.chat?.pending_approval);
   const agentActiveTodos = agentState.todos?.filter((t) => t.status === 'in_progress').length ?? 0;
 
-  const getBadgeForActivity = (surface: SurfaceId): BadgeInfo | null => {
+  const getBadgeForActivity = (surface: ActivityTarget): BadgeInfo | null => {
     if (surface === 'git' && gitModifiedCount > 0) {
       return { count: gitModifiedCount, variant: 'git' };
-    }
-    if (surface === 'problems' && totalProblems > 0) {
-      return {
-        count: totalProblems,
-        variant: diagnosticsErrors > 0 ? 'error' : 'warn',
-        pulse: diagnosticsErrors > 0,
-      };
     }
     if (surface === 'agent') {
       // Phase 9e: a finished background child outranks the running pulse -
@@ -259,7 +256,7 @@ export function ActivityBar({ viewMode, onSelectViewMode, bootstrap: initialBoot
 
       <ActivityButton
         activity={SETTINGS}
-        selected={layout.primary_sidebar_open && layout.activity_view === 'settings'}
+        selected={settingsOpen}
         onClick={() => handleActivityClick('settings')}
       />
     </>

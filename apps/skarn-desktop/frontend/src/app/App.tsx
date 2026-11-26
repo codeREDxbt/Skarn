@@ -24,6 +24,7 @@ import { ShellGrid } from '../layout/ShellGrid';
 import { CommandPalette } from '../components/CommandPalette';
 import { CheatSheet, useCheatSheetTrigger } from '../components/CheatSheet';
 import { AboutDialog, useAboutTrigger } from '../components/AboutDialog';
+import { SettingsDialog } from '../components/SettingsDialog';
 import { UpdatePrompt } from '../components/UpdatePrompt';
 import { ToastViewport } from '../components/ToastViewport';
 import { OnboardingOverlay } from '../features/onboarding/OnboardingOverlay';
@@ -49,7 +50,7 @@ function ConnectingScreen() {
 function ErrorScreen({ error, onRetry }: { error: string; onRetry: () => void }) {
   return (
     <main className="boot-screen boot-error" role="alert">
-      <h1 className="boot-title">Selora IDE</h1>
+      <h1 className="boot-title">Skarn</h1>
       <p className="boot-error-message">{error}</p>
       <button type="button" className="empty-action" onClick={onRetry}>
         Reconnect
@@ -64,6 +65,7 @@ function AppInner() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cheatSheetOpen, setCheatSheetOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
 
   const settings = app.bootstrap?.settings ?? null;
@@ -112,6 +114,7 @@ function AppInner() {
         },
         openPalette: () => setPaletteOpen(true),
         openCheatsheet: () => setCheatSheetOpen(true),
+        openSettings: () => setSettingsOpen(true),
         showAbout: () => window.dispatchEvent(new CustomEvent('skarn:about')),
         openFolder: () => void openFolder(),
         saveActive: () => editorStore.saveActive(),
@@ -153,6 +156,12 @@ function AppInner() {
     return () => window.removeEventListener('skarn:open-connect', handler);
   }, []);
 
+  useEffect(() => {
+    const handler = () => setSettingsOpen(true);
+    window.addEventListener('skarn:open-settings', handler);
+    return () => window.removeEventListener('skarn:open-settings', handler);
+  }, []);
+
   useShortcuts({ settings, enabled: app.phase === 'ready', paletteOpen, onCommand, onClosePalette });
 
   if (app.phase === 'error') {
@@ -169,9 +178,17 @@ function AppInner() {
         commands={commands}
         onRunCommand={onCommand}
         onOpenConnect={() => setConnectModalOpen(true)}
+        settingsOpen={settingsOpen}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <CommandPalette open={paletteOpen} commands={commands} onRun={onCommand} onClose={onClosePalette} />
       <CheatSheet open={cheatSheetOpen} commands={commands} onClose={() => setCheatSheetOpen(false)} />
+      <SettingsDialog
+        open={settingsOpen}
+        bootstrap={app.bootstrap}
+        onClose={() => setSettingsOpen(false)}
+        onOpenConnect={() => setConnectModalOpen(true)}
+      />
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <UpdatePrompt autoCheck={app.bootstrap.settings.check_for_updates ?? true} />
       <OnboardingOverlay />

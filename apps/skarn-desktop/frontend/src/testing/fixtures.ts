@@ -21,7 +21,7 @@ export const FIXTURE_LAYOUT: Layout = {
   agent_dock_open: false,
   bottom_dock_height_px: 200,
   bottom_dock_open: false,
-  bottom_view: 'output',
+  bottom_view: 'terminal',
   editor_splits: 1,
   activity_view: 'files',
   primary_sidebar_open: true,

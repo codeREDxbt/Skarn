@@ -16,6 +16,7 @@ import {
   Component,
   Suspense,
   lazy,
+  useState,
   useSyncExternalStore,
   type ComponentType,
   type ErrorInfo,
@@ -23,47 +24,25 @@ import {
 } from 'react';
 import type { BootstrapState, SurfaceId } from '../bridge/bridge';
 import { getLayoutSnapshot, subscribeLayout, type LayoutState } from '../features/layout/layout-store';
-import { agentStore } from '../features/agent/agent-store';
-import { AgentSessionRail } from '../features/agent/components/AgentSessionRail';
 import { FileTreeView } from '../features/sidebar/FileTreeView';
 import { SearchPanelView } from '../features/sidebar/SearchPanelView';
 import { GitPanelView } from '../features/sidebar/GitPanelView';
-import { SettingsPanelView } from '../features/sidebar/SettingsPanelView';
 import { WORKFLOWS_SURFACE } from './ActivityBar';
 // CSS ownership follows the component (P1 startup split): ShellGrid loads this
 // module lazily, so a closed sidebar never downloads sidebar.css. The region
 // skeleton in shell.css keeps the slot laid out until the chunk arrives.
 import '../styles/sidebar.css';
 
-const VIEW_LABEL: Record<SurfaceId, string> = {
+const VIEW_LABEL: Partial<Record<SurfaceId, string>> = {
   files: 'Files',
   search: 'Search',
   git: 'Git',
-  settings: 'Settings',
-  problems: 'Problems',
-  agent: 'Agent',
   workflows: 'Workflows',
-  output: 'Output',
-  terminal_placeholder: 'Terminal',
 };
 
-/** Header label for the live route (the Phase 8 route is not in `SurfaceId`). */
+/** Header label for the live primary-sidebar route. */
 function viewLabel(view: SurfaceId): string {
-  return view === WORKFLOWS_SURFACE ? 'Workflows' : VIEW_LABEL[view];
-}
-
-function AgentSidebarView() {
-  const agentState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
-  return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <AgentSessionRail
-        sessions={agentState.sessions}
-        activeSessionId={agentState.activeSessionId}
-        resumableSessions={agentState.resumableSessions}
-        onDelete={(sessionId) => void agentStore.requestDeleteSession(sessionId)}
-      />
-    </div>
-  );
+  return view === WORKFLOWS_SURFACE ? 'Workflows' : (VIEW_LABEL[view] ?? 'Files');
 }
 
 // --- Phase 8 · Workflows panel (lazy, structurally resolved) ----------------
@@ -134,7 +113,14 @@ function WorkflowsPanelLoading() {
  * build, exports something this shell cannot render, or fails on the props it
  * receives — never with invented run, phase or cost data.
  */
-function WorkflowsPanelUnavailable({ detail }: { bootstrap?: BootstrapState; detail?: string }) {
+function WorkflowsPanelUnavailable({
+  detail,
+  onRetry,
+}: {
+  bootstrap?: BootstrapState;
+  detail?: string;
+  onRetry?: () => void;
+}) {
   return (
     <div
       className="workflows-panel-fallback"
@@ -143,18 +129,17 @@ function WorkflowsPanelUnavailable({ detail }: { bootstrap?: BootstrapState; det
       style={{ color: 'var(--fg-muted)', fontSize: 'var(--type-sm)', lineHeight: 'var(--type-sm-lh)' }}
     >
       <p style={{ margin: '0 0 var(--space-2)', color: 'var(--fg-default)' }}>
-        The Workflows panel is not available in this build.
-      </p>
-      <p style={{ margin: 0 }}>
-        The route is wired; the panel module
-        (<code>src/features/workflows/WorkflowsPanel.tsx</code>) ships with the Phase 8 UI
-        slice. Runs, the phase graph, artifacts and the cost meter appear here once it
-        lands.
+        Workflows could not be loaded right now.
       </p>
       {detail ? (
-        <p style={{ margin: 'var(--space-2) 0 0' }} data-workflow-panel-detail="">
+        <p style={{ margin: '0 0 var(--space-2)' }} data-workflow-panel-detail="">
           {detail}
         </p>
+      ) : null}
+      {onRetry ? (
+        <button type="button" className="empty-action" onClick={onRetry}>
+          Retry
+        </button>
       ) : null}
     </div>
   );
@@ -174,7 +159,10 @@ async function loadWorkflowsPanel(): Promise<{ default: ComponentType<WorkflowsP
 const WorkflowsPanel = lazy(loadWorkflowsPanel);
 
 /** Keeps a panel-side render error inside the sidebar region. */
-class WorkflowsPanelBoundary extends Component<{ children?: ReactNode }, { failure: string | null }> {
+class WorkflowsPanelBoundary extends Component<
+  { children?: ReactNode; onRetry: () => void },
+  { failure: string | null }
+> {
   state: { failure: string | null } = { failure: null };
 
   static getDerivedStateFromError(error: unknown): { failure: string } {
@@ -187,18 +175,27 @@ class WorkflowsPanelBoundary extends Component<{ children?: ReactNode }, { failu
 
   render(): ReactNode {
     if (this.state.failure !== null) {
-      return <WorkflowsPanelUnavailable detail={this.state.failure} />;
+      return (
+        <WorkflowsPanelUnavailable
+          detail={this.state.failure}
+          onRetry={() => {
+            this.setState({ failure: null });
+            this.props.onRetry();
+          }}
+        />
+      );
     }
     return this.props.children;
   }
 }
 
 function WorkflowsSidebarView({ bootstrap }: { bootstrap: BootstrapState }) {
+  const [attempt, setAttempt] = useState(0);
   return (
     <div className="workflows-panel-slot" data-workflow-view="workflows">
-      <WorkflowsPanelBoundary>
+      <WorkflowsPanelBoundary onRetry={() => setAttempt((count) => count + 1)}>
         <Suspense fallback={<WorkflowsPanelLoading />}>
-          <WorkflowsPanel bootstrap={bootstrap} />
+          <WorkflowsPanel key={attempt} bootstrap={bootstrap} />
         </Suspense>
       </WorkflowsPanelBoundary>
     </div>
@@ -207,10 +204,8 @@ function WorkflowsSidebarView({ bootstrap }: { bootstrap: BootstrapState }) {
 
 export function PrimarySidebar({
   bootstrap,
-  onOpenConnect,
 }: {
   bootstrap: BootstrapState;
-  onOpenConnect?: () => void;
 }) {
   const state: LayoutState = useSyncExternalStore(subscribeLayout, getLayoutSnapshot);
   const layout = state.layout;
@@ -223,8 +218,6 @@ export function PrimarySidebar({
         {view === 'files' ? <FileTreeView bootstrap={bootstrap} /> : null}
         {view === 'search' ? <SearchPanelView bootstrap={bootstrap} /> : null}
         {view === 'git' ? <GitPanelView bootstrap={bootstrap} /> : null}
-        {view === 'settings' ? <SettingsPanelView bootstrap={bootstrap} onOpenConnect={onOpenConnect} /> : null}
-        {view === 'agent' ? <AgentSidebarView /> : null}
         {view === WORKFLOWS_SURFACE ? <WorkflowsSidebarView bootstrap={bootstrap} /> : null}
       </div>
     </div>

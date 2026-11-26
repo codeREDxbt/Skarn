@@ -70,9 +70,18 @@ export type ShellGridProps = {
   commands: CommandSpec[];
   onRunCommand: (id: CommandSpec['id']) => void;
   onOpenConnect?: () => void;
+  settingsOpen?: boolean;
+  onOpenSettings?: () => void;
 };
 
-export function ShellGrid({ bootstrap, commands, onRunCommand, onOpenConnect }: ShellGridProps) {
+export function ShellGrid({
+  bootstrap,
+  commands,
+  onRunCommand,
+  onOpenConnect,
+  settingsOpen = false,
+  onOpenSettings,
+}: ShellGridProps) {
   const state: LayoutState = useSyncExternalStore(subscribeLayout, getLayoutSnapshot);
   const shellRef = useRef<HTMLDivElement>(null);
   const workbenchRef = useRef<HTMLDivElement>(null);
@@ -169,6 +178,8 @@ export function ShellGrid({ bootstrap, commands, onRunCommand, onOpenConnect }: 
         <nav className="activitybar" aria-label="Activity bar" ref={activityBarRef}>
           <ActivityBar
             bootstrap={bootstrap}
+            settingsOpen={settingsOpen}
+            onOpenSettings={onOpenSettings}
             viewMode={agentOpen ? viewMode : 'editor'}
             onSelectViewMode={(mode) => {
               setViewMode(mode);
@@ -181,7 +192,7 @@ export function ShellGrid({ bootstrap, commands, onRunCommand, onOpenConnect }: 
         {sidebarOpen ? (
           <aside className="primary-sidebar-slot" aria-label="Primary sidebar">
             <Suspense fallback={<div className="primary-sidebar-loading" aria-busy="true" />}>
-              <PrimarySidebar bootstrap={bootstrap} onOpenConnect={onOpenConnect} />
+              <PrimarySidebar bootstrap={bootstrap} />
             </Suspense>
           </aside>
         ) : null}

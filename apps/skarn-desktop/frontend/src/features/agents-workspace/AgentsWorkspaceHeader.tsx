@@ -55,9 +55,9 @@ export function AgentsWorkspaceHeader(props: AgentsWorkspaceHeaderProps) {
       <SidebarRight size={14} aria-hidden="true" />
       <span>Context</span>
     </button>
-    <button type="button" className="agents-workspace__header-editor" onClick={props.onReturnEditor} title="Return to editor">
+    <button type="button" className="agents-workspace__header-editor" onClick={props.onReturnEditor} title="Return to main editor window" aria-label="Main window">
       <Code2 size={14} aria-hidden="true" />
-      <span>Editor</span>
+      <span>Main window</span>
     </button>
     <WindowControls />
   </header>;

@@ -3,9 +3,18 @@ import { useMemo, useState, useSyncExternalStore } from 'react';
 import { getAppSnapshot, subscribeApp } from '../../app/app-store';
 import type { Diagnostic } from '../../bridge/bridge';
 import { Icon } from '../../components/Icon';
-import { editorStore } from '../editor/editor-store';
+import { editorStore, type EditorBlockingIssue } from '../editor/editor-store';
 import { diagnosticClipboardText } from '../agent/components/chat-safety';
 import { toastStore } from '../toasts/toast-store';
+
+const subscribeEditorStore = (listener: () => void) =>
+  typeof editorStore.subscribe === 'function' ? editorStore.subscribe(listener) : () => undefined;
+
+const EMPTY_BLOCKING_ISSUES: EditorBlockingIssue[] = [];
+const getBlockingIssuesSnapshot = () =>
+  typeof editorStore.getSnapshot === 'function'
+    ? editorStore.getSnapshot().blockingIssues
+    : EMPTY_BLOCKING_ISSUES;
 
 export type ProblemSeverity = Diagnostic['severity'];
 type FilterType = 'all' | ProblemSeverity;
@@ -33,6 +42,7 @@ function severityIcon(severity: ProblemSeverity) {
 
 export function ProblemsPanel() {
   const app = useSyncExternalStore(subscribeApp, getAppSnapshot);
+  const blockingIssues = useSyncExternalStore(subscribeEditorStore, getBlockingIssuesSnapshot);
   const diagnostics = app.bootstrap?.diagnostics ?? [];
   const workspaceRoot = app.bootstrap?.workspace.root ?? null;
 
@@ -150,7 +160,39 @@ export function ProblemsPanel() {
       </div>
 
       <div className="problems-list" role="list">
-        {filteredProblems.length === 0 ? (
+        {blockingIssues.map((issue) => (
+          <div className="problems-file-group is-blocking" key={`blocking-${issue.bufferId}`} role="alert">
+            <div className="problems-file-header" title={issue.path}>
+              <span className="problems-file-name">{issue.filename}</span>
+              <span className="problems-file-path">{issue.summary}</span>
+            </div>
+            <div className="problem-row-item" role="listitem">
+              <button
+                type="button"
+                className="problem-row severity-error"
+                onClick={() => editorStore.setActive?.(issue.bufferId)}
+                title={issue.detail}
+              >
+                <span className="problem-icon-cell" aria-hidden="true">
+                  <span className="problem-icon-error">
+                    <Icon name="severity-error" size={14} />
+                  </span>
+                </span>
+                <span className="problem-main">
+                  <span className="problem-desc">{issue.detail}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="dock-btn"
+                onClick={() => void editorStore.retryBlockingIssue?.(issue.bufferId)}
+              >
+                {issue.actionLabel}
+              </button>
+            </div>
+          </div>
+        ))}
+        {filteredProblems.length === 0 && blockingIssues.length === 0 ? (
           <div className="problems-empty-view">
             {diagnostics.length === 0 ? (
               <>

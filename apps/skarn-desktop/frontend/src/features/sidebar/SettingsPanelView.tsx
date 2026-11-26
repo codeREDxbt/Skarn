@@ -25,7 +25,6 @@ import {
   activeProviderId,
   isProviderDisabled,
   providerIdForModel,
-  visiblePresets,
   withProviderEnabled,
 } from '../auth/provider-visibility';
 
@@ -34,7 +33,7 @@ export interface SettingsPanelViewProps {
   onOpenConnect?: () => void;
 }
 
-type SettingsTab = 'gateway' | 'editor' | 'appearance' | 'keybindings';
+type SettingsTab = 'providers' | 'editor' | 'appearance' | 'keybindings';
 
 interface KeybindingEntry {
   id: string;
@@ -68,24 +67,16 @@ const KEYBIND_FIELDS: Array<{ key: KeybindDraftKey; label: string; command: stri
   { key: 'keybind_toggle_chat', label: 'Toggle Agent Dock', command: 'Toggle Agent Dock' },
 ];
 
-/** For values that do persist in settings.json but have no settings-wire exposure. */
-const unexposedTitle = (label: string): string =>
-  `${label} is stored in settings.json, but this build's settings protocol does not expose it. This value is read-only; changes are not saved.`;
-
 function formatError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
-
-/** Only for values with genuinely no writable backend field. */
-const unsupportedTitle = (label: string): string =>
-  `${label} has no writable backend settings field in this build. This control is disabled; changes are not saved.`;
 
 export const SettingsPanelView: FC<SettingsPanelViewProps> = ({ bootstrap, onOpenConnect }) => {
   const localPreferences = useSyncExternalStore(localEditorPreferences.subscribe, localEditorPreferences.getSnapshot);
   const settings = bootstrap.settings;
   const isConnected = bootstrap.connection === 'connected';
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>('gateway');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
   const [keybindQuery, setKeybindQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -150,7 +141,6 @@ export const SettingsPanelView: FC<SettingsPanelViewProps> = ({ bootstrap, onOpe
     catalogModels.find((model) => model.id === bootstrap.active_model_id)?.display_name ??
     bootstrap.active_model_id ??
     'none';
-  const selectableProviders = visiblePresets(PROVIDER_PRESETS, disabledProviders, activeProvider);
   const toggleProvider = (providerId: string, enabled: boolean): void => {
     persist({ disabled_providers: withProviderEnabled(disabledProviders, providerId, enabled) });
   };
@@ -222,24 +212,15 @@ const restartServer = (language: string): void => {
   const themeValue = normalizeThemeValue(settings.theme);
   const soundsEnabled = useSyncExternalStore(subscribeSound, getSoundSnapshot);
 
-  // The active model is the only model fact the bridge exposes. When the
-  // bootstrap has one, show it read-only; never substitute a placeholder id.
-  const activeModel = useMemo(() => {
-    const id = bootstrap.active_model_id;
-    if (!id) return null;
-    const model = bootstrap.models.find((candidate) => candidate.id === id);
-    return { id, label: model ? `${model.display_name} (${model.id})` : id };
-  }, [bootstrap.active_model_id, bootstrap.models]);
-
   return (
     <div className="sidebar-settings-panel">
       {/* Settings Navigation Tabs */}
       <nav className="settings-nav-tabs" aria-label="Settings Categories">
         <button
           type="button"
-          className={`settings-tab-btn ${activeTab === 'gateway' ? 'is-active' : ''}`}
-          onClick={() => setActiveTab('gateway')}
-          title="Providers & Models"
+          className={`settings-tab-btn ${activeTab === 'providers' ? 'is-active' : ''}`}
+          onClick={() => setActiveTab('providers')}
+          title="Providers & Keys"
         >
           <Key size={12} />
           <span>Providers</span>
@@ -284,8 +265,8 @@ const restartServer = (language: string): void => {
         </p>
       ) : null}
 
-      {/* Tab 1: Providers & Models */}
-      {activeTab === 'gateway' && (
+      {/* Tab 1: Providers */}
+      {activeTab === 'providers' && (
         <div className="settings-section-content">
           {/* Status & Provider Card */}
           <div className="settings-card ai-gateway-card">
@@ -388,95 +369,6 @@ const restartServer = (language: string): void => {
             </ul>
           </div>
 
-          {/* Model Selection Group */}
-          <div className="settings-group">
-            <div className="settings-row">
-              <label className="settings-label" htmlFor="settings-provider-select">
-                Default Provider
-              </label>
-              <select
-                id="settings-provider-select"
-                className="settings-select"
-                value={activeProvider ?? ''}
-                disabled
-                title={unsupportedTitle('Provider selection')}
-              >
-                <option value="">-</option>
-                {selectableProviders.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label" htmlFor="settings-model-select">
-                Chat Model
-              </label>
-              <select
-                id="settings-model-select"
-                className="settings-select"
-                value={activeModel?.id ?? ''}
-                disabled
-                title={
-                  activeModel
-                    ? 'The active model is reported by the connected provider and cannot be changed in this build.'
-                    : 'No active model is reported by the provider. This build has no model-selection control, so changes are not saved.'
-                }
-              >
-                <option value="">—</option>
-                {activeModel ? <option value={activeModel.id}>{activeModel.label}</option> : null}
-              </select>
-            </div>
-
-            <div className="settings-row">
-              <span className="settings-label" id="settings-streaming-label">
-                Stream Completions
-              </span>
-              <label className="settings-switch" title={unsupportedTitle('Streaming')}>
-                <input
-                  type="checkbox"
-                  checked={false}
-                  disabled
-                  aria-labelledby="settings-streaming-label"
-                  title={unsupportedTitle('Streaming')}
-                />
-                <span className="switch-slider" />
-              </label>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label" htmlFor="settings-temp-input">
-                Temperature
-              </label>
-              <input
-                id="settings-temp-input"
-                className="settings-number-input"
-                type="number"
-                value=""
-                placeholder="—"
-                disabled
-                title={unsupportedTitle('Temperature')}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label" htmlFor="settings-max-tokens">
-                Max Output Tokens
-              </label>
-              <input
-                id="settings-max-tokens"
-                className="settings-number-input"
-                type="number"
-                value=""
-                placeholder="—"
-                disabled
-                title={unsupportedTitle('Max output tokens')}
-              />
-            </div>
-          </div>
-
           {/* Agent workspace trust: risky shell commands need both this
               grant and an approval. Allowlisted read-only commands still
               run without it. */}
@@ -494,7 +386,7 @@ const restartServer = (language: string): void => {
             <p className="settings-card-hint">
               Untrusted workspaces never run risky shell commands, even after
               you approve a command card. Read-only commands on the agent
-              allowlist still run. Trust changes apply when Selora restarts.
+              allowlist still run. Trust changes apply when Skarn restarts.
             </p>
             <div className="settings-row">
               <label className="settings-label" htmlFor="settings-workspace-trusted">
@@ -512,7 +404,7 @@ const restartServer = (language: string): void => {
               </label>
             </div>
             <span id="settings-workspace-trusted-hint" className="settings-card-hint">
-              Restart Selora after changing this setting; it is read at startup, and
+              Restart Skarn after changing this setting; it is read at startup, and
               agent turns pause until the restart.
             </span>
           </div>
@@ -647,17 +539,6 @@ const restartServer = (language: string): void => {
                 <span className="switch-slider" />
               </label>
             </div>
-
-            <div className="settings-row">
-              <span className="settings-label">Font Family</span>
-              <span
-                className="settings-card-hint"
-                aria-label="Font family value"
-                title={unsupportedTitle('Font family')}
-              >
-                JetBrains Mono
-              </span>
-            </div>
           </div>
         </div>
       )}
@@ -720,21 +601,6 @@ const restartServer = (language: string): void => {
                 />
                 <span className="switch-slider" />
               </label>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label" htmlFor="settings-accent-select">
-                Accent Tint
-              </label>
-              <select
-                id="settings-accent-select"
-                className="settings-select"
-                value=""
-                disabled
-                title={unsupportedTitle('Accent tint')}
-              >
-                <option value="">—</option>
-              </select>
             </div>
 
             <div className="settings-row">
@@ -860,9 +726,6 @@ const restartServer = (language: string): void => {
         <p className="settings-later">
           Theme, reduced motion, backend editor preferences, and the four keybinds save automatically
           through Rust.
-        </p>
-        <p className="settings-later">
-          Disabled fields have no backend setting in this build.
         </p>
       </div>
     </div>

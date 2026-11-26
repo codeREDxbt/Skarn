@@ -37,7 +37,6 @@ import {
   Paperclip,
   FileText,
 } from '../../../components/icons';
-import { BorderBeam } from '../presence/BorderBeam';
 import { VoiceBeam } from '../presence/VoiceBeam';
 import type { FileTreeNode, Model, ToolCapability } from '../../../bridge/bridge';
 import type { PermissionMode, ReasoningEffort } from '../types';
@@ -75,24 +74,13 @@ type ModelItem = {
 const MODE_OPTIONS: Array<{
   id: PermissionMode;
   label: string;
-  badge: string;
   description: string;
   icon: typeof ShieldCheck;
   colorClass: string;
 }> = [
   {
-    id: 'full',
-    label: 'Full auto-apply',
-    badge: 'Armed',
-    description:
-      'File writes, edits and deletes apply immediately for this session. Bash commands still ask for approval.',
-    icon: ShieldCheck,
-    colorClass: 'mode-icon-full',
-  },
-  {
     id: 'plan_only',
-    label: 'Plan only',
-    badge: 'Read-only',
+    label: 'Read-only',
     description: 'Explores and plans without writing any files.',
     icon: Lightbulb,
     colorClass: 'mode-icon-plan',
@@ -100,10 +88,17 @@ const MODE_OPTIONS: Array<{
   {
     id: 'ask_before_change',
     label: 'Ask before changes',
-    badge: 'Guarded',
     description: 'Every file write and bash command pauses for your approval.',
     icon: ShieldAlert,
     colorClass: 'mode-icon-ask',
+  },
+  {
+    id: 'full',
+    label: 'Auto-edit',
+    description:
+      'File writes, edits and deletes apply immediately for this session. Bash commands still ask for approval.',
+    icon: ShieldCheck,
+    colorClass: 'mode-icon-full',
   },
 ];
 
@@ -113,42 +108,6 @@ const EFFORT_OPTIONS: Array<{ id: ReasoningEffort; label: string; desc: string }
   { id: 'standard', label: 'Standard', desc: 'Balanced speed and analysis' },
   { id: 'quick', label: 'Quick', desc: 'Fast, minimal thought overhead' },
 ];
-
-/**
- * Phase 9a composer mode row. Labels are ZCode-class; each maps to a real
- * existing session policy rather than inventing a fourth backend mode.
- */
-const COMPOSER_MODES: Array<{
-  id: 'ask' | 'agent' | 'plan';
-  label: string;
-  mode: PermissionMode;
-  description: string;
-}> = [
-  {
-    id: 'ask',
-    label: 'Ask',
-    mode: 'ask_before_change',
-    description: 'Ask before changes: every file write and command pauses for your approval.',
-  },
-  {
-    id: 'agent',
-    label: 'Agent',
-    mode: 'full',
-    description: 'Agent: file writes apply immediately for this session; commands still ask.',
-  },
-  {
-    id: 'plan',
-    label: 'Plan',
-    mode: 'plan_only',
-    description: 'Plan: explore read-only and propose a plan without writing files.',
-  },
-];
-
-function composerModeId(mode: PermissionMode): 'ask' | 'agent' | 'plan' {
-  if (mode === 'plan_only') return 'plan';
-  if (mode === 'ask_before_change') return 'ask';
-  return 'agent';
-}
 
 /**
  * Attachments are workspace-relative paths, not uploaded bytes. The backend
@@ -587,8 +546,6 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     availableEffortOptions[0] ||
     EFFORT_OPTIONS[2];
 
-  const autoApplyArmed = permissionMode === 'full';
-
   const filteredModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
     if (!q) return resolvedModels;
@@ -632,30 +589,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
       }}
       onDrop={handleDrop}
     >
-      {/* 1. Border Beam (Animated perimeter aura during in-flight runs) */}
-      <BorderBeam active={inFlight} durationMs={2400} borderRadius={12} colorPreset="emerald" />
-
-      {/* 2. Composer mode row (Ask / Agent / Plan). Each entry is a real
-          session permission policy — not a cosmetic toggle. */}
-      <div className="composer-mode-row" role="group" aria-label="Composer mode">
-        {COMPOSER_MODES.map((option) => {
-          const active = composerModeId(permissionMode) === option.id;
-          return (
-            <button
-              key={option.id}
-              type="button"
-              className={`composer-mode-btn${active ? ' is-active' : ''}`}
-              aria-pressed={active}
-              title={option.description}
-              onClick={() => agentStore.setPermissionMode(option.mode)}
-            >
-              {option.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* 2b. Attached workspace files. Paths only: the agent reads them. */}
+      {/* 1. Attached workspace files. Paths only: the agent reads them. */}
       {attachments.length > 0 && (
         <div className="agent-attach-chips" role="list" aria-label="Attached files">
           {attachments.map((path) => (
@@ -751,7 +685,6 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
                 <div className="menu-item-text">
                   <div className="item-title-row">
                     <span className="item-title">{opt.label}</span>
-                    <span className="menu-mode-badge">{opt.badge}</span>
                   </div>
                   <div className="item-desc">{opt.description}</div>
                 </div>
@@ -901,14 +834,16 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
             className="floating-menu-item model-settings-item"
             role="menuitem"
             onClick={() => {
-              window.dispatchEvent(new CustomEvent('skarn:open-connect'));
+              window.dispatchEvent(
+                new CustomEvent(surface === 'main' ? 'skarn:open-settings' : 'skarn:open-connect'),
+              );
               setActiveMenu(null);
             }}
           >
             <Key size={13} className="text-accent flex-shrink-0" />
             <div className="menu-item-text">
-              <div className="item-title">Model &amp; Reasoning Settings…</div>
-              <div className="item-desc">Configure keys, local Ollama endpoints, &amp; depth</div>
+              <div className="item-title">Provider Settings…</div>
+              <div className="item-desc">Configure providers and API keys</div>
             </div>
           </button>
         </div>
@@ -1048,18 +983,6 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
             <span className="pill-text">{currentMode.label}</span>
             <ChevronDown size={11} className="pill-chevron" />
           </button>
-
-          {/* Armed auto-apply indicator — writes land without cards, bash asks */}
-          {autoApplyArmed && (
-            <span
-              className="composer-auto-apply-armed"
-              role="status"
-              title="Full auto-apply is active: file writes, edits and deletes apply immediately for this session. Bash commands still require approval."
-            >
-              <ShieldCheck size={11} aria-hidden="true" />
-              Auto-apply armed
-            </span>
-          )}
 
           {/* Prompt word count (measured, not estimated) */}
           {text.trim() && (

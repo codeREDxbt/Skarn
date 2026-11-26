@@ -325,12 +325,11 @@ pub enum SurfaceId {
     Search,
     Git,
     Problems,
-    Settings,
     Agent,
     /// Phase 8: the Workflows run panel in the primary sidebar.
     Workflows,
-    Output,
-    TerminalPlaceholder,
+    #[serde(alias = "terminal_placeholder")]
+    Terminal,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -389,22 +388,18 @@ pub const RESIZE_HIT_ZONE_MIN_PX: f32 = 6.0;
 pub const EDITOR_SPLITS_MIN: u8 = 1;
 pub const EDITOR_SPLITS_MAX: u8 = 4;
 
-/// The surfaces the primary sidebar can show (§2.2's routing table).
-/// `Problems` is a bottom-dock view in Z2, so it is excluded here
-/// (ARCHITECTURE §4.3 — brief §2's sidebar parenthetical is superseded).
-pub const ACTIVITY_VIEWS: [SurfaceId; 5] = [
+/// The surfaces the primary sidebar can show (region-strict Project rail).
+pub const ACTIVITY_VIEWS: [SurfaceId; 4] = [
     SurfaceId::Files,
     SurfaceId::Search,
     SurfaceId::Git,
     SurfaceId::Workflows,
-    SurfaceId::Settings,
 ];
 
-/// The surfaces the bottom dock can show (§2.2's routing table).
-pub const BOTTOM_VIEWS: [SurfaceId; 3] = [
-    SurfaceId::Output,
-    SurfaceId::TerminalPlaceholder,
+/// The surfaces the bottom dock can show (region-strict Process dock).
+pub const BOTTOM_VIEWS: [SurfaceId; 2] = [
     SurfaceId::Problems,
+    SurfaceId::Terminal,
 ];
 
 /// Clamp a ResizeRegion value into the region's bounds (§1.1). Finite
@@ -1233,7 +1228,7 @@ fn default_bottom_dock_open() -> bool {
     false
 }
 fn default_bottom_view() -> SurfaceId {
-    SurfaceId::Output
+    SurfaceId::Terminal
 }
 fn default_editor_splits() -> u8 {
     EDITOR_SPLITS_MIN
@@ -1243,6 +1238,36 @@ fn default_activity_view() -> SurfaceId {
 }
 fn default_primary_sidebar_open() -> bool {
     true
+}
+
+/// Deserialize persisted `bottom_view`, normalizing removed (`output`) or
+/// legacy (`terminal_placeholder`) or out-of-region values safely on load.
+pub fn deserialize_bottom_view<'de, D>(deserializer: D) -> Result<SurfaceId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        "problems" => SurfaceId::Problems,
+        "terminal" | "terminal_placeholder" => SurfaceId::Terminal,
+        _ => default_bottom_view(),
+    })
+}
+
+/// Deserialize persisted `activity_view`, normalizing removed (`settings`) or
+/// out-of-region (`problems`, `agent`, `output`, `terminal_placeholder`) values safely on load.
+pub fn deserialize_activity_view<'de, D>(deserializer: D) -> Result<SurfaceId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        "files" => SurfaceId::Files,
+        "search" => SurfaceId::Search,
+        "git" => SurfaceId::Git,
+        "workflows" => SurfaceId::Workflows,
+        _ => default_activity_view(),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1257,13 +1282,13 @@ pub struct LayoutDto {
     pub bottom_dock_height_px: f32,
     #[serde(default = "default_bottom_dock_open")]
     pub bottom_dock_open: bool,
-    #[serde(default = "default_bottom_view")]
+    #[serde(default = "default_bottom_view", deserialize_with = "deserialize_bottom_view")]
     pub bottom_view: SurfaceId,
     #[serde(default = "default_editor_splits")]
     pub editor_splits: u8,
     /// The activity bar's active view (§5.1 — brief §6's "active activity
     /// view"). `bottom_view` above covers the bottom dock's active view.
-    #[serde(default = "default_activity_view")]
+    #[serde(default = "default_activity_view", deserialize_with = "deserialize_activity_view")]
     pub activity_view: SurfaceId,
     /// Rust-owned sidebar open state (§5.1 — a collapsed sidebar must
     /// restore; `Ctrl+B` toggling needs it).
@@ -2595,7 +2620,7 @@ mod tests {
                 agent_dock_open: false,
                 bottom_dock_height_px: BOTTOM_DOCK_DEFAULT_PX,
                 bottom_dock_open: false,
-                bottom_view: SurfaceId::Output,
+                bottom_view: SurfaceId::Terminal,
                 editor_splits: 1,
                 activity_view: SurfaceId::Files,
                 primary_sidebar_open: true,
@@ -2932,14 +2957,14 @@ mod tests {
             agent_dock_open: false,
             bottom_dock_height_px: 200.0,
             bottom_dock_open: false,
-            bottom_view: SurfaceId::Output,
+            bottom_view: SurfaceId::Terminal,
             editor_splits: 1,
             activity_view: SurfaceId::Files,
             primary_sidebar_open: true,
         });
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"type":"workspace_layout_changed","payload":{"primary_sidebar_width_px":240.0,"agent_dock_width_px":360.0,"agent_dock_open":false,"bottom_dock_height_px":200.0,"bottom_dock_open":false,"bottom_view":"output","editor_splits":1,"activity_view":"files","primary_sidebar_open":true}}"#
+            r#"{"type":"workspace_layout_changed","payload":{"primary_sidebar_width_px":240.0,"agent_dock_width_px":360.0,"agent_dock_open":false,"bottom_dock_height_px":200.0,"bottom_dock_open":false,"bottom_view":"terminal","editor_splits":1,"activity_view":"files","primary_sidebar_open":true}}"#
         );
         assert_eq!(
             serde_json::to_string(&FrontendEvent::Toast(ToastDto {
@@ -2997,7 +3022,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pre_z2.activity_view, SurfaceId::Files);
+        assert_eq!(pre_z2.bottom_view, SurfaceId::Terminal);
         assert!(pre_z2.primary_sidebar_open);
+
+        // Persisted layouts referencing removed or legacy routes normalize cleanly.
+        let legacy_problems_in_rail = serde_json::from_str::<LayoutDto>(
+            r#"{"activity_view":"problems","bottom_view":"terminal_placeholder"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_problems_in_rail.activity_view, SurfaceId::Files);
+        assert_eq!(legacy_problems_in_rail.bottom_view, SurfaceId::Terminal);
+
+        let legacy_settings_in_rail = serde_json::from_str::<LayoutDto>(
+            r#"{"activity_view":"settings","bottom_view":"output"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_settings_in_rail.activity_view, SurfaceId::Files);
+        assert_eq!(legacy_settings_in_rail.bottom_view, SurfaceId::Terminal);
         // A partial (or empty) layout JSON fills every missing field with the
         // §4.2 defaults (§5.1: "every existing LayoutDto field gains a serde
         // default").
@@ -3061,7 +3102,7 @@ mod tests {
         assert_eq!(sanitized.primary_sidebar_width_px, 240.0, "NaN → default");
         assert_eq!(sanitized.agent_dock_width_px, 600.0, "clamped to max");
         assert_eq!(sanitized.bottom_dock_height_px, 120.0, "clamped to min");
-        assert_eq!(sanitized.bottom_view, SurfaceId::Output, "reset into set");
+        assert_eq!(sanitized.bottom_view, SurfaceId::Terminal, "reset into set");
         assert_eq!(sanitized.editor_splits, EDITOR_SPLITS_MIN);
         assert_eq!(sanitized.activity_view, SurfaceId::Files, "reset into set");
         // Open flags are semantics, not sizes — untouched.
@@ -3114,7 +3155,9 @@ mod tests {
         assert!(ACTIVITY_VIEWS.contains(&SurfaceId::Files));
         assert!(ACTIVITY_VIEWS.contains(&SurfaceId::Workflows));
         assert!(!ACTIVITY_VIEWS.contains(&SurfaceId::Problems));
+        assert!(!ACTIVITY_VIEWS.contains(&SurfaceId::Agent));
         assert!(BOTTOM_VIEWS.contains(&SurfaceId::Problems));
+        assert!(BOTTOM_VIEWS.contains(&SurfaceId::Terminal));
         assert!(!BOTTOM_VIEWS.contains(&SurfaceId::Files));
     }
 
@@ -3126,7 +3169,7 @@ mod tests {
             agent_dock_open: false,
             bottom_dock_height_px: 200.0,
             bottom_dock_open: false,
-            bottom_view: SurfaceId::Output,
+            bottom_view: SurfaceId::Terminal,
             editor_splits: 1,
             activity_view: SurfaceId::Files,
             primary_sidebar_open: true,

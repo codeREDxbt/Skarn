@@ -9,11 +9,10 @@
 // SwitchSession commands; a rejected command shows its message and creates
 // nothing locally.
 import React, { useEffect, useState, useSyncExternalStore } from 'react';
-import { ChevronDown, Code2, Columns, ShieldCheck, Square } from '../../../components/icons';
+import { Code2, Columns, ShieldCheck, Square } from '../../../components/icons';
 import { agentStore, getComposerGate } from '../agent-store';
 import { AgentSessionTabs } from './AgentSessionTabs';
 import { AgentSessionContextMenu } from './AgentSessionContextMenu';
-import { AgentSessionRail } from './AgentSessionRail';
 import { AgentExecutionFeed } from './AgentExecutionFeed';
 import { AgentPlanSpine } from './AgentPlanSpine';
 import { AgentComposer } from './AgentComposer';
@@ -51,9 +50,6 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
   );
 
   const [activeTab, setActiveTab] = useState<'feed' | 'plan'>('feed');
-  const [showFloatingPlan, setShowFloatingPlan] = useState(false);
-  const [infeedPlanExpanded, setInfeedPlanExpanded] = useState(false);
-  const [showSessionRail, setShowSessionRail] = useState(false);
   const [windowError, setWindowError] = useState<string | null>(null);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
 
@@ -62,8 +58,6 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
   const menuSession = state.sessions.find((session) => session.id === sessionMenu?.sessionId);
 
   const hasMessages = state.messages.length > 0;
-  const completedTodoCount = state.todos.filter((todo) => todo.status === 'completed').length;
-  const currentTask = state.todos.find((todo) => todo.status === 'in_progress')?.text;
   // Only a backend-reported workspace with a real root earns a name line.
   const workspaceName =
     state.workspace?.root &&
@@ -100,10 +94,6 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
     if (state.revealedSubagentId) setActiveTab('feed');
   }, [state.revealedSubagentId]);
 
-  useEffect(() => {
-    setInfeedPlanExpanded(false);
-  }, [state.activeSessionId]);
-
   const suggestions = SUGGESTIONS.filter((suggestion) => {
     if (presentation === 'agents') return suggestion === 'Summarize the workspace';
     if (suggestion === 'Explain this file') return editor.activeBuffer !== null;
@@ -113,10 +103,10 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
 
   return (
     <div className={`agent-dock agent-workbench-root${presentation === 'agents' ? ' agents-conversation-surface' : ''}`} data-presentation={presentation} data-conversation-state={hasMessages ? 'active' : 'welcome'} role="region" aria-label="Agent workbench">
-      {/* 1. Workbench header: presence, active session badge, view actions. */}
+      {/* 1. Workbench header: Identity / Run / View sections. */}
       {presentation === 'sidebar' && <>
       <header className="agent-header agent-workbench-header">
-        <div className="header-left-group">
+        <div className="header-left-group agent-header-identity" role="group" aria-label="Identity">
           <span className="agent-presence-slot" aria-hidden="true">
             <ThinkingOrb state={state.thinkingState} size={20} />
           </span>
@@ -133,8 +123,8 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
             }}
             title={
               activeSession
-                ? `Active session: ${activeSession.title}`
-                : 'The backend has not reported an agent session yet'
+                ? `Active task: ${activeSession.title}`
+                : 'No active task yet'
             }
           >
             <span
@@ -142,33 +132,37 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
               aria-hidden="true"
             />
             <span className="agent-session-badge-title">
-              {activeSession ? activeSession.title : 'No session'}
+              {activeSession ? activeSession.title : 'No task'}
             </span>
           </span>
         </div>
 
-        <div className="header-right-group">
-          <button type="button" className="agent-exit-btn" aria-label="Open Agents window"
-            title="Open this conversation in the Agents window"
-            onClick={() => {
-              setWindowError(null);
-               void Promise.resolve(openAgentsWindow({ sessionId: state.activeSessionId ?? undefined,
-                 childId: state.activeSubagentId ?? undefined, workspaceId: state.workspace?.id }))
-                 .catch((error: unknown) => setWindowError(error instanceof Error ? error.message : String(error)));
-            }}>
-            <Columns size={12} aria-hidden="true" />
-          </button>
+        <div className="agent-header-run" role="group" aria-label="Run">
           {autoApplyArmed && (
             <span
               className="agent-auto-apply-badge"
               role="status"
-              title="Full auto-apply is active: file writes, edits and deletes apply immediately for this session. Bash commands still require approval."
+              title="Auto-edit is active: file writes, edits and deletes apply immediately for this session. Bash commands still ask for approval."
             >
               <ShieldCheck size={11} aria-hidden="true" />
-              Auto-apply armed
+              Auto-edit
             </span>
           )}
 
+          <button
+            type="button"
+            className="agent-header-stop"
+            onClick={() => agentStore.stopActiveTurn()}
+            disabled={!state.inFlight}
+            title={state.inFlight ? 'Stop the running agent turn (Esc)' : 'No agent turn is running'}
+            aria-label="Stop agent run"
+          >
+            <Square size={11} aria-hidden="true" />
+            <span>Stop</span>
+          </button>
+        </div>
+
+        <div className="header-right-group agent-header-view" role="group" aria-label="View">
           <button
             type="button"
             className={`agent-view-tab ${activeTab === 'feed' ? 'is-active' : ''}`}
@@ -191,41 +185,15 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
             {state.todos.length})
           </button>
 
-          {activeTab === 'feed' && !activeChild && (
-            <button
-              type="button"
-              className={`agent-floating-plan-toggle ${showFloatingPlan ? 'is-active' : ''}`}
-              onClick={() => setShowFloatingPlan(!showFloatingPlan)}
-              title={showFloatingPlan ? 'Hide floating plan card' : 'Show floating plan card'}
-              aria-label="Toggle floating plan"
-              aria-pressed={showFloatingPlan}
-            >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                aria-hidden="true"
-                focusable="false"
-              >
-                <rect x="2" y="2" width="12" height="12" rx="2" />
-                <path d="M5 8h6M5 5h6M5 11h4" />
-              </svg>
-            </button>
-          )}
-
-          <button
-            type="button"
-            className="agent-header-stop"
-            onClick={() => agentStore.stopActiveTurn()}
-            disabled={!state.inFlight}
-            title={state.inFlight ? 'Stop the running agent turn (Esc)' : 'No agent turn is running'}
-            aria-label="Stop agent run"
-          >
-            <Square size={11} aria-hidden="true" />
-            <span>Stop</span>
+          <button type="button" className="agent-exit-btn" aria-label="Open Agents window"
+            title="Open this conversation in the Agents window"
+            onClick={() => {
+              setWindowError(null);
+               void Promise.resolve(openAgentsWindow({ sessionId: state.activeSessionId ?? undefined,
+                 childId: state.activeSubagentId ?? undefined, workspaceId: state.workspace?.id }))
+                 .catch((error: unknown) => setWindowError(error instanceof Error ? error.message : String(error)));
+            }}>
+            <Columns size={12} aria-hidden="true" />
           </button>
 
           <div className="agent-exit-group" role="group" aria-label="Switch workspace view">
@@ -233,11 +201,11 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
               type="button"
               className="agent-exit-btn"
               onClick={() => exitWorkbench('editor')}
-              title="Return to the editor view"
-              aria-label="Editor view"
+              title="Hide agent dock and focus editor"
+              aria-label="Editor only"
             >
               <Code2 size={12} aria-hidden="true" />
-              <span>Editor</span>
+              <span>Editor only</span>
             </button>
             <button
               type="button"
@@ -280,15 +248,6 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
         }}
       />
 
-      {/* Durable sessions share the same backend switch route as the tabs. */}
-      {presentation === 'sidebar' && <>
-        <button type="button" className="agent-decision-secondary" aria-expanded={showSessionRail}
-          onClick={() => setShowSessionRail(!showSessionRail)}>Session history</button>
-      {showSessionRail && <AgentSessionRail sessions={state.sessions} activeSessionId={state.activeSessionId}
-        resumableSessions={state.resumableSessions} onClose={() => setShowSessionRail(false)}
-        onDelete={(sessionId) => void agentStore.requestDeleteSession(sessionId)} />}
-      </>}
-
       {/* 3. Workbench body */}
       <div
         className={`agent-workbench-body${activeChild ? ' has-subagent-session' : ''}`}
@@ -299,66 +258,7 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
         <div className="agent-parent-layer" aria-hidden={activeChild ? true : undefined}>
         {activeTab === 'feed' ? (
           <div className="agent-feed-column">
-            {showFloatingPlan && (
-              <div className="zcode-floating-plan-popover">
-                <AgentPlanSpine
-                  todos={state.todos}
-                  gitStatus={bootstrap?.git}
-                  isFloatingPopover={true}
-                  onClosePopover={() => setShowFloatingPlan(false)}
-                />
-              </div>
-            )}
-
             <div className="agent-chat-content">
-              {/* Compact collapsible todo progress bar */}
-              {state.todos.length > 0 && (
-                <div className={`zcode-infeed-progress-wrap${infeedPlanExpanded ? ' is-expanded' : ''}`}>
-                  <button
-                    type="button"
-                    className="zcode-infeed-progress-toggle"
-                    onClick={() => setInfeedPlanExpanded(!infeedPlanExpanded)}
-                    aria-expanded={infeedPlanExpanded}
-                    aria-controls="zcode-infeed-progress-body"
-                    title={currentTask ? `Current: ${currentTask}` : undefined}
-                  >
-                    <span className="infeed-left">
-                      <span className="infeed-label">
-                        Tasks ({completedTodoCount}/{state.todos.length})
-                      </span>
-                      {currentTask ? (
-                        <>
-                          <span className="infeed-bullet" aria-hidden="true">•</span>
-                          <span className="infeed-current-task">{currentTask}</span>
-                        </>
-                      ) : null}
-                    </span>
-                    <span className="infeed-right">
-                      <span className="infeed-action">
-                        {infeedPlanExpanded ? 'Collapse' : 'View tasks'}
-                      </span>
-                      <ChevronDown
-                        size={12}
-                        aria-hidden="true"
-                        style={{
-                          transform: infeedPlanExpanded ? 'rotate(180deg)' : 'none',
-                          transition: 'transform 150ms ease',
-                        }}
-                      />
-                    </span>
-                  </button>
-                  {infeedPlanExpanded && (
-                    <div id="zcode-infeed-progress-body" className="zcode-infeed-expanded-body">
-                      <AgentPlanSpine
-                        todos={state.todos}
-                        gitStatus={bootstrap?.git}
-                        isCompactInfeed={true}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
               {hasMessages ? (
                 <AgentExecutionFeed
                   scrollKey={`${state.workspace?.id ?? ''}:${state.activeSessionId ?? ''}:${presentation}`}

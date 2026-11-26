@@ -14,7 +14,7 @@ const STEPS = [
   {
     short: 'Welcome',
     eyebrow: 'WELCOME',
-    title: 'Selora IDE',
+    title: 'Skarn',
     body: 'The editor born connected. Open a folder and work with a real file tree, editor, and language intelligence in one surface.',
   },
   {

@@ -26,7 +26,6 @@ export type CommandId =
   | 'selora.showGit'
   | 'selora.showProblems'
   | 'selora.showSettings'
-  | 'selora.showOutput'
   | 'selora.showTerminal'
   | 'selora.openCommandPalette'
   | 'selora.showKeyboardShortcuts'
@@ -50,6 +49,7 @@ export type CommandAction =
   | { kind: 'toggle-activity-view' }
   /** Ctrl+J: ToggleSurface{surface: current bottom_view}. */
   | { kind: 'toggle-bottom-view' }
+  | { kind: 'open-settings' }
   | { kind: 'save-layout' }
   | { kind: 'open-palette' }
   /** Z5c: Help → Keyboard Shortcuts (open the cheat-sheet dialog). */
@@ -78,7 +78,7 @@ export type CommandSpec = {
 
 /** Every SurfaceId must appear in at least one command (ARCHITECTURE §10). */
 export const SURFACE_IDS: SurfaceId[] = [
-  'files', 'search', 'git', 'problems', 'settings', 'agent', 'output', 'terminal_placeholder',
+  'files', 'search', 'git', 'workflows', 'problems', 'terminal', 'agent',
 ];
 
 const DEFAULT_COMMAND_PALETTE = 'Ctrl+Shift+P';
@@ -111,17 +111,16 @@ const COMMANDS: CommandEntry[] = [
   { id: 'selora.showSearch', title: 'Show Search', action: { kind: 'toggle-surface', surface: 'search' }, fixedBinding: 'Ctrl+Shift+F', rebindable: null },
   { id: 'selora.showGit', title: 'Show Git', action: { kind: 'toggle-surface', surface: 'git' }, fixedBinding: 'Ctrl+Shift+G', rebindable: null },
   { id: 'selora.showProblems', title: 'Show Problems', action: { kind: 'toggle-surface', surface: 'problems' }, fixedBinding: 'Ctrl+Shift+M', rebindable: null },
-  { id: 'selora.showSettings', title: 'Show Settings', action: { kind: 'toggle-surface', surface: 'settings' }, fixedBinding: 'Ctrl+Comma', rebindable: null },
-  { id: 'selora.showOutput', title: 'Show Output', action: { kind: 'toggle-surface', surface: 'output' }, fixedBinding: null, rebindable: null },
-  { id: 'selora.showTerminal', title: 'Show Terminal', action: { kind: 'toggle-surface', surface: 'terminal_placeholder' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.showSettings', title: 'Show Settings', action: { kind: 'open-settings' }, fixedBinding: 'Ctrl+Comma', rebindable: null },
+  { id: 'selora.showTerminal', title: 'Show Terminal', action: { kind: 'toggle-surface', surface: 'terminal' }, fixedBinding: null, rebindable: null },
   { id: 'selora.openCommandPalette', title: 'Open Command Palette', action: { kind: 'open-palette' }, fixedBinding: null, rebindable: 'command_palette' },
   { id: 'selora.showKeyboardShortcuts', title: 'Keyboard Shortcuts', action: { kind: 'open-cheatsheet' }, fixedBinding: 'Ctrl+/', rebindable: null },
-  { id: 'selora.about', title: 'About Selora', action: { kind: 'about' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.about', title: 'About Skarn', action: { kind: 'about' }, fixedBinding: null, rebindable: null },
   { id: 'selora.saveLayout', title: 'Save Layout', action: { kind: 'save-layout' }, fixedBinding: null, rebindable: null },
   { id: 'selora.fileOpenFolder', title: 'Open Folder…', action: { kind: 'open-folder' }, fixedBinding: null, rebindable: null },
 { id: 'selora.fileSave', title: 'Save', action: { kind: 'save-active' }, fixedBinding: null, rebindable: 'save' },
   { id: 'selora.fileCloseEditor', title: 'Close Editor', action: { kind: 'close-active' }, fixedBinding: 'Ctrl+F4', rebindable: null },
-  { id: 'selora.fileCloseWindow', title: 'Exit Selora IDE', action: { kind: 'close-window' }, fixedBinding: null, rebindable: null },
+  { id: 'selora.fileCloseWindow', title: 'Exit Skarn', action: { kind: 'close-window' }, fixedBinding: null, rebindable: null },
   { id: 'selora.editUndo', title: 'Undo', action: { kind: 'editor-command', command: 'undo' }, fixedBinding: null, rebindable: null },
   { id: 'selora.editRedo', title: 'Redo', action: { kind: 'editor-command', command: 'redo' }, fixedBinding: null, rebindable: null },
   { id: 'selora.editCut', title: 'Cut', action: { kind: 'editor-command', command: 'cut' }, fixedBinding: null, rebindable: null },
@@ -189,7 +188,6 @@ const COMMAND_CATEGORIES: Record<CommandId, CommandCategory> = {
   'selora.showGit': 'File Actions',
   'selora.showProblems': 'Agent Tools',
   'selora.showSettings': 'View & Layout',
-  'selora.showOutput': 'View & Layout',
   'selora.showTerminal': 'View & Layout',
   'selora.openCommandPalette': 'View & Layout',
   'selora.showKeyboardShortcuts': 'Help',
@@ -225,7 +223,7 @@ export function paletteCommands(commands: CommandSpec[]): CommandSpec[] {
 function rebindableKeybind(stored: string, fallback: string, label: string): Keybind {
   const parsed = parseKeybind(stored);
   if (parsed) return parsed;
-  console.warn(`Selora: settings keybind "${stored}" for ${label} is unparseable; using ${fallback}`);
+  console.warn(`Skarn: settings keybind "${stored}" for ${label} is unparseable; using ${fallback}`);
   return parseKeybind(fallback)!;
 }
 
@@ -329,6 +327,7 @@ export type CommandDeps = {
   openPalette: () => void;
   /** Z5c: open the keyboard cheat sheet (falls back to its window event). */
   openCheatsheet?: () => void;
+  openSettings?: () => void;
   /** Z5c: show About (falls back to dispatching `skarn:about`). */
   showAbout?: () => void;
   /** File menu: the shell owns the picker and workspace command. */
@@ -364,6 +363,10 @@ export function runCommandAction(id: CommandId, deps: CommandDeps): void {
     case 'open-cheatsheet':
       if (deps.openCheatsheet) deps.openCheatsheet();
       else window.dispatchEvent(new CustomEvent('skarn:open-cheatsheet'));
+      return;
+    case 'open-settings':
+      if (deps.openSettings) deps.openSettings();
+      else window.dispatchEvent(new CustomEvent('skarn:open-settings'));
       return;
     case 'about':
       if (deps.showAbout) deps.showAbout();

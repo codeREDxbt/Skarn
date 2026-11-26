@@ -97,7 +97,7 @@ export function ResizeHandle({ region, onPreview }: ResizeHandleProps) {
   const stepFor = (token: string): number | null => {
     const value = readTokenNumber(token);
     if (value === null || value <= 0) {
-      console.error(`Selora: token ${token} is missing or unparsable; keyboard resize is disabled`);
+      console.error(`Skarn: token ${token} is missing or unparsable; keyboard resize is disabled`);
       return null;
     }
     return value;
