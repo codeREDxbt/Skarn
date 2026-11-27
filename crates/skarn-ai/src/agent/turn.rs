@@ -56,6 +56,10 @@ pub const CONTEXT_RESERVE: f64 = 0.20;
 const ABORT_GRACE: Duration = Duration::from_millis(500);
 /// The §17.4 words a denied tool returns to the model (it usually adapts).
 pub const DENIED_MESSAGE: &str = "user denied this action";
+/// Default countdown for non-destructive `Question` cards (5 minutes).
+pub const DEFAULT_QUESTION_TIMEOUT_SECS: u64 = 300;
+/// Tool result recorded into history when a non-destructive Question times out.
+pub const QUESTION_AUTO_CONTINUE_MESSAGE: &str = "Unanswered, auto-continued";
 
 /// The loop's hard limits for one turn. The shell builds this from
 /// `settings.agent` (the three §17.3 caps) plus the active model's
@@ -249,6 +253,20 @@ pub enum AgentEvent {
     },
     /// Phase 9b: the session's stored todo list changed. Additive.
     TodosChanged(Vec<plan::TodoItem>),
+    /// Stage 3: decision-engine trace for one tool call.
+    DecisionTrace(router::ToolDecisionTrace),
+    /// Stage 3: clocked non-destructive Question countdown state change.
+    QuestionCountdown {
+        approval_id: ApprovalId,
+        deadline_ms: u64,
+        auto_continue_allowed: bool,
+        timed_out: bool,
+        paused: bool,
+    },
+    /// Stage 3: active scoped grants changed in-turn (session/project grant added).
+    ScopedGrantsUpdated(Vec<skarn_decision::ScopedGrantEntry>),
+    /// Stage 3: content-addressed turn checkpoint persisted on turn end.
+    TurnCheckpointRecorded(skarn_decision::TurnCheckpointManifest),
 }
 
 /// The turn's result: what [`AgentSummary`] counts, how it ended, the
@@ -418,6 +436,30 @@ pub trait ToolRunner: Send {
     fn plan_snapshot(&self) -> Option<plan::PlanSnapshot> {
         None
     }
+    /// Stage 3: evaluate any matching scoped grant for `(action_class, target, risk)`.
+    fn evaluate_scoped_grant(
+        &self,
+        _action_class: skarn_decision::ActionClass,
+        _target: &str,
+        _risk: skarn_decision::RiskLevel,
+    ) -> Option<skarn_decision::GrantDecision> {
+        None
+    }
+    /// Stage 3: persist a scoped grant into the session/project store.
+    fn insert_scoped_grant(
+        &mut self,
+        _entry: skarn_decision::ScopedGrantEntry,
+    ) -> Result<Vec<skarn_decision::ScopedGrantEntry>, skarn_decision::PolicyError> {
+        Ok(Vec::new())
+    }
+    /// Stage 3: drain decision traces produced by the most recent tool run.
+    fn drain_traces(&mut self) -> Vec<router::ToolDecisionTrace> {
+        Vec::new()
+    }
+    /// Stage 3: record the turn's file changes into `TurnCheckpointStore`.
+    fn commit_turn_checkpoint(&mut self) -> Option<skarn_decision::TurnCheckpointManifest> {
+        None
+    }
 }
 
 /// Production tool backend: 5b's router. A thin adapter — the single
@@ -457,6 +499,7 @@ impl ToolRunner for RouterToolRunner {
         // must not run further bash commands even if a straggler future
         // resolves.
         self.ctx.abort.kill();
+        self.ctx.cancel_token.cancel();
         // §19.3: a parent Stop cancels its children, including a child a
         // blocking `wait` call is parked on.
         if let (Some(subagents), Some(parent)) = (&self.ctx.subagents, &self.ctx.parent_session) {
@@ -467,6 +510,30 @@ impl ToolRunner for RouterToolRunner {
     fn plan_snapshot(&self) -> Option<plan::PlanSnapshot> {
         Some(plan::snapshot(&self.ctx.plan))
     }
+
+    fn evaluate_scoped_grant(
+        &self,
+        action_class: skarn_decision::ActionClass,
+        target: &str,
+        risk: skarn_decision::RiskLevel,
+    ) -> Option<skarn_decision::GrantDecision> {
+        self.ctx.evaluate_scoped_grant(action_class, target, risk)
+    }
+
+    fn insert_scoped_grant(
+        &mut self,
+        entry: skarn_decision::ScopedGrantEntry,
+    ) -> Result<Vec<skarn_decision::ScopedGrantEntry>, skarn_decision::PolicyError> {
+        self.ctx.insert_scoped_grant(entry)
+    }
+
+    fn drain_traces(&mut self) -> Vec<router::ToolDecisionTrace> {
+        self.ctx.drain_traces()
+    }
+
+    fn commit_turn_checkpoint(&mut self) -> Option<skarn_decision::TurnCheckpointManifest> {
+        self.ctx.commit_turn_checkpoint()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +542,7 @@ impl ToolRunner for RouterToolRunner {
 
 /// Everything one turn needs. `conversation` carries the prior agent-mode
 /// turns plus the user's new message as the last entry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct TurnInput {
     pub conversation: Vec<ChatMessage>,
     pub model: Model,
@@ -485,12 +552,12 @@ pub struct TurnInput {
     pub manifest: Vec<ToolSpec>,
     pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
-    /// Session-scoped full access: file writes/edits/deletes apply without
-    /// an approval card. `bash` still cards (the command is not inspected).
-    /// Workflow cards always require an explicit decision.
-    /// This is a property of the caller's session mode, never persisted by
-    /// the engine.
-    pub auto_approve_writes: bool,
+    /// Stage 3: canonical 4-mode permission policy (replaces binary `auto_approve_writes`).
+    pub permission_mode: skarn_decision::PermissionMode,
+    /// Stage 3: countdown duration in seconds for non-destructive Question cards (default 300s).
+    pub question_timeout_secs: u64,
+    /// Stage 3: cooperative cancel token wired to Stop and live trust revocation.
+    pub cancel_token: skarn_decision::DecisionCancelToken,
     /// Opt-in context compaction (§19.5). `None` keeps the request sequence
     /// caller-controlled (tests, short turns).
     pub compaction: Option<CompactionConfig>,
@@ -510,7 +577,9 @@ impl TurnInput {
             manifest: router::tool_manifest(),
             temperature: None,
             reasoning_effort: None,
-            auto_approve_writes: false,
+            permission_mode: skarn_decision::PermissionMode::AskBeforeChanges,
+            question_timeout_secs: DEFAULT_QUESTION_TIMEOUT_SECS,
+            cancel_token: skarn_decision::DecisionCancelToken::new(),
             compaction: None,
             open_todos: Vec::new(),
         }
@@ -529,10 +598,21 @@ impl TurnInput {
         self
     }
 
-    /// Session full-access: file writes/edits/deletes apply without a card.
-    /// Bash and workflows keep their approval gates.
-    pub fn with_auto_approve_writes(mut self, on: bool) -> Self {
-        self.auto_approve_writes = on;
+    /// Stage 3: set the canonical 4-mode permission policy.
+    pub fn with_permission_mode(mut self, mode: skarn_decision::PermissionMode) -> Self {
+        self.permission_mode = mode;
+        self
+    }
+
+    /// Stage 3: configure the non-destructive Question countdown seconds (`0` disables timeout).
+    pub fn with_question_timeout_secs(mut self, secs: u64) -> Self {
+        self.question_timeout_secs = secs;
+        self
+    }
+
+    /// Stage 3: attach a cooperative decision cancel token.
+    pub fn with_cancel_token(mut self, cancel_token: skarn_decision::DecisionCancelToken) -> Self {
+        self.cancel_token = cancel_token;
         self
     }
 
@@ -558,6 +638,19 @@ impl TurnInput {
     pub fn with_reasoning_effort(mut self, reasoning_effort: impl Into<String>) -> Self {
         self.reasoning_effort = Some(reasoning_effort.into());
         self
+    }
+}
+
+impl std::fmt::Debug for TurnInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnInput")
+            .field("conversation_len", &self.conversation.len())
+            .field("model", &self.model)
+            .field("caps", &self.caps)
+            .field("permission_mode", &self.permission_mode)
+            .field("question_timeout_secs", &self.question_timeout_secs)
+            .field("cancelled", &self.cancel_token.is_cancelled())
+            .finish()
     }
 }
 
@@ -671,40 +764,150 @@ enum Parked {
     Stop,
     /// The turn's wall-clock cap fired while parked.
     TimeUp,
+    /// Cooperative cancel token fired (e.g. live workspace trust revocation).
+    TrustRevoked,
+    /// Non-destructive Question countdown expired without user answer.
+    QuestionTimedOut,
     /// The decision channel closed — the UI is gone; waiting is pointless.
     ChannelClosed,
 }
 
 /// The loop is parked on an approval card (§17.4): wait for the user's
-/// decision, the turn deadline, or Stop. Decisions for *other* (stale)
-/// cards are ignored.
+/// decision, the turn deadline, Stop, cooperative trust revocation, or (for
+/// non-destructive Questions only) the clocked countdown timer.
 async fn park_for_decision(
     decisions: &mut mpsc::UnboundedReceiver<TurnDecision>,
     approval_id: ApprovalId,
     deadline: Option<tokio::time::Instant>,
+    question_timeout_secs: Option<u64>,
+    cancel_token: &skarn_decision::DecisionCancelToken,
+    events: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Parked {
     let sleep = tokio::time::sleep_until(deadline.unwrap_or_else(far_future));
     tokio::pin!(sleep);
 
+    let mut paused = false;
+    let mut remaining = question_timeout_secs
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs);
+    let mut q_deadline = remaining.map(|d| tokio::time::Instant::now() + d);
+    let q_sleep = tokio::time::sleep_until(q_deadline.unwrap_or_else(far_future));
+    tokio::pin!(q_sleep);
+
     loop {
+        let q_active = q_deadline.is_some() && !paused;
         tokio::select! {
             biased;
+            _ = cancel_token.cancelled() => return Parked::TrustRevoked,
             decision = decisions.recv() => match decision {
                 Some((id, decision)) => {
                     // Stop applies regardless of which card it names.
                     if decision == AgentDecision::Stop {
                         return Parked::Stop;
                     }
-                    // Only the pending card's decision unparks.
                     if id == approval_id {
+                        if let AgentDecision::SetQuestionCountdownPaused(next_paused) = decision {
+                            if let Some(rem) = remaining.as_mut() {
+                                if next_paused && !paused {
+                                    if let Some(dl) = q_deadline {
+                                        *rem = dl.saturating_duration_since(tokio::time::Instant::now());
+                                    }
+                                    paused = true;
+                                    q_deadline = None;
+                                    q_sleep.as_mut().reset(far_future());
+                                    let _ = emit(
+                                        events,
+                                        AgentEvent::QuestionCountdown {
+                                            approval_id,
+                                            deadline_ms: 0,
+                                            auto_continue_allowed: true,
+                                            timed_out: false,
+                                            paused: true,
+                                        },
+                                    );
+                                } else if !next_paused && paused {
+                                    paused = false;
+                                    let next_dl = tokio::time::Instant::now() + *rem;
+                                    q_deadline = Some(next_dl);
+                                    q_sleep.as_mut().reset(next_dl);
+                                    let deadline_ms = super::session::now_millis()
+                                        .saturating_add(rem.as_millis() as u64);
+                                    let _ = emit(
+                                        events,
+                                        AgentEvent::QuestionCountdown {
+                                            approval_id,
+                                            deadline_ms,
+                                            auto_continue_allowed: true,
+                                            timed_out: false,
+                                            paused: false,
+                                        },
+                                    );
+                                }
+                            }
+                            continue;
+                        }
                         return Parked::Decided(decision);
                     }
                 }
                 // The UI is gone: no decision can ever arrive.
                 None => return Parked::ChannelClosed,
             },
+            _ = &mut q_sleep, if q_active => {
+                let _ = emit(
+                    events,
+                    AgentEvent::QuestionCountdown {
+                        approval_id,
+                        deadline_ms: super::session::now_millis(),
+                        auto_continue_allowed: true,
+                        timed_out: true,
+                        paused: false,
+                    },
+                );
+                return Parked::QuestionTimedOut;
+            }
             _ = &mut sleep, if deadline.is_some() => return Parked::TimeUp,
         }
+    }
+}
+
+fn classify_card(card: &ApprovalCard) -> (skarn_decision::ActionClass, skarn_decision::RiskLevel, String) {
+    match card {
+        ApprovalCard::Diff { path, .. } => (
+            skarn_decision::ActionClass::FileEdit,
+            skarn_decision::RiskLevel::Medium,
+            path.clone(),
+        ),
+        ApprovalCard::Delete { path } => (
+            skarn_decision::ActionClass::FileDelete,
+            skarn_decision::RiskLevel::High,
+            path.clone(),
+        ),
+        ApprovalCard::Command { command } => (
+            skarn_decision::ActionClass::CommandGated,
+            skarn_decision::RiskLevel::High,
+            command.clone(),
+        ),
+        ApprovalCard::Workflow { name, .. } => (
+            skarn_decision::ActionClass::Workflow,
+            skarn_decision::RiskLevel::High,
+            name.clone(),
+        ),
+        ApprovalCard::Plan { .. } => (
+            skarn_decision::ActionClass::PlanControl,
+            skarn_decision::RiskLevel::High,
+            "plan".to_owned(),
+        ),
+        ApprovalCard::Question(_) => (
+            skarn_decision::ActionClass::Question,
+            skarn_decision::RiskLevel::Low,
+            "question".to_owned(),
+        ),
+    }
+}
+
+fn emit_traces(tools: &mut dyn ToolRunner, events: &mpsc::UnboundedSender<AgentEvent>) {
+    for trace in tools.drain_traces() {
+        let _ = emit(events, AgentEvent::DecisionTrace(trace));
     }
 }
 
@@ -872,7 +1075,9 @@ where
 {
     let caps = input.caps.clone();
     let model = input.model.clone();
-    let auto_approve_writes = input.auto_approve_writes;
+    let permission_mode = input.permission_mode;
+    let question_timeout_secs = input.question_timeout_secs;
+    let cancel_token = input.cancel_token.clone();
     let compaction = input.compaction.clone();
     let open_todos = input.open_todos.clone();
     let mut compaction_attempted = false;
@@ -1097,14 +1302,15 @@ where
 
             // Route through 5b's router: Ready, or a card to park on.
             let mut result: Option<ToolResult> = None;
-            match gated(
+            let outcome = gated(
                 tools.run(call.clone()),
                 &mut tools,
                 &mut decisions,
                 deadline,
             )
-            .await
-            {
+            .await;
+            emit_traces(&mut tools, &events);
+            match outcome {
                 Gated::Stopped => {
                     end = Some(TurnEnd::StoppedByUser);
                     break 'turn;
@@ -1117,125 +1323,284 @@ where
                 }
                 Gated::Done(ToolOutcome::Ready(ready)) => result = Some(ready),
                 Gated::Done(ToolOutcome::NeedsApproval(card)) => {
-                    // Session full-access auto-applies file writes, edits,
-                    // and deletes. A bash command still cards: the flag
-                    // never inspects the command line.
-                    // A workflow or plan card is never pre-approved: the shell starts the
-                    // run / flips the session from the card's explicit Approve, so
-                    // an earlier `Approve all this turn` must not silently skip the
-                    // confirmation. A question card likewise needs its own answer.
-                    let explicit_card = matches!(
-                        &card,
-                        crate::agent::ApprovalCard::Workflow { .. }
-                            | crate::agent::ApprovalCard::Plan { .. }
-                            | crate::agent::ApprovalCard::Question(_)
-                    );
-                    let auto_write = auto_approve_writes
-                        && !matches!(
+                    let (action_class, risk, target) = classify_card(&card);
+                    let scoped_grant = tools.evaluate_scoped_grant(action_class, &target, risk);
+                    if scoped_grant.is_some_and(|g| g.is_deny()) {
+                        turn.denied += 1;
+                        result = Some(router::denied_result(&call));
+                    } else {
+                        let explicit_card = matches!(
                             &card,
-                            crate::agent::ApprovalCard::Command { .. }
-                                | crate::agent::ApprovalCard::Workflow { .. }
+                            crate::agent::ApprovalCard::Workflow { .. }
                                 | crate::agent::ApprovalCard::Plan { .. }
                                 | crate::agent::ApprovalCard::Question(_)
                         );
-                    if (turn.approve_all && !explicit_card) || auto_write {
-                        // §17.4: ApproveAllThisTurn pre-approves the rest
-                        // of this turn's write/bash cards; full access
-                        // pre-approves the file side effects for the session.
-                        turn.approved += 1;
-                    } else {
-                        let approval_id = Uuid::new_v4();
-                        turn.state = AgentTurnState::AwaitingApproval(approval_id);
-                        if !emit(&events, AgentEvent::State(turn.state.clone()))
-                            || !emit(
+                        // High/Critical actions have 0% silent auto-exec regardless of
+                        // mode (`FullAccess`, `AutoEdit`) or scoped grants.
+                        let auto_by_mode = risk < skarn_decision::RiskLevel::High
+                            && action_class == skarn_decision::ActionClass::FileEdit
+                            && matches!(
+                                permission_mode,
+                                skarn_decision::PermissionMode::AutoEdit
+                                    | skarn_decision::PermissionMode::FullAccess
+                            );
+                        let auto_by_grant = risk < skarn_decision::RiskLevel::High
+                            && action_class != skarn_decision::ActionClass::Question
+                            && matches!(
+                                scoped_grant,
+                                Some(
+                                    skarn_decision::GrantDecision::AllowSession
+                                        | skarn_decision::GrantDecision::AllowProject
+                                )
+                            );
+                        if (turn.approve_all && !explicit_card) || auto_by_mode || auto_by_grant {
+                            turn.approved += 1;
+                        } else {
+                            let approval_id = Uuid::new_v4();
+                            turn.state = AgentTurnState::AwaitingApproval(approval_id);
+                            if !emit(&events, AgentEvent::State(turn.state.clone()))
+                                || !emit(
+                                    &events,
+                                    AgentEvent::ApprovalNeeded {
+                                        approval_id,
+                                        card: card.clone(),
+                                    },
+                                )
+                            {
+                                end = Some(TurnEnd::Failed("agent event receiver dropped".into()));
+                                break 'turn;
+                            }
+                            let question_card =
+                                matches!(&card, crate::agent::ApprovalCard::Question(_));
+                            if question_card && question_timeout_secs > 0 {
+                                let deadline_ms = super::session::now_millis()
+                                    .saturating_add(question_timeout_secs.saturating_mul(1000));
+                                let _ = emit(
+                                    &events,
+                                    AgentEvent::QuestionCountdown {
+                                        approval_id,
+                                        deadline_ms,
+                                        auto_continue_allowed: true,
+                                        timed_out: false,
+                                        paused: false,
+                                    },
+                                );
+                            }
+                            let q_timeout = if question_card {
+                                Some(question_timeout_secs)
+                            } else {
+                                None
+                            };
+                            match park_for_decision(
+                                &mut decisions,
+                                approval_id,
+                                deadline,
+                                q_timeout,
+                                &cancel_token,
                                 &events,
-                                AgentEvent::ApprovalNeeded {
-                                    approval_id,
-                                    card: card.clone(),
-                                },
                             )
-                        {
-                            end = Some(TurnEnd::Failed("agent event receiver dropped".into()));
-                            break 'turn;
-                        }
-                        let question_card =
-                            matches!(&card, crate::agent::ApprovalCard::Question(_));
-                        match park_for_decision(&mut decisions, approval_id, deadline).await {
-                            Parked::Stop => {
-                                end = Some(TurnEnd::StoppedByUser);
-                                break 'turn;
-                            }
-                            Parked::TimeUp => {
-                                end = Some(TurnEnd::TimeCap {
-                                    limit_secs: caps.max_turn_secs,
-                                });
-                                break 'turn;
-                            }
-                            Parked::ChannelClosed => {
-                                end = Some(TurnEnd::Failed("agent decision channel closed".into()));
-                                break 'turn;
-                            }
-                            Parked::Decided(AgentDecision::Approve) => {
-                                if question_card {
-                                    result = Some(ToolResult::error(
-                                        &call.id,
-                                        "this card needs an answer, not approval",
-                                    ));
-                                } else {
-                                    turn.approved += 1;
+                            .await
+                            {
+                                Parked::Stop => {
+                                    end = Some(TurnEnd::StoppedByUser);
+                                    break 'turn;
                                 }
-                            }
-                            Parked::Decided(AgentDecision::ApproveAllThisTurn) => {
-                                if question_card {
-                                    result = Some(ToolResult::error(
+                                Parked::TimeUp => {
+                                    end = Some(TurnEnd::TimeCap {
+                                        limit_secs: caps.max_turn_secs,
+                                    });
+                                    break 'turn;
+                                }
+                                Parked::TrustRevoked => {
+                                    turn.denied += 1;
+                                    let _ = emit(
+                                        &events,
+                                        AgentEvent::DecisionTrace(router::ToolDecisionTrace {
+                                            call_id: call.id.clone(),
+                                            action_id: call.name.clone(),
+                                            risk,
+                                            phase: skarn_decision::DecisionPhase::Rejected,
+                                            explanation: skarn_decision::RoutingExplanation {
+                                                trace_id: format!("trace-{}", Uuid::new_v4()),
+                                                selected_tier:
+                                                    skarn_decision::ExecutionTier::Tier1Deterministic,
+                                                candidate_tiers: vec![
+                                                    skarn_decision::ExecutionTier::Tier1Deterministic,
+                                                ],
+                                                provider_id: Some("tier1-deterministic".to_owned()),
+                                                model_id: Some("deterministic-ide".to_owned()),
+                                                hop_count: 0,
+                                                privacy_blocked_cloud: false,
+                                                reason_code: "trust_revoked".to_owned(),
+                                                calibrated_threshold: None,
+                                                raw_confidence: Some(1.0),
+                                                fsm_path: vec![
+                                                    skarn_decision::DecisionPhase::Snapshotted,
+                                                    skarn_decision::DecisionPhase::ApprovalPending,
+                                                    skarn_decision::DecisionPhase::Rejected,
+                                                ],
+                                            },
+                                        }),
+                                    );
+                                    let rejected = ToolResult::error(
                                         &call.id,
-                                        "this card needs an answer, not approval",
+                                        "workspace trust revoked mid-turn; parked action aborted",
+                                    );
+                                    conversation.push(ChatMessage::tool_result(
+                                        call.id.clone(),
+                                        rejected.content.clone(),
                                     ));
-                                } else {
-                                    turn.approved += 1;
-                                    if !matches!(
-                                        call.name.as_str(),
-                                        "exit_plan_mode" | "run_workflow"
-                                    ) {
-                                        turn.approve_all = true;
+                                    let _ = emit(&events, AgentEvent::ToolResult(rejected));
+                                    end = Some(TurnEnd::Failed(
+                                        "workspace trust revoked mid-turn".into(),
+                                    ));
+                                    break 'turn;
+                                }
+                                Parked::QuestionTimedOut => {
+                                    result = Some(crate::agent::subagent_turn::question_answer_result(
+                                        &call,
+                                        QUESTION_AUTO_CONTINUE_MESSAGE,
+                                    ));
+                                }
+                                Parked::ChannelClosed => {
+                                    end = Some(TurnEnd::Failed(
+                                        "agent decision channel closed".into(),
+                                    ));
+                                    break 'turn;
+                                }
+                                Parked::Decided(AgentDecision::Approve) => {
+                                    if question_card {
+                                        result = Some(ToolResult::error(
+                                            &call.id,
+                                            "this card needs an answer, not approval",
+                                        ));
+                                    } else {
+                                        turn.approved += 1;
                                     }
                                 }
-                            }
-                            Parked::Decided(AgentDecision::Deny) => {
-                                turn.denied += 1;
-                                result = Some(router::denied_result(&call));
-                            }
-                            // Phase 9b: Revise is a plan-card-only answer.
-                            // It keeps the session planning (nothing was
-                            // flipped) and tells the model to resubmit.
-                            Parked::Decided(AgentDecision::Answer(answer)) => {
-                                // An answer resumes a question card; it is
-                                // model input, never an effect grant.
-                                result = Some(if question_card {
-                                    crate::agent::subagent_turn::question_answer_result(
-                                        &call, &answer,
-                                    )
-                                } else {
-                                    ToolResult::error(
-                                        &call.id,
-                                        "this card is not a question — an answer cannot approve it",
-                                    )
-                                });
-                            }
-                            Parked::Decided(AgentDecision::Revise) => {
-                                turn.denied += 1;
-                                result = Some(if call.name == "exit_plan_mode" {
-                                    router::revise_plan_result(&call)
-                                } else {
-                                    router::denied_result(&call)
-                                });
-                            }
-                            // Defensive: park never returns Stop here (it
-                            // is handled before the id match) — but if it
-                            // ever did, stopping is the safe reading.
-                            Parked::Decided(AgentDecision::Stop) => {
-                                end = Some(TurnEnd::StoppedByUser);
-                                break 'turn;
+                                Parked::Decided(AgentDecision::ApproveAllThisTurn) => {
+                                    if question_card {
+                                        result = Some(ToolResult::error(
+                                            &call.id,
+                                            "this card needs an answer, not approval",
+                                        ));
+                                    } else {
+                                        turn.approved += 1;
+                                        if !matches!(
+                                            call.name.as_str(),
+                                            "exit_plan_mode" | "run_workflow"
+                                        ) {
+                                            turn.approve_all = true;
+                                        }
+                                    }
+                                }
+                                Parked::Decided(AgentDecision::Scoped {
+                                    grant,
+                                    target_pattern,
+                                }) => {
+                                    if question_card {
+                                        result = Some(ToolResult::error(
+                                            &call.id,
+                                            "this card needs an answer, not a scoped grant",
+                                        ));
+                                    } else if matches!(
+                                        grant,
+                                        skarn_decision::GrantDecision::AllowSession
+                                            | skarn_decision::GrantDecision::AllowProject
+                                    ) && risk >= skarn_decision::RiskLevel::High
+                                    {
+                                        turn.denied += 1;
+                                        result = Some(ToolResult::error(
+                                            &call.id,
+                                            "GrantExceedsRiskCeiling: persistent AllowSession/AllowProject is forbidden on High/Critical risk actions",
+                                        ));
+                                    } else if grant.is_deny() {
+                                        if matches!(
+                                            grant,
+                                            skarn_decision::GrantDecision::DenySession
+                                                | skarn_decision::GrantDecision::DenyProject
+                                        ) {
+                                            if let Ok(updated) = tools.insert_scoped_grant(
+                                                skarn_decision::ScopedGrantEntry {
+                                                    action_class,
+                                                    target_pattern: target_pattern
+                                                        .unwrap_or_else(|| target.clone()),
+                                                    decision: grant,
+                                                    max_risk: risk,
+                                                },
+                                            ) {
+                                                let _ = emit(
+                                                    &events,
+                                                    AgentEvent::ScopedGrantsUpdated(updated),
+                                                );
+                                            }
+                                        }
+                                        turn.denied += 1;
+                                        result = Some(router::denied_result(&call));
+                                    } else {
+                                        if matches!(
+                                            grant,
+                                            skarn_decision::GrantDecision::AllowSession
+                                                | skarn_decision::GrantDecision::AllowProject
+                                        ) {
+                                            match tools.insert_scoped_grant(
+                                                skarn_decision::ScopedGrantEntry {
+                                                    action_class,
+                                                    target_pattern: target_pattern
+                                                        .unwrap_or_else(|| target.clone()),
+                                                    decision: grant,
+                                                    max_risk: risk,
+                                                },
+                                            ) {
+                                                Ok(updated) => {
+                                                    let _ = emit(
+                                                        &events,
+                                                        AgentEvent::ScopedGrantsUpdated(updated),
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    turn.denied += 1;
+                                                    result = Some(ToolResult::error(
+                                                        &call.id,
+                                                        err.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        if result.is_none() {
+                                            turn.approved += 1;
+                                        }
+                                    }
+                                }
+                                Parked::Decided(AgentDecision::Deny) => {
+                                    turn.denied += 1;
+                                    result = Some(router::denied_result(&call));
+                                }
+                                Parked::Decided(AgentDecision::Answer(answer)) => {
+                                    result = Some(if question_card {
+                                        crate::agent::subagent_turn::question_answer_result(
+                                            &call, &answer,
+                                        )
+                                    } else {
+                                        ToolResult::error(
+                                            &call.id,
+                                            "this card is not a question — an answer cannot approve it",
+                                        )
+                                    });
+                                }
+                                Parked::Decided(AgentDecision::Revise) => {
+                                    turn.denied += 1;
+                                    result = Some(if call.name == "exit_plan_mode" {
+                                        router::revise_plan_result(&call)
+                                    } else {
+                                        router::denied_result(&call)
+                                    });
+                                }
+                                Parked::Decided(AgentDecision::Stop) => {
+                                    end = Some(TurnEnd::StoppedByUser);
+                                    break 'turn;
+                                }
+                                Parked::Decided(AgentDecision::SetQuestionCountdownPaused(_)) => {}
                             }
                         }
                     }
@@ -1249,14 +1614,15 @@ where
                 None => {
                     turn.state = AgentTurnState::RunningTool(call.name.clone());
                     let _ = emit(&events, AgentEvent::State(turn.state.clone()));
-                    match gated(
+                    let approved_outcome = gated(
                         tools.run_approved(call.clone()),
                         &mut tools,
                         &mut decisions,
                         deadline,
                     )
-                    .await
-                    {
+                    .await;
+                    emit_traces(&mut tools, &events);
+                    match approved_outcome {
                         Gated::Stopped => {
                             end = Some(TurnEnd::StoppedByUser);
                             break 'turn;
@@ -1281,6 +1647,9 @@ where
     }
 
     // --- the report --------------------------------------------------------
+    if let Some(manifest) = tools.commit_turn_checkpoint() {
+        let _ = emit(&events, AgentEvent::TurnCheckpointRecorded(manifest));
+    }
     turn.state = AgentTurnState::Done;
     let _ = emit(&events, AgentEvent::State(AgentTurnState::Done));
     let end = end.unwrap_or_else(|| {
@@ -2328,7 +2697,7 @@ mod tests {
 
         let input = TurnInput::new(model(), conversation())
             .with_manifest(manifest())
-            .with_auto_approve_writes(true);
+            .with_permission_mode(skarn_decision::PermissionMode::AutoEdit);
         let (report, mut events_rx) = run_turn(chat, runner, input).await;
         let mut events: Vec<AgentEvent> = Vec::new();
         while let Ok(event) = events_rx.try_recv() {
@@ -2384,7 +2753,7 @@ mod tests {
         let (decision_tx, decision_rx) = mpsc::unbounded_channel::<TurnDecision>();
         let input = TurnInput::new(model(), conversation())
             .with_manifest(manifest())
-            .with_auto_approve_writes(true);
+            .with_permission_mode(skarn_decision::PermissionMode::AutoEdit);
         let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
 
         let approval_id = recorder.wait_for_approval().await;
@@ -2600,8 +2969,13 @@ mod tests {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut recorder = Recorder::new(events_rx);
         let (decision_tx, decision_rx) = mpsc::unbounded_channel::<TurnDecision>();
-        let input =
-            TurnInput::new(model(), conversation()).with_auto_approve_writes(auto_approve_writes);
+        let input = TurnInput::new(model(), conversation()).with_permission_mode(
+            if auto_approve_writes {
+                skarn_decision::PermissionMode::AutoEdit
+            } else {
+                skarn_decision::PermissionMode::AskBeforeChanges
+            },
+        );
         let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
 
         if approve_all_this_turn {
@@ -2834,7 +3208,8 @@ mod tests {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut recorder = Recorder::new(events_rx);
         let (decision_tx, decision_rx) = mpsc::unbounded_channel::<TurnDecision>();
-        let input = TurnInput::new(model(), conversation()).with_auto_approve_writes(true);
+        let input = TurnInput::new(model(), conversation())
+            .with_permission_mode(skarn_decision::PermissionMode::AutoEdit);
         let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
 
         let id = tokio::time::timeout(Duration::from_secs(1), recorder.wait_for_approval())
@@ -2929,7 +3304,8 @@ mod tests {
         let mut recorder = Recorder::new(receiver);
         let (decisions, decision_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_agent_turn(
-            TurnInput::new(model(), conversation()).with_auto_approve_writes(true),
+            TurnInput::new(model(), conversation())
+                .with_permission_mode(skarn_decision::PermissionMode::AutoEdit),
             chat,
             runner,
             events,
@@ -3582,6 +3958,134 @@ mod tests {
             .with_reasoning_effort("none");
         let _ = run_agent_turn(input2, chat_nat, runner_nat, tx2, drx2).await;
         assert_eq!(reqs_nat.lock().unwrap()[0].reasoning_effort.as_deref(), Some("none"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_destructive_question_auto_continues_on_timeout_and_supports_retroactive_pause() {
+        let question = ApprovalCard::Question(crate::agent::QuestionCard {
+            questions: vec![crate::agent::AgentQuestion {
+                question: "Pick a target?".into(),
+                options: vec![crate::agent::QuestionOption {
+                    label: "a".into(),
+                    description: String::new(),
+                }],
+                allow_free_text: true,
+            }],
+        });
+        let (chat, _) = ScriptedChat::new(vec![
+            tool_round(&[("ask-timeout", "ask_user_question", "{}")], "", 0.0),
+            answer_round("Continued.", 0.0),
+        ]);
+        let (runner, state) = MockRunner::new(vec![(
+            "ask-timeout",
+            MockTool::Card {
+                card: question,
+                approved: ToolResult::success("ask-timeout", "must not execute"),
+            },
+        )]);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut recorder = Recorder::new(events_rx);
+        let (decisions_tx, decision_rx) = mpsc::unbounded_channel();
+        let input = TurnInput::new(model(), conversation())
+            .with_caps(TurnCaps {
+                max_turn_secs: 3600,
+                ..caps()
+            })
+            .with_question_timeout_secs(300);
+        let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
+
+        let approval_id = recorder.wait_for_approval().await;
+
+        // Advance 200s, pause retroactively, advance another 400s (must NOT time out while paused),
+        // then resume and advance remaining 100s -> times out and records "Unanswered, auto-continued".
+        tokio::time::advance(Duration::from_secs(200)).await;
+        decisions_tx
+            .send((approval_id, AgentDecision::SetQuestionCountdownPaused(true)))
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(400)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished(), "paused question must not time out");
+
+        decisions_tx
+            .send((approval_id, AgentDecision::SetQuestionCountdownPaused(false)))
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(101)).await;
+
+        let report = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("question countdown must auto-continue")
+            .expect("turn joins");
+        assert_eq!(report.end, TurnEnd::Completed);
+        assert!(state.lock().unwrap().approved_runs.is_empty());
+        assert!(report.conversation.iter().any(|m| {
+            m.role == Role::Tool && m.content.contains(QUESTION_AUTO_CONTINUE_MESSAGE)
+        }));
+        let events = recorder.all_events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::QuestionCountdown { timed_out: true, .. }
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn destructive_approval_never_auto_continues_and_rejects_persistent_high_risk_grant() {
+        let root = unique_temp_root("high-risk-ceiling");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("secret.txt"), "data").unwrap();
+
+        let (chat, _) = ScriptedChat::new(vec![
+            tool_round(
+                &[("del-1", "delete_file", r#"{"path":"secret.txt"}"#)],
+                "",
+                0.0,
+            ),
+            answer_round("Done.", 0.0),
+        ]);
+        let ctx = ToolContext::new(&root, router::AgentToolSettings::default())
+            .with_permission_mode(skarn_decision::PermissionMode::FullAccess);
+        let runner = RouterToolRunner::new(ctx);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut recorder = Recorder::new(events_rx);
+        let (decisions_tx, decision_rx) = mpsc::unbounded_channel();
+
+        // FullAccess must STILL park on delete_file (High risk -> 0% auto-exec).
+        let input = TurnInput::new(model(), conversation())
+            .with_permission_mode(skarn_decision::PermissionMode::FullAccess)
+            .with_question_timeout_secs(5);
+        let task = tokio::spawn(run_agent_turn(input, chat, runner, events_tx, decision_rx));
+
+        let approval_id = recorder.wait_for_approval().await;
+        // Advance far past 5s (e.g., 400s): destructive approval must NEVER auto-continue.
+        tokio::time::advance(Duration::from_secs(400)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished(), "destructive card must never auto-continue");
+
+        // Attempting AllowProject on High-risk delete_file must be refused by GrantExceedsRiskCeiling.
+        decisions_tx
+            .send((
+                approval_id,
+                AgentDecision::Scoped {
+                    grant: skarn_decision::GrantDecision::AllowProject,
+                    target_pattern: None,
+                },
+            ))
+            .unwrap();
+        let report = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("decision finishes turn")
+            .expect("turn joins");
+        assert_eq!(report.end, TurnEnd::Completed);
+        assert!(
+            root.join("secret.txt").exists(),
+            "High-risk AllowProject must be rejected and never delete the file"
+        );
+        assert!(report.conversation.iter().any(|m| {
+            m.role == Role::Tool && m.content.contains("GrantExceedsRiskCeiling")
+        }));
 
         let _ = std::fs::remove_dir_all(root);
     }

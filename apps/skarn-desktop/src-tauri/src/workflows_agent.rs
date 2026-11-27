@@ -539,7 +539,7 @@ impl WorkflowHost {
             .with_caps(request.caps)
             .with_manifest(manifest())
             // Never inherit the parent session's full-auto or script grant.
-            .with_auto_approve_writes(false);
+            .with_permission_mode(skarn_decision::PermissionMode::AskBeforeChanges);
 
         // Host is blocking, including when called within a Tokio context. A
         // separate thread avoids nested Runtime::block_on and retains the report

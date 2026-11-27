@@ -129,7 +129,7 @@ impl SubagentSession {
         let input = TurnInput::new(self.model.clone(), self.conversation.clone())
             .with_caps(self.caps.clone())
             .with_manifest(self.manifest())
-            .with_auto_approve_writes(false);
+            .with_permission_mode(skarn_decision::PermissionMode::AskBeforeChanges);
         let report = run_agent_turn(input, chat, tools, events, decisions).await;
         self.conversation = report.conversation.clone();
         report
@@ -153,7 +153,7 @@ pub async fn run_subagent_turn(
         .with_caps(caps)
         .with_manifest(policy.manifest())
         // A child never inherits the parent session's auto-approve grant.
-        .with_auto_approve_writes(false);
+        .with_permission_mode(skarn_decision::PermissionMode::AskBeforeChanges);
     run_agent_turn(input, chat, tools, events, decisions).await
 }
 
@@ -212,6 +212,30 @@ impl ToolRunner for Box<dyn ToolRunner> {
 
     fn abort(&mut self) {
         (**self).abort();
+    }
+
+    fn evaluate_scoped_grant(
+        &self,
+        action_class: skarn_decision::ActionClass,
+        target: &str,
+        risk: skarn_decision::RiskLevel,
+    ) -> Option<skarn_decision::GrantDecision> {
+        (**self).evaluate_scoped_grant(action_class, target, risk)
+    }
+
+    fn insert_scoped_grant(
+        &mut self,
+        entry: skarn_decision::ScopedGrantEntry,
+    ) -> Result<Vec<skarn_decision::ScopedGrantEntry>, skarn_decision::PolicyError> {
+        (**self).insert_scoped_grant(entry)
+    }
+
+    fn drain_traces(&mut self) -> Vec<super::router::ToolDecisionTrace> {
+        (**self).drain_traces()
+    }
+
+    fn commit_turn_checkpoint(&mut self) -> Option<skarn_decision::TurnCheckpointManifest> {
+        (**self).commit_turn_checkpoint()
     }
 }
 

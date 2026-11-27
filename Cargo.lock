@@ -5820,6 +5820,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skarn-core",
+ "skarn-decision",
  "skarn-fs",
  "skarn-settings",
  "thiserror 2.0.21",
@@ -5885,6 +5886,7 @@ dependencies = [
  "serde_json",
  "skarn-ai",
  "skarn-core",
+ "skarn-decision",
  "skarn-fs",
  "skarn-git",
  "skarn-lsp",
@@ -5971,6 +5973,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skarn-core",
+ "skarn-decision",
  "skarn-protocol",
  "tempfile",
 ]

@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
 };
@@ -134,6 +134,122 @@ struct RefreshCandidate {
     text: String,
 }
 
+/// Live workspace trust and privacy state shared between `DesktopState`,
+/// `SessionEngine`, and `WorkspaceSnapshot` capture/recheck.
+pub struct LiveTrustState {
+    trusted: AtomicBool,
+    epoch: AtomicU64,
+    local_only: AtomicBool,
+    workspace_local_only: Mutex<Option<bool>>,
+}
+
+impl LiveTrustState {
+    pub fn new(trusted: bool, local_only: bool) -> Self {
+        Self {
+            trusted: AtomicBool::new(trusted),
+            epoch: AtomicU64::new(1),
+            local_only: AtomicBool::new(local_only),
+            workspace_local_only: Mutex::new(None),
+        }
+    }
+
+    pub fn is_trusted(&self) -> bool {
+        self.trusted.load(Ordering::SeqCst)
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn set_trusted(&self, trusted: bool) -> u64 {
+        self.trusted.store(trusted, Ordering::SeqCst);
+        self.epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn global_local_only(&self) -> bool {
+        self.local_only.load(Ordering::SeqCst)
+    }
+
+    pub fn set_global_local_only(&self, local_only: bool) {
+        self.local_only.store(local_only, Ordering::SeqCst);
+    }
+
+    pub fn workspace_local_only(&self) -> Option<bool> {
+        *self
+            .workspace_local_only
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set_workspace_local_only(&self, override_val: Option<bool>) {
+        *self
+            .workspace_local_only
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = override_val;
+    }
+
+    pub fn effective_local_only(&self) -> bool {
+        self.workspace_local_only()
+            .unwrap_or_else(|| self.global_local_only())
+    }
+}
+
+/// Live `skarn_decision::WorkspaceStateReader` backed by `Workspace::buffers`
+/// and `LiveTrustState`.
+pub struct DesktopWorkspaceReader {
+    root: PathBuf,
+    workspace: Arc<Mutex<Option<Workspace>>>,
+    trust: Arc<LiveTrustState>,
+}
+
+impl DesktopWorkspaceReader {
+    pub fn new(
+        root: PathBuf,
+        workspace: Arc<Mutex<Option<Workspace>>>,
+        trust: Arc<LiveTrustState>,
+    ) -> Self {
+        Self {
+            root: skarn_decision::canonical_root(&root),
+            workspace,
+            trust,
+        }
+    }
+}
+
+impl skarn_decision::WorkspaceStateReader for DesktopWorkspaceReader {
+    fn workspace_root(&self) -> &Path {
+        &self.root
+    }
+
+    fn git_head(&self) -> Option<String> {
+        None
+    }
+
+    fn workspace_trusted(&self) -> bool {
+        self.trust.is_trusted()
+    }
+
+    fn trust_epoch(&self) -> u64 {
+        self.trust.epoch()
+    }
+
+    fn local_only(&self) -> bool {
+        self.trust.effective_local_only()
+    }
+
+    fn buffer_state(&self, rel_path: &str) -> Option<skarn_decision::BufferSnapshotState> {
+        let guard = self
+            .workspace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let workspace = guard.as_ref()?;
+        if !skarn_decision::same_path(workspace.root(), &self.root) {
+            return None;
+        }
+        workspace.buffer_snapshot_for_path(rel_path)
+    }
+}
+
 /// The workspace service behind the Tauri command layer.
 pub struct Workspace {
     root: PathBuf,
@@ -194,6 +310,30 @@ impl Workspace {
     /// The canonical workspace root.
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Stage 3: look up open buffer revision/dirty state by workspace-relative path.
+    pub fn buffer_snapshot_for_path(
+        &self,
+        rel_path: &str,
+    ) -> Option<skarn_decision::BufferSnapshotState> {
+        let trimmed = rel_path.trim().replace('\\', "/");
+        let normalized = trimmed.strip_prefix("./").unwrap_or(&trimmed);
+        let key = Self::normalize_relative(normalized).ok()?;
+        let buffers = self.buffers_lock();
+        buffers
+            .get(&key)
+            .map(|state| skarn_decision::BufferSnapshotState {
+                revision: state.version,
+                dirty: state.text != state.saved_text,
+            })
+    }
+
+    /// Stage 3: whether `rel_path` currently has an open dirty editor buffer.
+    #[allow(dead_code)]
+    pub fn has_dirty_buffer(&self, rel_path: &str) -> bool {
+        self.buffer_snapshot_for_path(rel_path)
+            .is_some_and(|b| b.dirty)
     }
 
     /// Perform an Explorer mutation while preventing concurrent buffer edits.

@@ -26,6 +26,72 @@ use crate::chat_types::ToolResult;
 
 use super::MAX_OUTPUT_BYTES;
 
+/// Compare-and-swap precondition captured at tool planning time to eliminate
+/// TOCTOU drift between approval card creation and disk apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExpectedFilePrecondition {
+    pub existed: bool,
+    pub sha256: Option<String>,
+}
+
+/// Result of a CAS filesystem mutation, returning both the model-visible tool
+/// result and the exact before/after bytes for [`skarn_decision::TurnCheckpointStore`].
+#[derive(Clone, Debug)]
+pub(crate) struct CasMutationResult {
+    pub tool_result: ToolResult,
+    pub file_change: Option<skarn_decision::TurnFileChange>,
+}
+
+pub(crate) fn capture_file_precondition(resolved: &Path) -> Result<ExpectedFilePrecondition, String> {
+    match std::fs::read(resolved) {
+        Ok(bytes) => Ok(ExpectedFilePrecondition {
+            existed: true,
+            sha256: Some(skarn_decision::sha256_bytes(&bytes)),
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(ExpectedFilePrecondition {
+            existed: false,
+            sha256: None,
+        }),
+        Err(err) => Err(format!("cannot read `{}`: {err}", resolved.display())),
+    }
+}
+
+fn verify_cas_precondition(
+    resolved: &Path,
+    rel: &str,
+    expected: Option<&ExpectedFilePrecondition>,
+) -> Result<Option<Vec<u8>>, String> {
+    let live = match std::fs::read(resolved) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(format!("cannot read `{rel}`: {err}")),
+    };
+    if let Some(exp) = expected {
+        match (&live, exp.existed) {
+            (Some(bytes), true) => {
+                let live_sha = skarn_decision::sha256_bytes(bytes);
+                if exp.sha256.as_deref() != Some(live_sha.as_str()) {
+                    return Err(format!(
+                        "`{rel}` changed on disk after planning/approval (SHA-256 mismatch) — aborting CAS mutation"
+                    ));
+                }
+            }
+            (Some(_), false) => {
+                return Err(format!(
+                    "`{rel}` was created on disk after planning/approval — aborting CAS mutation"
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "`{rel}` was deleted from disk after planning/approval — aborting CAS mutation"
+                ));
+            }
+            (None, false) => {}
+        }
+    }
+    Ok(live)
+}
+
 /// Heuristic for paths that commonly contain credentials. This is not a sandbox.
 pub(crate) fn is_secret_path(path: &str) -> bool {
     path.replace('\\', "/").split('/').any(|part| {
@@ -712,55 +778,77 @@ pub(crate) fn plan_edit(
     Ok((rel, diff))
 }
 
-/// Apply an **approved** `write_file` (§17.4): the diff card was the save
-/// moment. Guards are re-run — a stale approval replayed against a
-/// workspace whose links changed is rejected by [`resolve_rooted`] again.
-/// The write is atomic where sensible: a temp file in the target's
-/// directory, then rename over the target.
+/// Apply an **approved** `write_file` (§17.4): delegates to [`apply_write_cas`].
+#[cfg(test)]
 pub(crate) fn apply_write(root: &Path, id: &str, path: &str, content: &str) -> ToolResult {
-    // Guards are re-run: a stale approval replayed against a workspace
-    // whose links changed is rejected by resolve_rooted again (§17.2).
-    //
-    // KNOWN GAP (not fixed here — needs an API change): the re-read in
-    // `plan_write` only validates that the path is still writable; the write
-    // below does not compare the current file against the bytes the user
-    // approved, so a file changed between the card and apply is overwritten.
-    // Closing that needs the approval to carry the old content (or a hash)
-    // and a compare-and-swap at apply time.
+    apply_write_cas(root, id, path, content, None, true).tool_result
+}
+
+/// CAS-protected `write_file` apply: validates `expected` (when supplied),
+/// writes atomically via `.skarn-tmp-*` sibling + rename, and returns before/after
+/// bytes for `TurnCheckpointStore`.
+pub(crate) fn apply_write_cas(
+    root: &Path,
+    id: &str,
+    path: &str,
+    content: &str,
+    expected: Option<&ExpectedFilePrecondition>,
+    write_backup: bool,
+) -> CasMutationResult {
     if let Err(e) = plan_write(root, path, content) {
-        return ToolResult::error(id, e);
+        return CasMutationResult {
+            tool_result: ToolResult::error(id, e),
+            file_change: None,
+        };
     }
-    // Resolve once and never panic: a link swapped in between the plan and
-    // this call is a model-visible error, not a crash inside the turn task.
     let resolved = match resolve_rooted(root, path) {
         Ok(p) => p,
-        Err(e) => return ToolResult::error(id, e),
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
     };
     let rel = rel_display(root, &resolved);
-    match write_atomic(&resolved, content) {
-        Ok(backup) => ToolResult {
-            id: id.to_owned(),
-            ok: true,
-            content: match backup {
-                Some(backup) => format!(
-                    "wrote {} bytes to `{rel}` (previous content saved to `{}`)",
-                    content.len(),
-                    rel_display(root, &backup)
-                ),
-                None => format!("wrote {} bytes to `{rel}`", content.len()),
+    let before_bytes = match verify_cas_precondition(&resolved, &rel, expected) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
+    };
+    match write_atomic_with_backup(&resolved, content, write_backup) {
+        Ok(backup) => CasMutationResult {
+            tool_result: ToolResult {
+                id: id.to_owned(),
+                ok: true,
+                content: match backup {
+                    Some(backup) => format!(
+                        "wrote {} bytes to `{rel}` (previous content saved to `{}`)",
+                        content.len(),
+                        rel_display(root, &backup)
+                    ),
+                    None => format!("wrote {} bytes to `{rel}`", content.len()),
+                },
             },
+            file_change: Some(skarn_decision::TurnFileChange {
+                rel_path: rel,
+                before_bytes,
+                after_bytes: Some(content.as_bytes().to_vec()),
+            }),
         },
-        Err(e) => ToolResult::error(id, format!("write to `{rel}` failed: {e}")),
+        Err(e) => CasMutationResult {
+            tool_result: ToolResult::error(id, format!("write to `{rel}` failed: {e}")),
+            file_change: None,
+        },
     }
 }
 
-/// Apply an **approved** `edit_file` (§17.4). The file is re-read and the
-/// match re-validated at apply time: if the file changed since the card
-/// was built, the edit is refused rather than clobbering the newer content.
-///
-/// §17.7 note: applying to the *open buffer* (live edit, undo, buffer
-/// dirty) is the app-shell's seam — the 5c loop owns routing the approved
-/// edit there when the file is open. This function is the on-disk half.
+/// Apply an **approved** `edit_file` (§17.4): delegates to [`apply_edit_cas`].
+#[cfg(test)]
 pub(crate) fn apply_edit(
     root: &Path,
     id: &str,
@@ -769,86 +857,183 @@ pub(crate) fn apply_edit(
     new_str: &str,
     replace_all: bool,
 ) -> ToolResult {
-    // Validation identical to plan_edit, against the file as it is NOW.
+    apply_edit_cas(root, id, path, old_str, new_str, replace_all, None, true).tool_result
+}
+
+/// CAS-protected `edit_file` apply: validates `expected` SHA-256 (when supplied)
+/// and `old_str` uniqueness, writes atomically via `.skarn-tmp-*` sibling + rename,
+/// and returns before/after bytes for `TurnCheckpointStore`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_edit_cas(
+    root: &Path,
+    id: &str,
+    path: &str,
+    old_str: &str,
+    new_str: &str,
+    replace_all: bool,
+    expected: Option<&ExpectedFilePrecondition>,
+    write_backup: bool,
+) -> CasMutationResult {
     let resolved = match resolve_rooted(root, path) {
         Ok(p) => p,
-        Err(e) => return ToolResult::error(id, e),
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
     };
     let rel = rel_display(root, &resolved);
     if !resolved.is_file() {
-        return ToolResult::error(id, format!("`{rel}` is not an existing file"));
+        return CasMutationResult {
+            tool_result: ToolResult::error(id, format!("`{rel}` is not an existing file")),
+            file_change: None,
+        };
     }
-    let old = match std::fs::read(&resolved) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-        Err(e) => return ToolResult::error(id, format!("cannot read `{rel}`: {e}")),
+    let before_bytes = match verify_cas_precondition(&resolved, &rel, expected) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, format!("`{rel}` does not exist")),
+                file_change: None,
+            }
+        }
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
     };
+    let old = String::from_utf8_lossy(&before_bytes).into_owned();
     let occurrences = old.matches(old_str).count();
     if occurrences == 0 {
-        return ToolResult::error(
-            id,
-            format!(
-                "`{rel}` changed since the edit was approved — old_str no longer matches; re-request the edit"
+        return CasMutationResult {
+            tool_result: ToolResult::error(
+                id,
+                format!(
+                    "`{rel}` changed since the edit was approved — old_str no longer matches; re-request the edit"
+                ),
             ),
-        );
+            file_change: None,
+        };
     }
     if occurrences > 1 && !replace_all {
-        return ToolResult::error(
-            id,
-            format!(
-                "`{rel}` changed since the edit was approved — old_str is now ambiguous; re-request the edit"
+        return CasMutationResult {
+            tool_result: ToolResult::error(
+                id,
+                format!(
+                    "`{rel}` changed since the edit was approved — old_str is now ambiguous; re-request the edit"
+                ),
             ),
-        );
+            file_change: None,
+        };
     }
     let new_content = if replace_all {
         old.replace(old_str, new_str)
     } else {
         old.replacen(old_str, new_str, 1)
     };
-    match write_atomic(&resolved, &new_content) {
-        Ok(backup) => ToolResult {
-            id: id.to_owned(),
-            ok: true,
-            content: match backup {
-                Some(backup) => format!(
-                    "edited `{rel}` ({occurrences} replacement(s); previous content saved to `{}`)",
-                    rel_display(root, &backup)
-                ),
-                None => format!("edited `{rel}` ({occurrences} replacement(s))"),
+    match write_atomic_with_backup(&resolved, &new_content, write_backup) {
+        Ok(backup) => CasMutationResult {
+            tool_result: ToolResult {
+                id: id.to_owned(),
+                ok: true,
+                content: match backup {
+                    Some(backup) => format!(
+                        "edited `{rel}` ({occurrences} replacement(s); previous content saved to `{}`)",
+                        rel_display(root, &backup)
+                    ),
+                    None => format!("edited `{rel}` ({occurrences} replacement(s))"),
+                },
             },
+            file_change: Some(skarn_decision::TurnFileChange {
+                rel_path: rel,
+                before_bytes: Some(before_bytes),
+                after_bytes: Some(new_content.as_bytes().to_vec()),
+            }),
         },
-        Err(e) => ToolResult::error(id, format!("edit of `{rel}` failed: {e}")),
+        Err(e) => CasMutationResult {
+            tool_result: ToolResult::error(id, format!("edit of `{rel}` failed: {e}")),
+            file_change: None,
+        },
     }
 }
 
-/// Apply an **approved** `delete_file` (§17.4). Deletes files only — a
-/// directory is refused with a correctable error (git-tracked files stay
-/// recoverable through git, §17.1).
+/// Apply an **approved** `delete_file` (§17.4): delegates to [`apply_delete_cas`].
+#[cfg(test)]
 pub(crate) fn apply_delete(root: &Path, id: &str, path: &str) -> ToolResult {
+    apply_delete_cas(root, id, path, None).tool_result
+}
+
+/// CAS-protected `delete_file` apply: validates `expected` SHA-256 (when supplied),
+/// removes the file, and returns before/after bytes for `TurnCheckpointStore`.
+pub(crate) fn apply_delete_cas(
+    root: &Path,
+    id: &str,
+    path: &str,
+    expected: Option<&ExpectedFilePrecondition>,
+) -> CasMutationResult {
     let resolved = match resolve_rooted(root, path) {
         Ok(p) => p,
-        Err(e) => return ToolResult::error(id, e),
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
     };
     let rel = rel_display(root, &resolved);
     if same_path(&resolved, root) {
-        return ToolResult::error(id, "refusing to delete the workspace root".to_owned());
+        return CasMutationResult {
+            tool_result: ToolResult::error(id, "refusing to delete the workspace root".to_owned()),
+            file_change: None,
+        };
     }
     match std::fs::symlink_metadata(&resolved) {
         Ok(meta) if meta.is_dir() => {
-            return ToolResult::error(
-                id,
-                format!("`{rel}` is a directory — delete_file deletes files only"),
-            )
+            return CasMutationResult {
+                tool_result: ToolResult::error(
+                    id,
+                    format!("`{rel}` is a directory — delete_file deletes files only"),
+                ),
+                file_change: None,
+            }
         }
         Ok(_) => {}
-        Err(e) => return ToolResult::error(id, format!("cannot delete `{rel}`: {e}")),
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, format!("cannot delete `{rel}`: {e}")),
+                file_change: None,
+            }
+        }
     }
+    let before_bytes = match verify_cas_precondition(&resolved, &rel, expected) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return CasMutationResult {
+                tool_result: ToolResult::error(id, e),
+                file_change: None,
+            }
+        }
+    };
     match std::fs::remove_file(&resolved) {
-        Ok(()) => ToolResult {
-            id: id.to_owned(),
-            ok: true,
-            content: format!("deleted `{rel}`"),
+        Ok(()) => CasMutationResult {
+            tool_result: ToolResult {
+                id: id.to_owned(),
+                ok: true,
+                content: format!("deleted `{rel}`"),
+            },
+            file_change: Some(skarn_decision::TurnFileChange {
+                rel_path: rel,
+                before_bytes,
+                after_bytes: None,
+            }),
         },
-        Err(e) => ToolResult::error(id, format!("cannot delete `{rel}`: {e}")),
+        Err(e) => CasMutationResult {
+            tool_result: ToolResult::error(id, format!("cannot delete `{rel}`: {e}")),
+            file_change: None,
+        },
     }
 }
 
@@ -921,17 +1106,32 @@ fn backup_existing(target: &Path) -> std::io::Result<Option<PathBuf>> {
 /// Before replacing an existing regular file, its current bytes are copied
 /// to [`backup_sibling`] (also via temp + rename). Returns the backup path
 /// when one was written.
+#[cfg(test)]
 fn write_atomic(target: &Path, content: &str) -> std::io::Result<Option<PathBuf>> {
+    write_atomic_with_backup(target, content, true)
+}
+
+fn write_atomic_with_backup(
+    target: &Path,
+    content: &str,
+    create_backup: bool,
+) -> std::io::Result<Option<PathBuf>> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let backup = backup_existing(target)?;
+    let backup = if create_backup {
+        backup_existing(target)?
+    } else {
+        None
+    };
     let tmp = temp_sibling(target);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)?;
-    if let Err(e) = std::io::Write::write_all(&mut file, content.as_bytes()) {
+    if let Err(e) = std::io::Write::write_all(&mut file, content.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -1867,5 +2067,49 @@ mod tests {
         assert!(diff.contains("-drop"));
         let diff = unified_diff("f.txt", "no newline", "no newline!");
         assert!(diff.contains("+no newline!"));
+    }
+
+    #[test]
+    fn cas_mutations_reject_mid_flight_disk_drift_without_touching_target() {
+        let root = temp_root("cas-drift");
+        touch(&root, "cas.txt", "before\n");
+        let resolved = resolve_rooted(&root, "cas.txt").unwrap();
+        let pre = capture_file_precondition(&resolved).unwrap();
+        assert!(pre.existed);
+
+        // Simulate human edit on disk after planning/approval.
+        std::fs::write(&resolved, "human edit\n").unwrap();
+
+        let write_res = apply_write_cas(&root, "c1", "cas.txt", "agent\n", Some(&pre), false);
+        assert!(!write_res.tool_result.ok);
+        assert!(write_res.file_change.is_none());
+        assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "human edit\n");
+
+        let edit_res =
+            apply_edit_cas(&root, "c2", "cas.txt", "human", "agent", false, Some(&pre), false);
+        assert!(!edit_res.tool_result.ok);
+        assert!(edit_res.file_change.is_none());
+        assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "human edit\n");
+
+        let del_res = apply_delete_cas(&root, "c3", "cas.txt", Some(&pre));
+        assert!(!del_res.tool_result.ok);
+        assert!(del_res.file_change.is_none());
+        assert!(resolved.exists());
+
+        // Fresh precondition succeeds and leaves no .skarn-bak when write_backup == false.
+        let fresh = capture_file_precondition(&resolved).unwrap();
+        let ok_edit = apply_edit_cas(
+            &root,
+            "c4",
+            "cas.txt",
+            "human",
+            "agent",
+            false,
+            Some(&fresh),
+            false,
+        );
+        assert!(ok_edit.tool_result.ok);
+        assert!(ok_edit.file_change.is_some());
+        assert!(!backup_sibling(&resolved).exists());
     }
 }

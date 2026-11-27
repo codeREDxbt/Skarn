@@ -65,15 +65,19 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// The persisted session mode. `Auto` is deliberately absent: full access is
+/// The persisted session mode. `FullAccess` is deliberately absent: full access is
 /// session-scoped trust, never a durable mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSessionMode {
     #[default]
+    #[serde(alias = "ask_before_changes")]
     Execute,
+    #[serde(alias = "read_only")]
     Explore,
     Plan,
+    #[serde(alias = "auto_edit")]
+    AutoEdit,
 }
 
 impl AgentSessionMode {
@@ -83,6 +87,7 @@ impl AgentSessionMode {
             Self::Execute => "execute",
             Self::Explore => "explore",
             Self::Plan => "plan",
+            Self::AutoEdit => "auto_edit",
         }
     }
 }

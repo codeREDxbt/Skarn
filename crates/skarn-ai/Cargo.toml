@@ -11,6 +11,7 @@ skarn-core.workspace = true
 # The agent module composes skarn-fs (ARCHITECTURE.md §17.6): list_dir
 # (tree node), fuzzy_find, and search_files run over its implementations.
 skarn-fs.workspace = true
+skarn-decision.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true

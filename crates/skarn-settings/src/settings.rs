@@ -347,6 +347,17 @@ pub struct AgentSettings {
     /// configurable.
     #[serde(default)]
     pub brave_search_api_key: Option<String>,
+
+    /// Stage 3: privacy mode — blocks cloud decision providers at the
+    /// orchestrator boundary when enabled.
+    #[serde(default)]
+    pub local_only: bool,
+
+    /// Stage 3: persisted project-level scoped grants (`AllowProject` / `DenyProject`).
+    /// Any `AllowSession`/`AllowOnce` or `AllowProject` targeting `High`/`Critical`
+    /// risk is stripped on load (`GrantExceedsRiskCeiling`).
+    #[serde(default)]
+    pub scoped_grants: Vec<skarn_decision::ScopedGrantEntry>,
 }
 
 /// `layout.*` — the Tauri shell's workbench layout (Phase Z2, docs/ui/
@@ -590,6 +601,8 @@ impl Default for AgentSettings {
             shell: default_agent_shell(),
             auto_approve_commands: default_agent_auto_approve_commands(),
             brave_search_api_key: None,
+            local_only: false,
+            scoped_grants: Vec::new(),
         }
     }
 }
@@ -640,9 +653,32 @@ impl Settings {
             )));
         }
 
-        serde_json::from_value(value).map_err(|e| {
+        let mut settings: Settings = serde_json::from_value(value).map_err(|e| {
             SkarnError::Config(format!("settings file does not match the schema: {e}"))
-        })
+        })?;
+        settings.sanitize_scoped_grants();
+        Ok(settings)
+    }
+
+    /// Enforce `GrantExceedsRiskCeiling` on persisted grants: strip any
+    /// non-persistent (`AllowOnce`, `AllowSession`) or `High`/`Critical` allow
+    /// entries loaded from disk.
+    pub fn sanitize_scoped_grants(&mut self) {
+        let filtered: Vec<skarn_decision::ScopedGrantEntry> =
+            std::mem::take(&mut self.agent.scoped_grants)
+                .into_iter()
+                .filter(|entry| {
+                    !matches!(
+                        entry.decision,
+                        skarn_decision::GrantDecision::AllowOnce
+                            | skarn_decision::GrantDecision::AllowSession
+                    ) && !(matches!(entry.decision, skarn_decision::GrantDecision::AllowProject)
+                        && entry.max_risk >= skarn_decision::RiskLevel::High)
+                })
+                .collect();
+        self.agent.scoped_grants = skarn_decision::ScopedPolicyStore::load_persisted(filtered)
+            .entries()
+            .to_vec();
     }
 
     /// Load, falling back to defaults on any error while keeping the error
@@ -707,9 +743,10 @@ fn load_from_readonly(path: &Path) -> Result<Option<Settings>, SkarnError> {
             "settings schema version {version} is unsupported"
         )));
     }
-    let settings = serde_json::from_value(value).map_err(|e| {
+    let mut settings: Settings = serde_json::from_value(value).map_err(|e| {
         SkarnError::Config(format!("settings file does not match the schema: {e}"))
     })?;
+    settings.sanitize_scoped_grants();
     Ok(Some(settings))
 }
 
@@ -1720,5 +1757,66 @@ pub(crate) mod tests {
             Some(("C:\\selora-dir".into(), LEGACY_SETTINGS_DIR_ENV)), // skarn-v1-migration-compat
             "SELORA_SETTINGS_DIR must work as fallback" // skarn-v1-migration-compat
         );
+    }
+
+    #[test]
+    fn agent_settings_local_only_and_scoped_grant_ceiling_on_load() {
+        let dir = temp_settings_dir("scoped-grants-ceiling");
+        let path = dir.join(SETTINGS_FILE_NAME);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            &path,
+            br#"{
+                "_v": 1,
+                "agent": {
+                    "local_only": true,
+                    "scoped_grants": [
+                        {
+                            "action_class": "file_edit",
+                            "target_pattern": "src/*",
+                            "decision": "allow_project",
+                            "max_risk": "medium"
+                        },
+                        {
+                            "action_class": "file_delete",
+                            "target_pattern": "*",
+                            "decision": "allow_project",
+                            "max_risk": "high"
+                        },
+                        {
+                            "action_class": "command_gated",
+                            "target_pattern": "*",
+                            "decision": "allow_session",
+                            "max_risk": "critical"
+                        },
+                        {
+                            "action_class": "command_gated",
+                            "target_pattern": "rm -rf *",
+                            "decision": "deny_project",
+                            "max_risk": "critical"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write");
+
+        let loaded = Settings::load_from(&path).expect("load");
+        assert!(loaded.agent.local_only);
+        assert_eq!(loaded.agent.scoped_grants.len(), 2);
+        assert_eq!(
+            loaded.agent.scoped_grants[0].decision,
+            skarn_decision::GrantDecision::AllowProject
+        );
+        assert_eq!(
+            loaded.agent.scoped_grants[0].max_risk,
+            skarn_decision::RiskLevel::Medium
+        );
+        assert_eq!(
+            loaded.agent.scoped_grants[1].decision,
+            skarn_decision::GrantDecision::DenyProject
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

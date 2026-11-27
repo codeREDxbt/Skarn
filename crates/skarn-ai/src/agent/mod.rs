@@ -34,7 +34,7 @@ pub use plan::{
 };
 pub use router::{
     denied_result, execute_approved, execute_tool, plan_approved_result, revise_plan_result,
-    tool_manifest, AgentToolSettings, ToolContext, ToolOutcome,
+    tool_manifest, AgentToolSettings, ToolContext, ToolDecisionTrace, ToolOutcome,
 };
 pub use session::{
     bound_summary, compact_conversation, compacted_conversation, now_millis, should_compact,
@@ -60,7 +60,8 @@ pub use tools::bash::BashAbortHandle;
 pub use turn::{
     run_agent_turn, spawn_agent_turn, AgentEvent, AgentSummary, AgentTurn, AgentTurnReport,
     AgentTurnState, ChatStream, ClientChatStream, CompactionConfig, RouterToolRunner, ToolRunner,
-    TurnCaps, TurnDecision, TurnEnd, TurnInput, DENIED_MESSAGE,
+    TurnCaps, TurnDecision, TurnEnd, TurnInput, DEFAULT_QUESTION_TIMEOUT_SECS, DENIED_MESSAGE,
+    QUESTION_AUTO_CONTINUE_MESSAGE,
 };
 
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,15 @@ pub enum AgentDecision {
     /// and calls `exit_plan_mode` again. Never a grant.
     Revise,
     Stop,
+    /// Stage 3: approve or deny with a scoped grant (`AllowOnce`, `AllowSession`,
+    /// `AllowProject`, `DenyOnce`, `DenySession`, `DenyProject`).
+    Scoped {
+        grant: skarn_decision::GrantDecision,
+        target_pattern: Option<String>,
+    },
+    /// Stage 3: retroactively pause or resume the non-destructive Question
+    /// countdown timer while the card is parked.
+    SetQuestionCountdownPaused(bool),
 }
 
 /// One option on a §19.4 escalation question. The description is shown under

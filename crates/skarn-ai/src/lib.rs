@@ -35,10 +35,11 @@ pub use agent::{
     QuestionCard, QuestionOption, RouterToolRunner, SpawnError, SpawnRequest, SubagentActivity,
     SubagentActivityKind, SubagentBackend, SubagentCard, SubagentCompletion, SubagentControlError,
     SubagentEvent, SubagentHandle, SubagentPolicy, SubagentRunState, SubagentRuntime,
-    SubagentSession, TodoItem, TodoStatus, ToolContext, ToolOutcome, ToolRunner, TranscriptEntry,
-    TranscriptLoad, TurnCaps, TurnDecision, TurnEnd, TurnInput, WaitError, WaitOutcome,
-    AGENT_SESSIONS_DIR, COMPACTION_KEEP_LAST, COMPACTION_THRESHOLD, DEFAULT_WAIT_TIMEOUT,
-    DENIED_MESSAGE, MAX_SUMMARY_CHARS, MAX_WAIT_TIMEOUT, SESSION_SCHEMA, STATE_FILE, TODOS_FILE,
+    SubagentSession, TodoItem, TodoStatus, ToolContext, ToolDecisionTrace, ToolOutcome, ToolRunner,
+    TranscriptEntry, TranscriptLoad, TurnCaps, TurnDecision, TurnEnd, TurnInput, WaitError,
+    WaitOutcome, AGENT_SESSIONS_DIR, COMPACTION_KEEP_LAST, COMPACTION_THRESHOLD,
+    DEFAULT_QUESTION_TIMEOUT_SECS, DEFAULT_WAIT_TIMEOUT, DENIED_MESSAGE, MAX_SUMMARY_CHARS,
+    MAX_WAIT_TIMEOUT, QUESTION_AUTO_CONTINUE_MESSAGE, SESSION_SCHEMA, STATE_FILE, TODOS_FILE,
     TRANSCRIPT_FILE, WAIT_TOOL_NAME,
 };
 pub use agent::{

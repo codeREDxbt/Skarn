@@ -26,6 +26,7 @@ skarn-settings.workspace = true
 # error type the relays map into typed protocol errors.
 skarn-ai.workspace = true
 skarn-core.workspace = true
+skarn-decision.workspace = true
 tokio.workspace = true
 # Phase Z4 (editor & workbench parity): the workspace service reads trees and
 # searches through skarn-fs, and the Git panel rides skarn-git's vendored

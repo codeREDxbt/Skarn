@@ -29,10 +29,20 @@
 //! [`tools::fs::resolve_rooted`] (path rooting), [`tools::bash`] (env,
 //! timeout, output cap) — each with its own test citing its §.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use skarn_decision::{
+    evaluate_policy, ActionClass, CalibrationTable, DecisionCancelToken, DecisionOrchestrator,
+    DecisionPhase, DecisionRequest, DecisionResult, DecisionType, DeterministicRuleProvider,
+    ExecutionTier, FilesystemWorkspaceReader, PermissionMode, PolicyVerdict, RiskLevel,
+    RoutingExplanation, ScopedGrantEntry, ScopedPolicyStore, SnapshotCapturer, SnapshotRechecker,
+    TrustedFrame, TurnCheckpointManifest, TurnCheckpointStore, TurnFileChange, WorkspaceSnapshot,
+    WorkspaceStateReader,
+};
 
 use crate::chat_types::{ToolCall, ToolResult, ToolSpec};
 
@@ -95,6 +105,9 @@ pub struct AgentToolSettings {
     /// persisted settings file (§17.2: the key never leaves the client).
     #[serde(default, skip_serializing)]
     pub brave_api_key: Option<String>,
+    /// Stage 3: workspace/global `local_only` privacy mode.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 fn default_auto_approve_commands() -> Vec<String> {
@@ -130,8 +143,33 @@ impl Default for AgentToolSettings {
             shell: String::new(),
             auto_approve_commands: default_auto_approve_commands(),
             brave_api_key: None,
+            local_only: false,
         }
     }
+}
+
+/// Decision-engine trace emitted for each routed/executed tool call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDecisionTrace {
+    pub call_id: String,
+    pub action_id: String,
+    pub risk: RiskLevel,
+    pub phase: DecisionPhase,
+    pub explanation: RoutingExplanation,
+}
+
+#[derive(Clone, Debug)]
+struct PendingExecutionState {
+    snapshot: WorkspaceSnapshot,
+    precondition: Option<fs::ExpectedFilePrecondition>,
+    action_id: String,
+    #[allow(dead_code)]
+    action_class: ActionClass,
+    risk: RiskLevel,
+    #[allow(dead_code)]
+    target: String,
+    target_paths: Vec<String>,
+    explanation: RoutingExplanation,
 }
 
 /// Everything a tool execution needs: the workspace `root` (canonicalized
@@ -172,6 +210,24 @@ pub struct ToolContext {
     /// [`Self::with_subagent_backend`]; absent means `spawn_subagent` errors.
     pub subagent_model: Option<crate::types::Model>,
     pub subagent_caps: Option<crate::agent::TurnCaps>,
+    /// Stage 3: canonical 4-mode permission policy.
+    pub permission_mode: PermissionMode,
+    /// Stage 3: live workspace state reader (open buffers, trust epoch, local_only).
+    pub workspace_reader: Arc<dyn WorkspaceStateReader>,
+    /// Stage 3: provider-neutral decision orchestrator.
+    pub orchestrator: Arc<DecisionOrchestrator>,
+    /// Stage 3: session + persisted project scoped grants store.
+    pub scoped_policy: Arc<Mutex<ScopedPolicyStore>>,
+    /// Stage 3: optional content-addressed turn checkpoint store.
+    pub checkpoint_store: Option<Arc<TurnCheckpointStore>>,
+    pub checkpoint_workspace_id: Option<String>,
+    pub checkpoint_session_id: Option<String>,
+    pub checkpoint_turn_id: Option<String>,
+    /// Stage 3: cooperative race-free cancel token (Stop + trust revocation).
+    pub cancel_token: DecisionCancelToken,
+    pending_executions: Arc<Mutex<HashMap<String, PendingExecutionState>>>,
+    turn_changes: Arc<Mutex<Vec<TurnFileChange>>>,
+    traces: Arc<Mutex<Vec<ToolDecisionTrace>>>,
 }
 
 impl ToolContext {
@@ -182,6 +238,17 @@ impl ToolContext {
     pub fn new(root: impl Into<PathBuf>, settings: AgentToolSettings) -> Self {
         let root = root.into();
         let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let reader: Arc<dyn WorkspaceStateReader> = Arc::new(FilesystemWorkspaceReader::new(
+            &root,
+            settings.workspace_trusted,
+            settings.local_only,
+        ));
+        let orchestrator = Arc::new(DecisionOrchestrator::new(
+            CalibrationTable::with_default_local("tier1-deterministic"),
+            vec![Arc::new(DeterministicRuleProvider::new(
+                "tier1-deterministic",
+            ))],
+        ));
         Self {
             root,
             settings,
@@ -193,7 +260,123 @@ impl ToolContext {
             subagent_backend: None,
             subagent_model: None,
             subagent_caps: None,
+            permission_mode: PermissionMode::AskBeforeChanges,
+            workspace_reader: reader,
+            orchestrator,
+            scoped_policy: Arc::new(Mutex::new(ScopedPolicyStore::new())),
+            checkpoint_store: None,
+            checkpoint_workspace_id: None,
+            checkpoint_session_id: None,
+            checkpoint_turn_id: None,
+            cancel_token: DecisionCancelToken::new(),
+            pending_executions: Arc::new(Mutex::new(HashMap::new())),
+            turn_changes: Arc::new(Mutex::new(Vec::new())),
+            traces: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    #[must_use]
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_reader(mut self, reader: Arc<dyn WorkspaceStateReader>) -> Self {
+        self.workspace_reader = reader;
+        self
+    }
+
+    #[must_use]
+    pub fn with_orchestrator(mut self, orchestrator: Arc<DecisionOrchestrator>) -> Self {
+        self.orchestrator = orchestrator;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scoped_policy(mut self, scoped_policy: Arc<Mutex<ScopedPolicyStore>>) -> Self {
+        self.scoped_policy = scoped_policy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_store(
+        mut self,
+        store: Arc<TurnCheckpointStore>,
+        workspace_id: impl Into<String>,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Self {
+        self.checkpoint_store = Some(store);
+        self.checkpoint_workspace_id = Some(workspace_id.into());
+        self.checkpoint_session_id = Some(session_id.into());
+        self.checkpoint_turn_id = Some(turn_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancel_token(mut self, cancel_token: DecisionCancelToken) -> Self {
+        self.cancel_token = cancel_token;
+        self
+    }
+
+    pub fn drain_traces(&self) -> Vec<ToolDecisionTrace> {
+        let mut guard = self
+            .traces
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *guard)
+    }
+
+    pub fn push_trace(&self, trace: ToolDecisionTrace) {
+        self.traces
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(trace);
+    }
+
+    pub fn evaluate_scoped_grant(
+        &self,
+        action_class: ActionClass,
+        target: &str,
+        risk: RiskLevel,
+    ) -> Option<skarn_decision::GrantDecision> {
+        self.scoped_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .evaluate(action_class, target, risk)
+    }
+
+    pub fn insert_scoped_grant(
+        &self,
+        entry: ScopedGrantEntry,
+    ) -> Result<Vec<ScopedGrantEntry>, skarn_decision::PolicyError> {
+        let mut guard = self
+            .scoped_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.insert_grant(entry)?;
+        Ok(guard.entries().to_vec())
+    }
+
+    pub fn commit_turn_checkpoint(&self) -> Option<TurnCheckpointManifest> {
+        let store = self.checkpoint_store.as_ref()?;
+        let ws_id = self.checkpoint_workspace_id.as_deref()?;
+        let sess_id = self.checkpoint_session_id.as_deref()?;
+        let turn_id = self.checkpoint_turn_id.as_deref()?;
+        let changes = {
+            let mut guard = self
+                .turn_changes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_empty() {
+                return None;
+            }
+            std::mem::take(&mut *guard)
+        };
+        store
+            .record_turn(ws_id, sess_id, turn_id, super::session::now_millis(), &changes)
+            .ok()
     }
 
     /// Scope this context to a subagent policy. A read-only context has no
@@ -616,7 +799,77 @@ pub async fn execute_tool(ctx: &ToolContext, call: ToolCall) -> ToolOutcome {
     }
 }
 
+fn record_turn_change(turn_changes: &Mutex<Vec<TurnFileChange>>, change: TurnFileChange) {
+    let mut guard = turn_changes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = guard.iter_mut().find(|c| c.rel_path == change.rel_path) {
+        existing.after_bytes = change.after_bytes;
+    } else {
+        guard.push(change);
+    }
+}
+
+fn build_tier1_explanation(
+    reason_code: impl Into<String>,
+    fsm_path: Vec<DecisionPhase>,
+) -> RoutingExplanation {
+    RoutingExplanation {
+        trace_id: format!("trace-{}", uuid::Uuid::new_v4()),
+        selected_tier: ExecutionTier::Tier1Deterministic,
+        candidate_tiers: vec![ExecutionTier::Tier1Deterministic],
+        provider_id: Some("tier1-deterministic".to_owned()),
+        model_id: Some("deterministic-ide".to_owned()),
+        hop_count: 0,
+        privacy_blocked_cloud: false,
+        reason_code: reason_code.into(),
+        calibrated_threshold: None,
+        raw_confidence: Some(1.0),
+        fsm_path,
+    }
+}
+
+fn evaluate_ctx_policy(
+    ctx: &ToolContext,
+    snapshot: &WorkspaceSnapshot,
+    action_class: ActionClass,
+    risk: RiskLevel,
+    target: &str,
+) -> PolicyVerdict {
+    let scoped = ctx
+        .scoped_policy
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    evaluate_policy(
+        ctx.permission_mode,
+        snapshot,
+        action_class,
+        risk,
+        target,
+        None,
+        None,
+        &CalibrationTable::default(),
+        &scoped,
+    )
+}
+
 async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String> {
+    if ctx.cancel_token.is_cancelled() {
+        ctx.push_trace(ToolDecisionTrace {
+            call_id: call.id.clone(),
+            action_id: call.name.clone(),
+            risk: RiskLevel::Low,
+            phase: DecisionPhase::Cancelled,
+            explanation: build_tier1_explanation(
+                "cancelled_before_routing",
+                vec![DecisionPhase::Cancelled],
+            ),
+        });
+        return Ok(ToolOutcome::Ready(ToolResult::error(
+            &call.id,
+            "action cancelled before execution",
+        )));
+    }
     // §19.3: a child policy is structural on both router entry points.
     if let Some(policy) = ctx.policy {
         if !policy.allows(&call.name) {
@@ -641,36 +894,359 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
             let path = req_str(&args, &call.name, "path")?;
             let start_line = opt_u64(&args, &call.name, "start_line")?;
             let end_line = opt_u64(&args, &call.name, "end_line")?;
-            Ok(ToolOutcome::Ready(fs::read_file(
-                &ctx.root, &call.id, &path, start_line, end_line,
-            )))
+            let snap_paths: Vec<&str> = fs::resolve_rooted(&ctx.root, &path)
+                .ok()
+                .map(|_| vec![path.as_str()])
+                .unwrap_or_default();
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &snap_paths,
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
+            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                ctx,
+                &snapshot,
+                ActionClass::ReadInspect,
+                RiskLevel::Low,
+                &path,
+            ) {
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "read_file".to_owned(),
+                    risk: RiskLevel::Low,
+                    phase: DecisionPhase::Rejected,
+                    explanation: build_tier1_explanation(
+                        reason_code.clone(),
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::Routed,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::Rejected,
+                        ],
+                    ),
+                });
+                return Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    format!("rejected by policy ({reason_code})"),
+                )));
+            }
+            // Also exercise DecisionOrchestrator for Tier 1 read telemetry when path is rooted.
+            let orch_request = DecisionRequest {
+                request_id: call.id.clone(),
+                task_type: "tier1.read_file".to_owned(),
+                snapshot,
+                trusted_frame: TrustedFrame {
+                    question: "read_file".to_owned(),
+                    options: Vec::new(),
+                    allowed_actions: vec![skarn_decision::ActionDescriptor {
+                        action_id: "read_file".to_owned(),
+                        action_class: ActionClass::ReadInspect,
+                        risk: RiskLevel::Low,
+                        target_path: Some(path.clone()),
+                    }],
+                    permission_mode: ctx.permission_mode,
+                    rules_digest: None,
+                },
+                untrusted_evidence: Vec::new(),
+                deadline_ms: skarn_decision::TIER1_DEADLINE_MS,
+            };
+            let mut tier1_args = Map::new();
+            tier1_args.insert("path".to_owned(), Value::String(path.clone()));
+            if let Some(s) = start_line {
+                tier1_args.insert("start_line".to_owned(), Value::from(s));
+            }
+            if let Some(e) = end_line {
+                tier1_args.insert("end_line".to_owned(), Value::from(e));
+            }
+            let tier1_proposal = DecisionResult {
+                provider: "tier1-deterministic".to_owned(),
+                model: "deterministic-ide".to_owned(),
+                decision_type: DecisionType::Action,
+                value: serde_json::json!({ "action_id": "read_file", "args": tier1_args }),
+                probabilities: std::iter::once(("read_file".to_owned(), 1.0)).collect(),
+                raw_confidence: 1.0,
+                evidence_refs: Vec::new(),
+                risk: RiskLevel::Low,
+                latency_ms: 0,
+                reasoning_summary: None,
+                validation_errors: Vec::new(),
+            };
+            let scoped_guard = ctx
+                .scoped_policy
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let outcome = ctx
+                .orchestrator
+                .evaluate_with_tier1_proposal(
+                    &orch_request,
+                    Some(tier1_proposal),
+                    ctx.workspace_reader.as_ref(),
+                    &scoped_guard,
+                    None,
+                    None,
+                    &ctx.cancel_token,
+                )
+                .await;
+            let result = fs::read_file(&ctx.root, &call.id, &path, start_line, end_line);
+            let final_phase = if result.ok {
+                outcome.phase
+            } else {
+                DecisionPhase::Failed
+            };
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "read_file".to_owned(),
+                risk: RiskLevel::Low,
+                phase: final_phase,
+                explanation: outcome.explanation,
+            });
+            Ok(ToolOutcome::Ready(result))
         }
         "list_dir" => {
             let path = req_str(&args, &call.name, "path")?;
-            Ok(ToolOutcome::Ready(fs::list_dir(&ctx.root, &call.id, &path)))
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &[],
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
+            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                ctx,
+                &snapshot,
+                ActionClass::ReadInspect,
+                RiskLevel::Low,
+                &path,
+            ) {
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "list_dir".to_owned(),
+                    risk: RiskLevel::Low,
+                    phase: DecisionPhase::Rejected,
+                    explanation: build_tier1_explanation(
+                        reason_code.clone(),
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::Rejected,
+                        ],
+                    ),
+                });
+                return Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    format!("rejected by policy ({reason_code})"),
+                )));
+            }
+            let result = fs::list_dir(&ctx.root, &call.id, &path);
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "list_dir".to_owned(),
+                risk: RiskLevel::Low,
+                phase: if result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    "low_risk_read_auto",
+                    vec![
+                        DecisionPhase::Snapshotted,
+                        DecisionPhase::Routed,
+                        DecisionPhase::SchemaValidated,
+                        DecisionPhase::PolicyEvaluated,
+                        DecisionPhase::Executed,
+                        DecisionPhase::Verified,
+                    ],
+                ),
+            });
+            Ok(ToolOutcome::Ready(result))
         }
         "fuzzy_find" => {
             let query = req_str(&args, &call.name, "query")?;
-            Ok(ToolOutcome::Ready(fs::fuzzy_find(
-                &ctx.root, &call.id, &query,
-            )))
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &[],
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
+            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                ctx,
+                &snapshot,
+                ActionClass::ReadInspect,
+                RiskLevel::Low,
+                &query,
+            ) {
+                return Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    format!("rejected by policy ({reason_code})"),
+                )));
+            }
+            let result = fs::fuzzy_find(&ctx.root, &call.id, &query);
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "fuzzy_find".to_owned(),
+                risk: RiskLevel::Low,
+                phase: if result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    "low_risk_read_auto",
+                    vec![
+                        DecisionPhase::Snapshotted,
+                        DecisionPhase::Routed,
+                        DecisionPhase::Executed,
+                        DecisionPhase::Verified,
+                    ],
+                ),
+            });
+            Ok(ToolOutcome::Ready(result))
         }
         "search_files" => {
             let query = req_str(&args, &call.name, "query")?;
-            Ok(ToolOutcome::Ready(fs::search_files(
-                &ctx.root, &call.id, &query,
-            )))
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &[],
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
+            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                ctx,
+                &snapshot,
+                ActionClass::ReadInspect,
+                RiskLevel::Low,
+                &query,
+            ) {
+                return Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    format!("rejected by policy ({reason_code})"),
+                )));
+            }
+            let result = fs::search_files(&ctx.root, &call.id, &query);
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "search_files".to_owned(),
+                risk: RiskLevel::Low,
+                phase: if result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    "low_risk_read_auto",
+                    vec![
+                        DecisionPhase::Snapshotted,
+                        DecisionPhase::Routed,
+                        DecisionPhase::Executed,
+                        DecisionPhase::Verified,
+                    ],
+                ),
+            });
+            Ok(ToolOutcome::Ready(result))
         }
 
-        // -- §17.1 write tools: plan → card, never Ready-with-side-effect -
+        // -- §17.1 write tools: plan + snapshot + dirty-buffer guard -----
         "write_file" => {
             let path = req_str(&args, &call.name, "path")?;
             let content = req_str(&args, &call.name, "content")?;
             match fs::plan_write(&ctx.root, &path, &content) {
-                Ok((rel, diff)) => Ok(ToolOutcome::NeedsApproval(ApprovalCard::Diff {
-                    path: rel,
-                    diff,
-                })),
+                Ok((rel, diff)) => {
+                    let snapshot = SnapshotCapturer::capture(
+                        ctx.workspace_reader.as_ref(),
+                        &[rel.as_str()],
+                        super::session::now_millis(),
+                    )
+                    .map_err(|d| d.to_string())?;
+                    if snapshot
+                        .document_versions
+                        .get(&rel)
+                        .is_some_and(|doc| doc.dirty)
+                    {
+                        ctx.push_trace(ToolDecisionTrace {
+                            call_id: call.id.clone(),
+                            action_id: "write_file".to_owned(),
+                            risk: RiskLevel::Medium,
+                            phase: DecisionPhase::Stale,
+                            explanation: build_tier1_explanation(
+                                "open_buffer_dirty",
+                                vec![DecisionPhase::Snapshotted, DecisionPhase::Stale],
+                            ),
+                        });
+                        return Ok(ToolOutcome::Ready(ToolResult::error(
+                            &call.id,
+                            format!(
+                                "cannot write `{rel}`: open editor buffer is dirty (OpenBufferDirty)"
+                            ),
+                        )));
+                    }
+                    if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                        ctx,
+                        &snapshot,
+                        ActionClass::FileEdit,
+                        RiskLevel::Medium,
+                        &rel,
+                    ) {
+                        ctx.push_trace(ToolDecisionTrace {
+                            call_id: call.id.clone(),
+                            action_id: "write_file".to_owned(),
+                            risk: RiskLevel::Medium,
+                            phase: DecisionPhase::Rejected,
+                            explanation: build_tier1_explanation(
+                                reason_code.clone(),
+                                vec![
+                                    DecisionPhase::Snapshotted,
+                                    DecisionPhase::PolicyEvaluated,
+                                    DecisionPhase::Rejected,
+                                ],
+                            ),
+                        });
+                        return Ok(ToolOutcome::Ready(ToolResult::error(
+                            &call.id,
+                            format!("rejected by policy ({reason_code})"),
+                        )));
+                    }
+                    let resolved = fs::resolve_rooted(&ctx.root, &rel)?;
+                    let pre = fs::capture_file_precondition(&resolved)?;
+                    let explanation = build_tier1_explanation(
+                        "file_write_planned",
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::Routed,
+                            DecisionPhase::SchemaValidated,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::ApprovalPending,
+                        ],
+                    );
+                    ctx.push_trace(ToolDecisionTrace {
+                        call_id: call.id.clone(),
+                        action_id: "write_file".to_owned(),
+                        risk: RiskLevel::Medium,
+                        phase: DecisionPhase::ApprovalPending,
+                        explanation: explanation.clone(),
+                    });
+                    ctx.pending_executions
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(
+                            call.id.clone(),
+                            PendingExecutionState {
+                                snapshot,
+                                precondition: Some(pre),
+                                action_id: "write_file".to_owned(),
+                                action_class: ActionClass::FileEdit,
+                                risk: RiskLevel::Medium,
+                                target: rel.clone(),
+                                target_paths: vec![rel.clone()],
+                                explanation,
+                            },
+                        );
+                    Ok(ToolOutcome::NeedsApproval(ApprovalCard::Diff {
+                        path: rel,
+                        diff,
+                    }))
+                }
                 Err(message) => Ok(ToolOutcome::Ready(ToolResult::error(&call.id, message))),
             }
         }
@@ -680,18 +1256,106 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
             let new_str = req_str(&args, &call.name, "new_str")?;
             let replace_all = opt_bool(&args, &call.name, "replace_all")?.unwrap_or(false);
             match fs::plan_edit(&ctx.root, &path, &old_str, &new_str, replace_all) {
-                Ok((rel, diff)) => Ok(ToolOutcome::NeedsApproval(ApprovalCard::Diff {
-                    path: rel,
-                    diff,
-                })),
+                Ok((rel, diff)) => {
+                    let snapshot = SnapshotCapturer::capture(
+                        ctx.workspace_reader.as_ref(),
+                        &[rel.as_str()],
+                        super::session::now_millis(),
+                    )
+                    .map_err(|d| d.to_string())?;
+                    if snapshot
+                        .document_versions
+                        .get(&rel)
+                        .is_some_and(|doc| doc.dirty)
+                    {
+                        ctx.push_trace(ToolDecisionTrace {
+                            call_id: call.id.clone(),
+                            action_id: "edit_file".to_owned(),
+                            risk: RiskLevel::Medium,
+                            phase: DecisionPhase::Stale,
+                            explanation: build_tier1_explanation(
+                                "open_buffer_dirty",
+                                vec![DecisionPhase::Snapshotted, DecisionPhase::Stale],
+                            ),
+                        });
+                        return Ok(ToolOutcome::Ready(ToolResult::error(
+                            &call.id,
+                            format!(
+                                "cannot edit `{rel}`: open editor buffer is dirty (OpenBufferDirty)"
+                            ),
+                        )));
+                    }
+                    if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                        ctx,
+                        &snapshot,
+                        ActionClass::FileEdit,
+                        RiskLevel::Medium,
+                        &rel,
+                    ) {
+                        ctx.push_trace(ToolDecisionTrace {
+                            call_id: call.id.clone(),
+                            action_id: "edit_file".to_owned(),
+                            risk: RiskLevel::Medium,
+                            phase: DecisionPhase::Rejected,
+                            explanation: build_tier1_explanation(
+                                reason_code.clone(),
+                                vec![
+                                    DecisionPhase::Snapshotted,
+                                    DecisionPhase::PolicyEvaluated,
+                                    DecisionPhase::Rejected,
+                                ],
+                            ),
+                        });
+                        return Ok(ToolOutcome::Ready(ToolResult::error(
+                            &call.id,
+                            format!("rejected by policy ({reason_code})"),
+                        )));
+                    }
+                    let resolved = fs::resolve_rooted(&ctx.root, &rel)?;
+                    let pre = fs::capture_file_precondition(&resolved)?;
+                    let explanation = build_tier1_explanation(
+                        "file_edit_planned",
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::Routed,
+                            DecisionPhase::SchemaValidated,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::ApprovalPending,
+                        ],
+                    );
+                    ctx.push_trace(ToolDecisionTrace {
+                        call_id: call.id.clone(),
+                        action_id: "edit_file".to_owned(),
+                        risk: RiskLevel::Medium,
+                        phase: DecisionPhase::ApprovalPending,
+                        explanation: explanation.clone(),
+                    });
+                    ctx.pending_executions
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(
+                            call.id.clone(),
+                            PendingExecutionState {
+                                snapshot,
+                                precondition: Some(pre),
+                                action_id: "edit_file".to_owned(),
+                                action_class: ActionClass::FileEdit,
+                                risk: RiskLevel::Medium,
+                                target: rel.clone(),
+                                target_paths: vec![rel.clone()],
+                                explanation,
+                            },
+                        );
+                    Ok(ToolOutcome::NeedsApproval(ApprovalCard::Diff {
+                        path: rel,
+                        diff,
+                    }))
+                }
                 Err(message) => Ok(ToolOutcome::Ready(ToolResult::error(&call.id, message))),
             }
         }
         "delete_file" => {
             let path = req_str(&args, &call.name, "path")?;
-            // Validate now so a bad path is a correctable error, not a
-            // card the user must deny: §17.2 containment, then the §17.1
-            // contract (files only).
             match fs::resolve_rooted(&ctx.root, &path) {
                 Ok(resolved) => {
                     let rel = fs::rel_display(&ctx.root, &resolved);
@@ -701,9 +1365,99 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
                             &call.id,
                             format!("`{rel}` is a directory — delete_file deletes files only"),
                         ))),
-                        Ok(_) => Ok(ToolOutcome::NeedsApproval(ApprovalCard::Delete {
-                            path: rel,
-                        })),
+                        Ok(_) => {
+                            let snapshot = SnapshotCapturer::capture(
+                                ctx.workspace_reader.as_ref(),
+                                &[rel.as_str()],
+                                super::session::now_millis(),
+                            )
+                            .map_err(|d| d.to_string())?;
+                            if snapshot
+                                .document_versions
+                                .get(&rel)
+                                .is_some_and(|doc| doc.dirty)
+                            {
+                                ctx.push_trace(ToolDecisionTrace {
+                                    call_id: call.id.clone(),
+                                    action_id: "delete_file".to_owned(),
+                                    risk: RiskLevel::High,
+                                    phase: DecisionPhase::Stale,
+                                    explanation: build_tier1_explanation(
+                                        "open_buffer_dirty",
+                                        vec![DecisionPhase::Snapshotted, DecisionPhase::Stale],
+                                    ),
+                                });
+                                return Ok(ToolOutcome::Ready(ToolResult::error(
+                                    &call.id,
+                                    format!(
+                                        "cannot delete `{rel}`: open editor buffer is dirty (OpenBufferDirty)"
+                                    ),
+                                )));
+                            }
+                            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                                ctx,
+                                &snapshot,
+                                ActionClass::FileDelete,
+                                RiskLevel::High,
+                                &rel,
+                            ) {
+                                ctx.push_trace(ToolDecisionTrace {
+                                    call_id: call.id.clone(),
+                                    action_id: "delete_file".to_owned(),
+                                    risk: RiskLevel::High,
+                                    phase: DecisionPhase::Rejected,
+                                    explanation: build_tier1_explanation(
+                                        reason_code.clone(),
+                                        vec![
+                                            DecisionPhase::Snapshotted,
+                                            DecisionPhase::PolicyEvaluated,
+                                            DecisionPhase::Rejected,
+                                        ],
+                                    ),
+                                });
+                                return Ok(ToolOutcome::Ready(ToolResult::error(
+                                    &call.id,
+                                    format!("rejected by policy ({reason_code})"),
+                                )));
+                            }
+                            let pre = fs::capture_file_precondition(&resolved)?;
+                            let explanation = build_tier1_explanation(
+                                "high_risk_requires_approval",
+                                vec![
+                                    DecisionPhase::Snapshotted,
+                                    DecisionPhase::Routed,
+                                    DecisionPhase::SchemaValidated,
+                                    DecisionPhase::PolicyEvaluated,
+                                    DecisionPhase::ApprovalPending,
+                                ],
+                            );
+                            ctx.push_trace(ToolDecisionTrace {
+                                call_id: call.id.clone(),
+                                action_id: "delete_file".to_owned(),
+                                risk: RiskLevel::High,
+                                phase: DecisionPhase::ApprovalPending,
+                                explanation: explanation.clone(),
+                            });
+                            ctx.pending_executions
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .insert(
+                                    call.id.clone(),
+                                    PendingExecutionState {
+                                        snapshot,
+                                        precondition: Some(pre),
+                                        action_id: "delete_file".to_owned(),
+                                        action_class: ActionClass::FileDelete,
+                                        risk: RiskLevel::High,
+                                        target: rel.clone(),
+                                        target_paths: vec![rel.clone()],
+                                        explanation,
+                                    },
+                                );
+                            Ok(ToolOutcome::NeedsApproval(ApprovalCard::Delete {
+                                path: rel,
+                            }))
+                        }
                         Err(e) => Ok(ToolOutcome::Ready(ToolResult::error(
                             &call.id,
                             format!("cannot delete `{rel}`: {e}"),
@@ -719,16 +1473,142 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
             let command = req_str(&args, &call.name, "command")?;
             let timeout_secs = opt_u64(&args, &call.name, "timeout_secs")?;
             let cwd = opt_str(&args, &call.name, "cwd")?;
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &[],
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
             if bash::is_allowlisted(&command, &ctx.settings.auto_approve_commands) {
-                Ok(ToolOutcome::Ready(
-                    bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await,
-                ))
-            } else if !ctx.settings.workspace_trusted {
+                if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                    ctx,
+                    &snapshot,
+                    ActionClass::ReadInspect,
+                    RiskLevel::Low,
+                    &command,
+                ) {
+                    ctx.push_trace(ToolDecisionTrace {
+                        call_id: call.id.clone(),
+                        action_id: "bash_allowlisted".to_owned(),
+                        risk: RiskLevel::Low,
+                        phase: DecisionPhase::Rejected,
+                        explanation: build_tier1_explanation(
+                            reason_code.clone(),
+                            vec![
+                                DecisionPhase::Snapshotted,
+                                DecisionPhase::PolicyEvaluated,
+                                DecisionPhase::Rejected,
+                            ],
+                        ),
+                    });
+                    return Ok(ToolOutcome::Ready(ToolResult::error(
+                        &call.id,
+                        format!("rejected by policy ({reason_code})"),
+                    )));
+                }
+                let res =
+                    bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await;
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "bash_allowlisted".to_owned(),
+                    risk: RiskLevel::Low,
+                    phase: if res.ok {
+                        DecisionPhase::Verified
+                    } else {
+                        DecisionPhase::Failed
+                    },
+                    explanation: build_tier1_explanation(
+                        "allowlisted_command_auto",
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::Routed,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::Executed,
+                            DecisionPhase::Verified,
+                        ],
+                    ),
+                });
+                Ok(ToolOutcome::Ready(res))
+            } else if !ctx.workspace_reader.workspace_trusted() || !ctx.settings.workspace_trusted
+            {
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "bash_gated".to_owned(),
+                    risk: RiskLevel::High,
+                    phase: DecisionPhase::Rejected,
+                    explanation: build_tier1_explanation(
+                        "workspace_untrusted",
+                        vec![
+                            DecisionPhase::Snapshotted,
+                            DecisionPhase::PolicyEvaluated,
+                            DecisionPhase::Rejected,
+                        ],
+                    ),
+                });
                 Ok(ToolOutcome::Ready(ToolResult::error(
                     &call.id,
                     "workspace is untrusted; trust this workspace before running risky commands",
                 )))
             } else {
+                if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                    ctx,
+                    &snapshot,
+                    ActionClass::CommandGated,
+                    RiskLevel::High,
+                    &command,
+                ) {
+                    ctx.push_trace(ToolDecisionTrace {
+                        call_id: call.id.clone(),
+                        action_id: "bash_gated".to_owned(),
+                        risk: RiskLevel::High,
+                        phase: DecisionPhase::Rejected,
+                        explanation: build_tier1_explanation(
+                            reason_code.clone(),
+                            vec![
+                                DecisionPhase::Snapshotted,
+                                DecisionPhase::PolicyEvaluated,
+                                DecisionPhase::Rejected,
+                            ],
+                        ),
+                    });
+                    return Ok(ToolOutcome::Ready(ToolResult::error(
+                        &call.id,
+                        format!("rejected by policy ({reason_code})"),
+                    )));
+                }
+                let explanation = build_tier1_explanation(
+                    "high_risk_requires_approval",
+                    vec![
+                        DecisionPhase::Snapshotted,
+                        DecisionPhase::Routed,
+                        DecisionPhase::SchemaValidated,
+                        DecisionPhase::PolicyEvaluated,
+                        DecisionPhase::ApprovalPending,
+                    ],
+                );
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "bash_gated".to_owned(),
+                    risk: RiskLevel::High,
+                    phase: DecisionPhase::ApprovalPending,
+                    explanation: explanation.clone(),
+                });
+                ctx.pending_executions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(
+                        call.id.clone(),
+                        PendingExecutionState {
+                            snapshot,
+                            precondition: None,
+                            action_id: "bash_gated".to_owned(),
+                            action_class: ActionClass::CommandGated,
+                            risk: RiskLevel::High,
+                            target: command.clone(),
+                            target_paths: Vec::new(),
+                            explanation,
+                        },
+                    );
                 Ok(ToolOutcome::NeedsApproval(ApprovalCard::Command {
                     command,
                 }))
@@ -756,6 +1636,55 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
         // card the user must decode and deny -----------------------------
         "run_workflow" => {
             let plan = parse_workflow(&args, &call.name)?;
+            let snapshot = SnapshotCapturer::capture(
+                ctx.workspace_reader.as_ref(),
+                &[],
+                super::session::now_millis(),
+            )
+            .map_err(|d| d.to_string())?;
+            if let PolicyVerdict::Reject { reason_code } = evaluate_ctx_policy(
+                ctx,
+                &snapshot,
+                ActionClass::Workflow,
+                RiskLevel::High,
+                &plan.name,
+            ) {
+                return Ok(ToolOutcome::Ready(ToolResult::error(
+                    &call.id,
+                    format!("rejected by policy ({reason_code})"),
+                )));
+            }
+            let explanation = build_tier1_explanation(
+                "high_risk_requires_approval",
+                vec![
+                    DecisionPhase::Snapshotted,
+                    DecisionPhase::PolicyEvaluated,
+                    DecisionPhase::ApprovalPending,
+                ],
+            );
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "run_workflow".to_owned(),
+                risk: RiskLevel::High,
+                phase: DecisionPhase::ApprovalPending,
+                explanation: explanation.clone(),
+            });
+            ctx.pending_executions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(
+                    call.id.clone(),
+                    PendingExecutionState {
+                        snapshot,
+                        precondition: None,
+                        action_id: "run_workflow".to_owned(),
+                        action_class: ActionClass::Workflow,
+                        risk: RiskLevel::High,
+                        target: plan.name.clone(),
+                        target_paths: Vec::new(),
+                        explanation,
+                    },
+                );
             Ok(ToolOutcome::NeedsApproval(ApprovalCard::Workflow {
                 name: plan.name,
                 script: plan.script,
@@ -984,6 +1913,22 @@ async fn route(ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, String
 /// else is an error result (read tools already ran, and a card was never
 /// built for them).
 pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
+    if ctx.cancel_token.is_cancelled() {
+        ctx.push_trace(ToolDecisionTrace {
+            call_id: call.id.clone(),
+            action_id: call.name.clone(),
+            risk: RiskLevel::High,
+            phase: DecisionPhase::Cancelled,
+            explanation: build_tier1_explanation(
+                "cancelled_before_execution",
+                vec![DecisionPhase::Cancelled],
+            ),
+        });
+        return ToolResult::error(
+            &call.id,
+            "action cancelled: workspace trust revoked or turn stopped",
+        );
+    }
     // §19.3: a child policy is structural on both router entry points.
     if let Some(policy) = ctx.policy {
         if !policy.allows(&call.name) {
@@ -996,10 +1941,49 @@ pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
     if plan::is_planning(&ctx.plan) && plan::is_side_effecting_tool(&call.name) {
         return ToolResult::error(&call.id, plan::plan_mode_rejection(&call.name));
     }
+    let pending = ctx
+        .pending_executions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&call.id);
+    if let Some(ref state) = pending {
+        let target_refs: Vec<&str> = state.target_paths.iter().map(String::as_str).collect();
+        let require_clean = !state.target_paths.is_empty();
+        if let Err(drift) = SnapshotRechecker::recheck(
+            &state.snapshot,
+            ctx.workspace_reader.as_ref(),
+            &target_refs,
+            require_clean,
+        ) {
+            let phase = match drift {
+                skarn_decision::DriftReason::TrustDrifted { .. } => DecisionPhase::Rejected,
+                _ => DecisionPhase::Stale,
+            };
+            let mut path = state.explanation.fsm_path.clone();
+            path.push(DecisionPhase::SnapshotRechecked);
+            path.push(phase);
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: state.action_id.clone(),
+                risk: state.risk,
+                phase,
+                explanation: RoutingExplanation {
+                    reason_code: format!("snapshot_drifted: {drift}"),
+                    fsm_path: path,
+                    ..state.explanation.clone()
+                },
+            });
+            return ToolResult::error(
+                &call.id,
+                format!("snapshot drifted before execution: {drift}"),
+            );
+        }
+    }
     let args = match parse_arguments(&call.name, &call.arguments) {
         Ok(args) => args,
         Err(message) => return ToolResult::error(&call.id, message),
     };
+    let write_backup = ctx.checkpoint_store.is_none();
     match call.name.as_str() {
         "write_file" => {
             let path = match req_str(&args, &call.name, "path") {
@@ -1010,7 +1994,44 @@ pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
                 Ok(c) => c,
                 Err(m) => return ToolResult::error(&call.id, m),
             };
-            fs::apply_write(&ctx.root, &call.id, &path, &content)
+            let cas = fs::apply_write_cas(
+                &ctx.root,
+                &call.id,
+                &path,
+                &content,
+                pending.as_ref().and_then(|s| s.precondition.as_ref()),
+                write_backup,
+            );
+            if let Some(change) = cas.file_change {
+                record_turn_change(&ctx.turn_changes, change);
+            }
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "write_file".to_owned(),
+                risk: RiskLevel::Medium,
+                phase: if cas.tool_result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    if cas.tool_result.ok {
+                        "verified_execution"
+                    } else {
+                        "cas_execution_failed"
+                    },
+                    vec![
+                        DecisionPhase::SnapshotRechecked,
+                        DecisionPhase::Executed,
+                        if cas.tool_result.ok {
+                            DecisionPhase::Verified
+                        } else {
+                            DecisionPhase::Failed
+                        },
+                    ],
+                ),
+            });
+            cas.tool_result
         }
         "edit_file" => {
             let path = match req_str(&args, &call.name, "path") {
@@ -1029,23 +2050,107 @@ pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
                 .ok()
                 .flatten()
                 .unwrap_or(false);
-            fs::apply_edit(&ctx.root, &call.id, &path, &old_str, &new_str, replace_all)
+            let cas = fs::apply_edit_cas(
+                &ctx.root,
+                &call.id,
+                &path,
+                &old_str,
+                &new_str,
+                replace_all,
+                pending.as_ref().and_then(|s| s.precondition.as_ref()),
+                write_backup,
+            );
+            if let Some(change) = cas.file_change {
+                record_turn_change(&ctx.turn_changes, change);
+            }
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "edit_file".to_owned(),
+                risk: RiskLevel::Medium,
+                phase: if cas.tool_result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    if cas.tool_result.ok {
+                        "verified_execution"
+                    } else {
+                        "cas_execution_failed"
+                    },
+                    vec![
+                        DecisionPhase::SnapshotRechecked,
+                        DecisionPhase::Executed,
+                        if cas.tool_result.ok {
+                            DecisionPhase::Verified
+                        } else {
+                            DecisionPhase::Failed
+                        },
+                    ],
+                ),
+            });
+            cas.tool_result
         }
         "delete_file" => {
             let path = match req_str(&args, &call.name, "path") {
                 Ok(p) => p,
                 Err(m) => return ToolResult::error(&call.id, m),
             };
-            fs::apply_delete(&ctx.root, &call.id, &path)
+            let cas = fs::apply_delete_cas(
+                &ctx.root,
+                &call.id,
+                &path,
+                pending.as_ref().and_then(|s| s.precondition.as_ref()),
+            );
+            if let Some(change) = cas.file_change {
+                record_turn_change(&ctx.turn_changes, change);
+            }
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "delete_file".to_owned(),
+                risk: RiskLevel::High,
+                phase: if cas.tool_result.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    if cas.tool_result.ok {
+                        "verified_execution"
+                    } else {
+                        "cas_execution_failed"
+                    },
+                    vec![
+                        DecisionPhase::SnapshotRechecked,
+                        DecisionPhase::Executed,
+                        if cas.tool_result.ok {
+                            DecisionPhase::Verified
+                        } else {
+                            DecisionPhase::Failed
+                        },
+                    ],
+                ),
+            });
+            cas.tool_result
         }
         "bash" => {
             let command = match req_str(&args, &call.name, "command") {
                 Ok(c) => c,
                 Err(m) => return ToolResult::error(&call.id, m),
             };
-            if !ctx.settings.workspace_trusted
+            if (!ctx.workspace_reader.workspace_trusted() || !ctx.settings.workspace_trusted)
                 && !bash::is_allowlisted(&command, &ctx.settings.auto_approve_commands)
             {
+                ctx.push_trace(ToolDecisionTrace {
+                    call_id: call.id.clone(),
+                    action_id: "bash_gated".to_owned(),
+                    risk: RiskLevel::High,
+                    phase: DecisionPhase::Rejected,
+                    explanation: build_tier1_explanation(
+                        "workspace_untrusted",
+                        vec![DecisionPhase::SnapshotRechecked, DecisionPhase::Rejected],
+                    ),
+                });
                 return ToolResult::error(
                     &call.id,
                     "workspace is untrusted; trust this workspace before running risky commands",
@@ -1053,7 +2158,34 @@ pub async fn execute_approved(ctx: &ToolContext, call: ToolCall) -> ToolResult {
             }
             let timeout_secs = opt_u64(&args, &call.name, "timeout_secs").ok().flatten();
             let cwd = opt_str(&args, &call.name, "cwd").ok().flatten();
-            bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await
+            let res = bash::run_bash(ctx, &call.id, &command, timeout_secs, cwd.as_deref()).await;
+            ctx.push_trace(ToolDecisionTrace {
+                call_id: call.id.clone(),
+                action_id: "bash_gated".to_owned(),
+                risk: RiskLevel::High,
+                phase: if res.ok {
+                    DecisionPhase::Verified
+                } else {
+                    DecisionPhase::Failed
+                },
+                explanation: build_tier1_explanation(
+                    if res.ok {
+                        "verified_execution"
+                    } else {
+                        "command_execution_failed"
+                    },
+                    vec![
+                        DecisionPhase::SnapshotRechecked,
+                        DecisionPhase::Executed,
+                        if res.ok {
+                            DecisionPhase::Verified
+                        } else {
+                            DecisionPhase::Failed
+                        },
+                    ],
+                ),
+            });
+            res
         }
         // §18.1: re-validate the card payload and acknowledge confirmation.
         // The desktop starts the engine separately; never run a script here.

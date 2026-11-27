@@ -106,6 +106,14 @@ impl AgentsProjection {
                     .insert(dto.approval_id.clone(), dto.clone());
                 None
             }
+            QuestionCountdownUpdated(dto) => {
+                if dto.timeout.timed_out {
+                    session.approvals.remove(&dto.approval_id);
+                } else if let Some(approval) = session.approvals.get_mut(&dto.approval_id) {
+                    approval.question_timeout = Some(dto.timeout.clone());
+                }
+                None
+            }
             SubagentActivity(activity) => {
                 let child_id = match activity {
                     SubagentActivityDto::Started { child_id, .. }

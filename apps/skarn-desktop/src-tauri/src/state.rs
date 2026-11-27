@@ -76,7 +76,7 @@ fn reveal_in_file_explorer(path: &std::path::Path) -> Result<(), ProtocolErrorDt
 /// The stable id for a workspace root: `ws_` + FNV-1a of the canonical path,
 /// so a restart re-attaches to the same identity (and the frontend's envelope
 /// context keeps matching).
-fn workspace_id_for(root: &std::path::Path) -> WorkspaceId {
+pub(crate) fn workspace_id_for(root: &std::path::Path) -> WorkspaceId {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in root.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
@@ -936,7 +936,10 @@ fn workflow_has_ambiguous_command(journal: &skarn_workflow::journal::LoadedJourn
 
 /// The wire view of the settings the web shell consumes. Kept in one place so
 /// the startup bootstrap and a persisted `SettingsUpdate` cannot drift.
-fn settings_view(settings: &skarn_settings::Settings) -> SettingsViewDto {
+fn settings_view(
+    settings: &skarn_settings::Settings,
+    trust: &crate::workspace::LiveTrustState,
+) -> SettingsViewDto {
     let theme = if settings.ui.theme == "selora-dark" { // skarn-v1-migration-compat
         "skarn-dark".to_owned()
     } else {
@@ -956,7 +959,58 @@ fn settings_view(settings: &skarn_settings::Settings) -> SettingsViewDto {
         editor_word_wrap: settings.editor.word_wrap,
         check_for_updates: settings.ui.check_for_updates,
         disabled_providers: known_disabled_providers(&settings.skarn.disabled_providers),
-        workspace_trusted: settings.agent.workspace_trusted,
+        workspace_trusted: trust.is_trusted(),
+        local_only: trust.global_local_only(),
+        workspace_local_only: trust.workspace_local_only(),
+        effective_local_only: trust.effective_local_only(),
+    }
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct WorkspaceOverridesFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_only: Option<bool>,
+}
+
+fn workspace_override_path(app_data_dir: &std::path::Path, workspace_id: &WorkspaceId) -> PathBuf {
+    app_data_dir
+        .join("workspaces")
+        .join(format!("{}.json", workspace_id.as_str()))
+}
+
+fn load_workspace_local_only(
+    app_data_dir: &std::path::Path,
+    workspace_id: &WorkspaceId,
+) -> Option<bool> {
+    let path = workspace_override_path(app_data_dir, workspace_id);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<WorkspaceOverridesFile>(&bytes)
+        .ok()
+        .and_then(|parsed| parsed.local_only)
+}
+
+fn save_workspace_local_only(
+    app_data_dir: &std::path::Path,
+    workspace_id: &WorkspaceId,
+    local_only: Option<bool>,
+) -> Result<(), String> {
+    let path = workspace_override_path(app_data_dir, workspace_id);
+    match local_only {
+        Some(value) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let payload = serde_json::to_vec_pretty(&WorkspaceOverridesFile {
+                local_only: Some(value),
+            })
+            .map_err(|e| e.to_string())?;
+            std::fs::write(&path, payload).map_err(|e| e.to_string())
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        },
     }
 }
 
@@ -2074,11 +2128,9 @@ pub struct DesktopState {
     layout_store: Arc<LayoutStore>,
     /// The Z3 session engine (chat + agent turns) behind the agent dock.
     sessions: Arc<SessionEngine>,
-    /// The workspace-trust value the session engine was constructed with.
-    /// `agent.workspace_trusted` is read once at startup, so a live settings
-    /// change must be reflected by refusing to start/park-approve an agent
-    /// turn until Selora restarts (fail closed, never stale-allow).
-    engine_workspace_trusted: bool,
+    /// Stage 3: live workspace trust & privacy state shared with `SessionEngine`
+    /// and `DesktopWorkspaceReader`, eliminating the startup-only trust latch.
+    trust: Arc<crate::workspace::LiveTrustState>,
     /// Phase Z4: the open workspace (file tree, buffers, Git). None until
     /// the folder picker succeeds; every workspace command answers the typed
     /// no_workspace error while it is unset.
@@ -2310,27 +2362,136 @@ impl DesktopState {
         let core_instance_id =
             CoreInstanceId::new(Uuid::new_v4().to_string()).expect("uuid is valid");
         let lsp_paths = lsp_server_paths(&settings);
+        let log = Arc::new(EventLog::new(core_instance_id));
+        let workspace: Arc<Mutex<Option<Workspace>>> = Arc::new(Mutex::new(None));
+        let workspace_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let lsp: Arc<Mutex<Option<LspBridge>>> = Arc::new(Mutex::new(None));
+        let lsp_epoch = Arc::new(AtomicU64::new(0));
+        let sessions = Arc::new(SessionEngine::new(EngineConfig {
+            base_url: settings.skarn.base_url.clone(),
+            active_model: settings.skarn.active_model.clone(),
+            agent: (*settings.agent).clone(),
+            key_source,
+        }));
+        let trust = sessions.live_trust();
+
+        // Hook post-mutation buffer refresh & LSP reload from SessionEngine / Undo / Reapply.
+        let refresh_workspace = Arc::clone(&workspace);
+        let refresh_root = Arc::clone(&workspace_root);
+        let refresh_lsp = Arc::clone(&lsp);
+        let refresh_lsp_paths = lsp_paths.clone();
+        let refresh_lsp_epoch = Arc::clone(&lsp_epoch);
+        let refresh_log = Arc::clone(&log);
+        let refresh_hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let Some(expected_root) = refresh_root
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+            else {
+                return;
+            };
+            let outcome = {
+                let guard = refresh_workspace
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                let Some(open) = guard.as_ref() else {
+                    return;
+                };
+                if open.root() != expected_root.as_path() {
+                    return;
+                }
+                open.refresh_clean_buffers()
+            };
+            let started_epoch = refresh_lsp_epoch.load(Ordering::SeqCst);
+            for snapshot in outcome.updated {
+                let abs = expected_root.join(snapshot.path.as_str());
+                let emit_log = Arc::clone(&refresh_log);
+                let emit_epoch = Arc::clone(&refresh_lsp_epoch);
+                let emit: crate::lsp_bridge::Emit = Arc::new(move |event| {
+                    if emit_epoch.load(Ordering::SeqCst) == started_epoch {
+                        emit_log.push(event, None, None);
+                    }
+                });
+                let mut guard = refresh_lsp
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if refresh_lsp_epoch.load(Ordering::SeqCst) == started_epoch {
+                    if guard.is_none() {
+                        *guard = Some(LspBridge::start_with_paths(
+                            expected_root.clone(),
+                            emit,
+                            refresh_lsp_paths.clone(),
+                        ));
+                    }
+                    if let Some(bridge) = guard.as_ref() {
+                        bridge.reload(abs, snapshot.text.clone());
+                    }
+                }
+                drop(guard);
+                refresh_log.push(FrontendEvent::BufferSnapshot(snapshot), None, None);
+            }
+            for cleared in outcome.cleared {
+                refresh_log.push(FrontendEvent::BufferConflictCleared(cleared), None, None);
+            }
+            for skipped in &outcome.skipped {
+                let abs = expected_root.join(skipped.path.as_str());
+                let guard = refresh_lsp
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if let Some(bridge) = guard.as_ref() {
+                    bridge.invalidate_diagnostics(&abs);
+                }
+            }
+            for conflict in outcome.conflicts {
+                refresh_log.push(FrontendEvent::BufferConflict(conflict), None, None);
+            }
+        });
+
+        let grant_store = Arc::clone(&layout_store);
+        let sync_grants_hook: Arc<dyn Fn(&[skarn_decision::ScopedGrantEntry]) + Send + Sync> =
+            Arc::new(move |entries| {
+                let persisted: Vec<skarn_decision::ScopedGrantEntry> = entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.decision,
+                            skarn_decision::GrantDecision::AllowProject
+                                | skarn_decision::GrantDecision::DenyProject
+                        ) && !(entry.decision == skarn_decision::GrantDecision::AllowProject
+                            && entry.max_risk >= skarn_decision::RiskLevel::High)
+                    })
+                    .cloned()
+                    .collect();
+                if let Ok(mut current) = grant_store.load_settings() {
+                    current.agent.scoped_grants = persisted;
+                    let _ = grant_store.save_settings(&current);
+                }
+            });
+
+        sessions.configure_desktop(
+            Arc::clone(&trust),
+            Arc::clone(&workspace),
+            hot_exit_dir.clone(),
+            refresh_hook,
+            sync_grants_hook,
+        );
+
         Self {
-            log: Arc::new(EventLog::new(core_instance_id)),
-            settings: Arc::new(Mutex::new(settings_view(&settings))),
+            log,
+            settings: Arc::new(Mutex::new(settings_view(&settings, &trust))),
             // Ã‚Â§4: the bootstrap reflects the persisted layout; Ã‚Â§4.3's
             // sanitization runs on load.
             layout: Arc::new(Mutex::new(LayoutStore::load_layout(&settings))),
             layout_store,
-            sessions: Arc::new(SessionEngine::new(EngineConfig {
-                base_url: settings.skarn.base_url.clone(),
-                active_model: settings.skarn.active_model.clone(),
-                agent: (*settings.agent).clone(),
-                key_source,
-            })),
-            engine_workspace_trusted: settings.agent.workspace_trusted,
-            workspace: Arc::new(Mutex::new(None)),
-            workspace_root: Arc::new(Mutex::new(None)),
+            sessions,
+            trust,
+            workspace,
+            workspace_root,
             search_epoch: Arc::new(AtomicU64::new(0)),
             active_buffer: Arc::new(Mutex::new(None)),
-            lsp: Arc::new(Mutex::new(None)),
+            lsp,
             lsp_paths,
-            lsp_epoch: Arc::new(AtomicU64::new(0)),
+            lsp_epoch,
             workflow_runs: Arc::new(Mutex::new(HashMap::new())),
             workflow_hosts: Arc::new(Mutex::new(
                 Arc::new(production_workflow_host) as WorkflowHostFactory
@@ -2365,6 +2526,7 @@ impl DesktopState {
     /// Point this state's hot-exit store at an isolated directory (tests).
     #[cfg(test)]
     fn set_hot_exit_dir(&self, dir: PathBuf) {
+        self.sessions.set_app_data_dir(dir.clone());
         *self
             .hot_exit_dir
             .lock()
@@ -2692,9 +2854,19 @@ impl DesktopState {
         // The old root's servers must die before the new workspace becomes
         // visible; `reset_lsp` also invalidates any event still in flight.
         self.reset_lsp();
-        self.sessions()
-            .set_workspace_root(Some(workspace.root().to_path_buf()));
         let root = workspace.root().to_path_buf();
+        let ws_id = workspace_id_for(&root);
+        let ws_local_only = load_workspace_local_only(&self.hot_exit_app_data_dir(), &ws_id);
+        self.trust.set_workspace_local_only(ws_local_only);
+        {
+            let mut view = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            view.workspace_local_only = ws_local_only;
+            view.effective_local_only = self.trust.effective_local_only();
+        }
+        self.sessions().set_workspace_root(Some(root.clone()));
         *self
             .workspace
             .lock()
@@ -2722,6 +2894,15 @@ impl DesktopState {
         self.hot_exit_save_sync();
         self.terminals.close_all();
         self.reset_lsp();
+        self.trust.set_workspace_local_only(None);
+        {
+            let mut view = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            view.workspace_local_only = None;
+            view.effective_local_only = self.trust.effective_local_only();
+        }
         self.sessions().set_workspace_root(None);
         *self
             .workspace
@@ -3235,6 +3416,9 @@ impl DesktopState {
             && patch.check_for_updates.is_none()
             && patch.disabled_providers.is_none()
             && patch.workspace_trusted.is_none()
+            && patch.local_only.is_none()
+            && patch.workspace_local_only.is_none()
+            && patch.clear_workspace_local_only.is_none()
         {
             return Err(ProtocolErrorDto {
                 code: "invalid_settings_patch".into(),
@@ -3365,10 +3549,50 @@ impl DesktopState {
         if let Some(check) = patch.check_for_updates {
             settings.ui.check_for_updates = check;
         }
+        if patch.workspace_local_only.is_some() || patch.clear_workspace_local_only == Some(true) {
+            if self.current_workspace_id().is_none() {
+                return Err(Self::no_workspace_error());
+            }
+        }
+        let mut trust_changed_to = None;
         if let Some(trusted) = patch.workspace_trusted {
             settings.agent.workspace_trusted = trusted;
-            self.sessions
-                .set_queue_allowed(trusted == self.engine_workspace_trusted);
+            self.trust.set_trusted(trusted);
+            self.sessions.set_queue_allowed(true);
+            if !trusted {
+                self.sessions.revoke_live_trust();
+            }
+            trust_changed_to = Some(trusted);
+        }
+        if let Some(local_only) = patch.local_only {
+            settings.agent.local_only = local_only;
+            self.trust.set_global_local_only(local_only);
+        }
+        if patch.clear_workspace_local_only == Some(true) {
+            if let Some(ws_id) = self.current_workspace_id() {
+                save_workspace_local_only(&self.hot_exit_app_data_dir(), &ws_id, None).map_err(
+                    |error| ProtocolErrorDto {
+                        code: "settings_save_failed".into(),
+                        message: format!("Failed to save workspace override: {error}"),
+                        retryable: true,
+                    },
+                )?;
+            }
+            self.trust.set_workspace_local_only(None);
+        } else if let Some(ws_local_only) = patch.workspace_local_only {
+            if let Some(ws_id) = self.current_workspace_id() {
+                save_workspace_local_only(
+                    &self.hot_exit_app_data_dir(),
+                    &ws_id,
+                    Some(ws_local_only),
+                )
+                .map_err(|error| ProtocolErrorDto {
+                    code: "settings_save_failed".into(),
+                    message: format!("Failed to save workspace override: {error}"),
+                    retryable: true,
+                })?;
+            }
+            self.trust.set_workspace_local_only(Some(ws_local_only));
         }
         if let Some(disabled) = disabled_providers {
             settings.skarn.disabled_providers = disabled;
@@ -3384,7 +3608,18 @@ impl DesktopState {
         *self
             .settings
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = settings_view(&settings);
+            .unwrap_or_else(|poison| poison.into_inner()) = settings_view(&settings, &self.trust);
+
+        if let Some(trusted) = trust_changed_to {
+            if let Some(root) = self.workspace_root_path() {
+                let rules_dto = self.sessions.load_and_cache_rules(&root, trusted);
+                self.record_event(
+                    app,
+                    FrontendEvent::RulesLoaded(rules_dto),
+                    request_id.clone(),
+                );
+            }
+        }
 
         let snapshot = self.bootstrap();
         self.record_event(
@@ -3393,32 +3628,6 @@ impl DesktopState {
             request_id,
         );
         Ok(snapshot)
-    }
-
-    /// Refuse to start or approve an agent turn when the live trust setting no
-    /// longer matches the value the session engine captured at startup.
-    ///
-    /// Trust is intentionally construction-time (the engine owns the tool
-    /// settings for the whole process), so a restart is the only way to apply
-    /// a change. Failing closed here means a revocation can never leave a
-    /// stale `workspace_trusted: true` engine running risky commands, and a
-    /// grant can never look effective while the engine still rejects commands.
-    fn ensure_agent_trust_current(&self) -> Result<(), ProtocolErrorDto> {
-        let live = self
-            .settings
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .workspace_trusted;
-        if live == self.engine_workspace_trusted {
-            return Ok(());
-        }
-        Err(ProtocolErrorDto {
-            code: "workspace_trust_restart_required".into(),
-            message:
-                "Workspace trust changed. Restart Skarn to apply it before running the agent."
-                    .into(),
-            retryable: false,
-        })
     }
 
     pub fn bootstrap(&self) -> BootstrapState {
@@ -3532,6 +3741,9 @@ impl DesktopState {
                 editor: true,
                 later_slices: vec!["lsp-bridge".into(), "workspace-trust".into()],
             },
+            scoped_grants: self.sessions.scoped_grants_dto(),
+            rules_in_effect: self.sessions.rules_in_effect_dto(),
+            turn_checkpoints: self.sessions.turn_checkpoints_dto(),
         }
     }
     pub(crate) fn agents_snapshot(&self) -> skarn_protocol::AgentsSnapshotDto {
@@ -3570,6 +3782,10 @@ impl DesktopState {
                 | FrontendCommand::ClearAgentQueue { .. }
                 | FrontendCommand::ResumeAgentQueue { .. }
                 | FrontendCommand::SetAgentAutoApprove { .. }
+                | FrontendCommand::UndoAgentTurn { .. }
+                | FrontendCommand::ReapplyAgentTurn { .. }
+                | FrontendCommand::RevokeScopedGrant { .. }
+                | FrontendCommand::SetQuestionCountdown { .. }
         );
         if !action {
             return self.dispatch_result_once(app, envelope);
@@ -3726,7 +3942,6 @@ impl DesktopState {
                 request_id: command_request,
                 request: payload,
             } => {
-                self.ensure_agent_trust_current()?;
                 self.sessions.send_agent(
                     self.event_log(),
                     app.clone(),
@@ -3742,12 +3957,6 @@ impl DesktopState {
                 decision,
                 resolution,
             } => {
-                if matches!(
-                    decision,
-                    DecisionDto::Approve | DecisionDto::ApproveAllThisTurn
-                ) {
-                    self.ensure_agent_trust_current()?;
-                }
                 self.sessions.agent_decision_with_resolution(
                     &command_request,
                     &approval_id,
@@ -3782,7 +3991,6 @@ impl DesktopState {
                 request_id: queued_id,
                 request,
             } => {
-                self.ensure_agent_trust_current()?;
                 self.sessions.queue_agent(
                     self.event_log(),
                     app.clone(),
@@ -3839,7 +4047,6 @@ impl DesktopState {
                 Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::ResumeAgentQueue { session_id } => {
-                self.ensure_agent_trust_current()?;
                 self.sessions.mutate_queue(
                     &self.log,
                     app,
@@ -3864,7 +4071,6 @@ impl DesktopState {
                 session_id,
                 message_id,
             } => {
-                self.ensure_agent_trust_current()?;
                 self.sessions.retry_message(
                     self.event_log(),
                     app.clone(),
@@ -3894,6 +4100,88 @@ impl DesktopState {
             } => {
                 self.sessions.set_auto_approve(&session_id, enabled)?;
                 Ok(CommandResultDto::Snapshot(Box::new(self.bootstrap())))
+            }
+            FrontendCommand::UndoAgentTurn {
+                session_id,
+                turn_id,
+            } => match self.sessions.undo_or_reapply_turn(&session_id, &turn_id, true) {
+                Ok(summary) => {
+                    self.record_event(
+                        app,
+                        FrontendEvent::TurnCheckpointUpdated(summary),
+                        Some(request_id),
+                    );
+                    Ok(CommandResultDto::Ack(self.command_ack()))
+                }
+                Err((maybe_summary, err)) => {
+                    if let Some(summary) = maybe_summary {
+                        self.record_event(
+                            app,
+                            FrontendEvent::TurnCheckpointUpdated(summary),
+                            Some(request_id),
+                        );
+                    }
+                    Err(err)
+                }
+            },
+            FrontendCommand::ReapplyAgentTurn {
+                session_id,
+                turn_id,
+            } => match self
+                .sessions
+                .undo_or_reapply_turn(&session_id, &turn_id, false)
+            {
+                Ok(summary) => {
+                    self.record_event(
+                        app,
+                        FrontendEvent::TurnCheckpointUpdated(summary),
+                        Some(request_id),
+                    );
+                    Ok(CommandResultDto::Ack(self.command_ack()))
+                }
+                Err((maybe_summary, err)) => {
+                    if let Some(summary) = maybe_summary {
+                        self.record_event(
+                            app,
+                            FrontendEvent::TurnCheckpointUpdated(summary),
+                            Some(request_id),
+                        );
+                    }
+                    Err(err)
+                }
+            },
+            FrontendCommand::RevokeScopedGrant {
+                session_id,
+                action_class,
+                target_pattern,
+            } => {
+                let grants = self
+                    .sessions
+                    .revoke_scoped_grant(action_class, &target_pattern);
+                self.record_event(
+                    app,
+                    FrontendEvent::ScopedGrantsChanged(skarn_protocol::ScopedGrantsChangedDto {
+                        session_id,
+                        grants,
+                    }),
+                    Some(request_id.clone()),
+                );
+                let snapshot = self.bootstrap();
+                self.record_event(
+                    app,
+                    FrontendEvent::BootstrapState(Box::new(snapshot)),
+                    Some(request_id),
+                );
+                Ok(CommandResultDto::Ack(self.command_ack()))
+            }
+            FrontendCommand::SetQuestionCountdown {
+                request_id: question_request,
+                approval_id,
+                paused,
+            } => {
+                self.sessions
+                    .set_question_countdown_paused(&question_request, &approval_id, paused)?;
+                Ok(CommandResultDto::Ack(self.command_ack()))
             }
             FrontendCommand::ToggleSurface { surface } => {
                 // Ã‚Â§2.2: the region a surface acts on is determined in Rust,
@@ -5941,17 +6229,15 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_workspace_trust_blocks_agent_turns_until_restart() {
+    fn workspace_trust_updates_live_without_restart() {
         let app = mock_app_handle();
-        let path = temp_settings_path("settings-trust-restart-guard");
+        let path = temp_settings_path("settings-trust-live-update");
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, br#"{"_v":1,"agent":{"workspace_trusted":true}}"#)
             .expect("write trusted settings");
         let state = DesktopState::from_settings_path(path.clone());
-        assert!(
-            state.ensure_agent_trust_current().is_ok(),
-            "the engine and settings agree at startup"
-        );
+        assert!(state.trust.is_trusted());
+        let epoch1 = state.trust.epoch();
 
         state
             .dispatch(
@@ -5966,17 +6252,28 @@ mod tests {
                     },
                 ),
             )
-            .expect("revocation persists");
+            .expect("revocation persists live without restart");
 
-        let error = state
-            .ensure_agent_trust_current()
-            .expect_err("a stale trusted engine must not run the agent");
-        assert_eq!(error.code, "workspace_trust_restart_required");
-        assert!(!error.retryable);
+        assert!(!state.trust.is_trusted());
+        assert!(state.trust.epoch() > epoch1);
+        assert!(!state.bootstrap().settings.workspace_trusted);
 
-        // A fresh state reads the revoked value and agrees again.
-        let reopened = DesktopState::from_settings_path(path.clone());
-        assert!(reopened.ensure_agent_trust_current().is_ok());
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: SettingsPatchDto {
+                            workspace_trusted: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("re-trust applies live without restart");
+        assert!(state.trust.is_trusted());
+        assert!(state.bootstrap().settings.workspace_trusted);
 
         let _ = std::fs::remove_file(&path);
     }

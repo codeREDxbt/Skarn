@@ -768,6 +768,7 @@ pub fn spawn_agent(
         // The Brave key maps into the router's `skip_serializing` field —
         // it is never persisted back out and never logged (§17.2).
         brave_api_key: map_brave_key(request.agent.brave_search_api_key.as_deref()),
+        local_only: request.agent.local_only,
     };
     let tools = skarn_ai::RouterToolRunner::new(skarn_ai::ToolContext::new(
         workspace_root,
@@ -810,6 +811,10 @@ pub fn spawn_agent(
                 | skarn_ai::AgentEvent::TodosChanged(_) => continue,
                 skarn_ai::AgentEvent::Compacted(_) => continue,
                 skarn_ai::AgentEvent::CompactionFailed(_) => continue,
+                skarn_ai::AgentEvent::DecisionTrace(_)
+                | skarn_ai::AgentEvent::QuestionCountdown { .. }
+                | skarn_ai::AgentEvent::ScopedGrantsUpdated(_)
+                | skarn_ai::AgentEvent::TurnCheckpointRecorded(_) => continue,
                 skarn_ai::AgentEvent::TurnDone(report) => {
                     done_seen = true;
                     AppMessage::AgentTurnDone(

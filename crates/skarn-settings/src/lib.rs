@@ -42,3 +42,4 @@ pub use settings::{
 /// error type of [`Settings::load`] / [`Settings::save`] without taking a
 /// direct dependency on skarn-core.
 pub use skarn_core::SkarnError;
+pub use skarn_decision::ScopedGrantEntry;

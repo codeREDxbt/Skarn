@@ -51,21 +51,32 @@ use skarn_ai::{
     ToolProbeOutcome, ToolRunner, ToolSpec, TranscriptEntry, TurnCaps, TurnInput,
 };
 use skarn_core::SkarnError;
+use skarn_decision::{
+    ActionClass, CheckpointError, DecisionCancelToken, DecisionPhase, ExecutionTier, GrantDecision,
+    PermissionMode, RiskLevel, RuleScope, RulesBoundaryPolicy, RulesLoader, ScopedGrantEntry,
+    ScopedPolicyStore, TurnCheckpointManifest, TurnCheckpointStore, WorkspaceStateReader,
+};
 use skarn_protocol::{
-    validate_and_consume_approval, AgentCompactionFailedDto, AgentModeDto, AgentParkSummaryDto,
-    AgentPhase, AgentSessionSummaryDto, AgentStateDto, AgentTurnDoneDto, ApprovalDto, ApprovalId,
-    ApprovalNeededDto, ChatCompletedDto, ChatDeltaDto, ChatFailedDto, ChatRequestDto, ChatStateDto,
-    ConnectionStatus, DecisionDto, DecisionPromptDto, FrontendEvent, MessageDto, MessageId,
-    MessageRole, ModelDto, ModelsDto, PlanApprovalDto, PlanPhaseDto, PlanStateDto,
-    ProtocolErrorDto, QuestionPromptOptionDto, RequestId, SkarnStatusDto, SessionDto, SessionId,
-    SubagentActivityDto, SubagentArtifactDto, SubagentCancelledDto, SubagentCompletedDto,
-    SubagentPolicyDto, SubagentRunState, ToastDto, ToastSeverity, TodoDto, TodoStatusDto, TodosDto,
-    ToolCallStartedDto, ToolCapabilityDto, ToolResultDto, TurnId, WorkflowApprovalDto,
+    validate_and_consume_approval, ActionClassDto, AgentCompactionFailedDto, AgentModeDto,
+    AgentParkSummaryDto, AgentPhase, AgentSessionSummaryDto, AgentStateDto, AgentTurnDoneDto,
+    ApprovalDto, ApprovalId, ApprovalNeededDto, AttachmentKindDto, ChatCompletedDto, ChatDeltaDto,
+    ChatFailedDto, ChatRequestDto, ChatStateDto, ConnectionStatus, DecisionDto, DecisionPhaseDto,
+    DecisionPromptDto, DecisionTraceDto, ExecutionTierDto, FrontendEvent, GrantDecisionDto,
+    MessageDto, MessageId, MessageRole, ModelDto, ModelsDto, PlanApprovalDto, PlanPhaseDto,
+    PlanStateDto, ProtocolErrorDto, QuestionCountdownUpdatedDto, QuestionPromptOptionDto,
+    QuestionTimeoutDto, RequestId, RiskLevelDto, RuleScopeDto, RuleSourceDto, RulesLoadedDto,
+    ScopedGrantDto,
+    ScopedGrantsChangedDto, SessionDto, SessionId, SkarnStatusDto, SubagentActivityDto,
+    SubagentArtifactDto, SubagentCancelledDto, SubagentCompletedDto, SubagentPolicyDto,
+    SubagentRunState, ToastDto, ToastSeverity, TodoDto, TodoStatusDto, TodosDto,
+    ToolCallStartedDto, ToolCapabilityDto, ToolResultDto, TurnCheckpointFileDto,
+    TurnCheckpointSummaryDto, TurnId, UndoConflictDto, WorkflowApprovalDto,
 };
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-use crate::state::EventLog;
+use crate::state::{workspace_id_for, EventLog};
+use crate::workspace::{DesktopWorkspaceReader, LiveTrustState, Workspace};
 use skarn_protocol::{
     AgentQueueChangedDto, AgentQueueItemDto, AgentQueueStatusDto, AgentSessionLiveDto,
     AgentSessionRenamedDto,
@@ -429,7 +440,7 @@ impl ChatSession {
             created_at: now,
             updated_at: now,
             model: None,
-            mode: AgentModeDto::Execute,
+            mode: AgentModeDto::AskBeforeChanges,
             plan_store: skarn_ai::new_store(),
             auto_approve: false,
             durable_entries: 0,
@@ -506,6 +517,19 @@ pub(crate) struct SessionEngine {
     /// to point the tools at a real tree today; without it `SendAgent`
     /// answers the typed `no_workspace` error.
     workspace_root: Mutex<Option<PathBuf>>,
+    /// Stage 3: live trust and privacy state shared with `DesktopState` & `WorkspaceStateReader`.
+    trust: Arc<LiveTrustState>,
+    /// Stage 3: desktop workspace reference for live buffer snapshots and post-mutation refreshes.
+    workspace: Mutex<Option<Arc<Mutex<Option<Workspace>>>>>,
+    refresh_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    sync_grants_hook: Mutex<Option<Arc<dyn Fn(&[ScopedGrantEntry]) + Send + Sync>>>,
+    scoped_policy: Arc<Mutex<ScopedPolicyStore>>,
+    app_data_dir: Mutex<PathBuf>,
+    checkpoint_store: Mutex<Arc<TurnCheckpointStore>>,
+    turn_checkpoints: Mutex<Vec<TurnCheckpointSummaryDto>>,
+    active_cancel_tokens: Mutex<BTreeMap<RequestId, DecisionCancelToken>>,
+    question_timeouts: Mutex<BTreeMap<ApprovalId, QuestionTimeoutDto>>,
+    rules_state: Mutex<(Vec<RuleSourceDto>, String, Option<String>)>,
 }
 
 impl SessionEngine {
@@ -520,6 +544,17 @@ impl SessionEngine {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(str::to_owned);
+        let trust = Arc::new(LiveTrustState::new(
+            config.agent.workspace_trusted,
+            config.agent.local_only,
+        ));
+        let scoped_store = ScopedPolicyStore::load_persisted(config.agent.scoped_grants.clone());
+        let app_data_dir = skarn_settings::Settings::default_path()
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let checkpoint_store = Arc::new(TurnCheckpointStore::new(app_data_dir.join("checkpoints")));
 
         let runtime = skarn_ai::SubagentRuntime::new();
         let (tx, rx) = mpsc::channel(256);
@@ -546,12 +581,383 @@ impl SessionEngine {
             config,
             tool_capability_cache: Arc::new(ToolCapabilityCache::default()),
             workspace_root: Mutex::new(None),
+            trust,
+            workspace: Mutex::new(None),
+            refresh_hook: Mutex::new(None),
+            sync_grants_hook: Mutex::new(None),
+            scoped_policy: Arc::new(Mutex::new(scoped_store)),
+            app_data_dir: Mutex::new(app_data_dir),
+            checkpoint_store: Mutex::new(checkpoint_store),
+            turn_checkpoints: Mutex::new(Vec::new()),
+            active_cancel_tokens: Mutex::new(BTreeMap::new()),
+            question_timeouts: Mutex::new(BTreeMap::new()),
+            rules_state: Mutex::new((Vec::new(), String::new(), None)),
             subagents: runtime,
             subagent_events: Mutex::new(Some(rx)),
             subagent_cards: Mutex::new(BTreeMap::new()),
             subagent_redaction_keys: Mutex::new(initial_key.into_iter().collect()),
             pending_transcript: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Share `LiveTrustState`, `Workspace`, `app_data_dir`, refresh hook, and
+    /// grant persistence callback from `DesktopState`.
+    pub(crate) fn configure_desktop(
+        &self,
+        trust: Arc<LiveTrustState>,
+        workspace: Arc<Mutex<Option<Workspace>>>,
+        app_data_dir: PathBuf,
+        refresh_hook: Arc<dyn Fn() + Send + Sync>,
+        sync_grants_hook: Arc<dyn Fn(&[ScopedGrantEntry]) + Send + Sync>,
+    ) {
+        // Keep the same `Arc<LiveTrustState>`? Replace internal state? Wait:
+        // `SessionEngine` holds `trust: Arc<LiveTrustState>`. Wait — if `SessionEngine`
+        // uses `trust` initialized in `new`, let's overwrite `self.trust`? No,
+        // `trust` is not behind a Mutex unless we either pass `trust` into `EngineConfig`
+        // OR expose `engine.trust()`. Look! Even cleaner: `DesktopState` shares
+        // `let trust = engine.live_trust()` OR `DesktopState` initializes `trust` from
+        // `sessions.live_trust()`! Let's keep both working cleanly: sync initial values
+        // into `self.trust` AND expose `pub(crate) fn live_trust(&self) -> Arc<LiveTrustState>`!
+        self.trust.set_trusted(trust.is_trusted());
+        self.trust.set_global_local_only(trust.global_local_only());
+        self.trust.set_workspace_local_only(trust.workspace_local_only());
+        *self
+            .workspace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(workspace);
+        *self
+            .refresh_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(refresh_hook);
+        *self
+            .sync_grants_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync_grants_hook);
+        *self
+            .app_data_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = app_data_dir.clone();
+        *self
+            .checkpoint_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Arc::new(TurnCheckpointStore::new(app_data_dir.join("checkpoints")));
+    }
+
+    pub(crate) fn live_trust(&self) -> Arc<LiveTrustState> {
+        Arc::clone(&self.trust)
+    }
+
+    pub(crate) fn set_app_data_dir(&self, dir: PathBuf) {
+        *self
+            .app_data_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = dir.clone();
+        *self
+            .checkpoint_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Arc::new(TurnCheckpointStore::new(dir.join("checkpoints")));
+    }
+
+    pub(crate) fn refresh_workspace_buffers(&self) {
+        let hook = self
+            .refresh_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(crate) fn revoke_live_trust(&self) {
+        let tokens: Vec<DecisionCancelToken> = self
+            .active_cancel_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for token in tokens {
+            token.cancel();
+        }
+    }
+
+    pub(crate) fn global_agents_md_path(&self) -> PathBuf {
+        self.app_data_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .join("AGENTS.md")
+    }
+
+    pub(crate) fn load_and_cache_rules(&self, root: &Path, trusted: bool) -> RulesLoadedDto {
+        let global_path = self.global_agents_md_path();
+        let loaded = RulesLoader::load_rules(Some(global_path.as_path()), root, trusted);
+        let sources: Vec<RuleSourceDto> = loaded.sources.iter().map(rule_source_dto).collect();
+        *self
+            .rules_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = (
+            sources.clone(),
+            loaded.effective_instructions,
+            loaded.rules_digest,
+        );
+        let session_id = self.active_session_id();
+        RulesLoadedDto {
+            session_id,
+            workspace_trusted: trusted,
+            sources,
+        }
+    }
+
+    pub(crate) fn clear_rules_cache(&self) {
+        *self
+            .rules_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            (Vec::new(), String::new(), None);
+    }
+
+    pub(crate) fn rules_in_effect_dto(&self) -> Vec<RuleSourceDto> {
+        self.rules_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+            .clone()
+    }
+
+    pub(crate) fn scoped_grants_dto(&self) -> Vec<ScopedGrantDto> {
+        self.scoped_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries()
+            .iter()
+            .map(scoped_grant_dto)
+            .collect()
+    }
+
+    pub(crate) fn turn_checkpoints_dto(&self) -> Vec<TurnCheckpointSummaryDto> {
+        self.turn_checkpoints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn sync_persisted_grants(&self) {
+        let entries = self
+            .scoped_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries()
+            .to_vec();
+        let hook = self
+            .sync_grants_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(&entries);
+        }
+    }
+
+    pub(crate) fn revoke_scoped_grant(
+        &self,
+        action_class: ActionClassDto,
+        target_pattern: &str,
+    ) -> Vec<ScopedGrantDto> {
+        {
+            let mut store = self
+                .scoped_policy
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            store.revoke(action_class_from_dto(action_class), target_pattern);
+        }
+        self.sync_persisted_grants();
+        self.scoped_grants_dto()
+    }
+
+    pub(crate) fn record_turn_checkpoint(
+        &self,
+        session_id: &SessionId,
+        manifest: &TurnCheckpointManifest,
+    ) -> TurnCheckpointSummaryDto {
+        let summary = checkpoint_summary_dto(session_id, manifest, false, Vec::new());
+        let mut guard = self
+            .turn_checkpoints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.retain(|item| !(item.session_id == *session_id && item.turn_id == summary.turn_id));
+        guard.push(summary.clone());
+        summary
+    }
+
+    fn workspace_reader_for(&self, root: &Path) -> Arc<dyn WorkspaceStateReader> {
+        let ws = self
+            .workspace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match ws {
+            Some(workspace) => Arc::new(DesktopWorkspaceReader::new(
+                root.to_path_buf(),
+                workspace,
+                Arc::clone(&self.trust),
+            )),
+            None => Arc::new(skarn_decision::FilesystemWorkspaceReader::new(
+                root,
+                self.trust.is_trusted(),
+                self.trust.effective_local_only(),
+            )),
+        }
+    }
+
+    pub(crate) fn undo_or_reapply_turn(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        undo: bool,
+    ) -> Result<TurnCheckpointSummaryDto, (Option<TurnCheckpointSummaryDto>, ProtocolErrorDto)>
+    {
+        let root = self
+            .workspace_root
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| (None, no_workspace()))?;
+        let ws_id = workspace_id_for(&root);
+        let store = self
+            .checkpoint_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let manifest = store
+            .load_manifest(ws_id.as_str(), session_id.as_str(), turn_id.as_str())
+            .map_err(|err| {
+                (
+                    None,
+                    ProtocolErrorDto {
+                        code: "checkpoint_not_found".into(),
+                        message: format!("Turn checkpoint not found: {err}"),
+                        retryable: false,
+                    },
+                )
+            })?;
+        let reader = self.workspace_reader_for(&root);
+        let op = if undo {
+            store.undo_turn(
+                &root,
+                ws_id.as_str(),
+                session_id.as_str(),
+                turn_id.as_str(),
+                Some(reader.as_ref()),
+            )
+        } else {
+            store.reapply_turn(
+                &root,
+                ws_id.as_str(),
+                session_id.as_str(),
+                turn_id.as_str(),
+                Some(reader.as_ref()),
+            )
+        };
+        match op {
+            Ok(()) => {
+                self.refresh_workspace_buffers();
+                let summary = checkpoint_summary_dto(session_id, &manifest, undo, Vec::new());
+                let mut guard = self
+                    .turn_checkpoints
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.retain(|item| {
+                    !(item.session_id == *session_id && item.turn_id == *turn_id)
+                });
+                guard.push(summary.clone());
+                Ok(summary)
+            }
+            Err(CheckpointError::Conflict(conflicts)) => {
+                let conflict_dtos: Vec<UndoConflictDto> = conflicts
+                    .iter()
+                    .map(|c| UndoConflictDto {
+                        path: c.rel_path.clone(),
+                        reason: c.reason.clone(),
+                    })
+                    .collect();
+                let current_undone = self
+                    .turn_checkpoints
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .find(|item| item.session_id == *session_id && item.turn_id == *turn_id)
+                    .is_some_and(|item| item.undone);
+                let summary = checkpoint_summary_dto(
+                    session_id,
+                    &manifest,
+                    current_undone,
+                    conflict_dtos,
+                );
+                Err((
+                    Some(summary),
+                    ProtocolErrorDto {
+                        code: "checkpoint_conflict".into(),
+                        message: "Cannot apply turn checkpoint due to local file or buffer edits."
+                            .into(),
+                        retryable: false,
+                    },
+                ))
+            }
+            Err(err) => Err((
+                None,
+                ProtocolErrorDto {
+                    code: "checkpoint_failed".into(),
+                    message: format!("Turn checkpoint operation failed: {err}"),
+                    retryable: false,
+                },
+            )),
+        }
+    }
+
+    pub(crate) fn set_question_countdown_paused(
+        &self,
+        request_id: &RequestId,
+        approval_id: &ApprovalId,
+        paused: bool,
+    ) -> Result<(), ProtocolErrorDto> {
+        let loop_id = Uuid::parse_str(approval_id.as_str()).map_err(|_| ProtocolErrorDto {
+            code: "approval_mismatch".into(),
+            message: "The approval id does not name a pending approval.".into(),
+            retryable: false,
+        })?;
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matches_pending = inner.sessions.values().any(|session| {
+            session.pending_approval.as_ref().is_some_and(|pending| {
+                &pending.request_id == request_id && &pending.approval_id == approval_id
+            })
+        });
+        if !matches_pending {
+            return Err(ProtocolErrorDto {
+                code: "approval_not_pending".into(),
+                message: "No matching question card is currently pending.".into(),
+                retryable: false,
+            });
+        }
+        let Some(ActiveRequest::Agent { decisions, .. }) = inner.active.get(request_id) else {
+            return Err(ProtocolErrorDto {
+                code: "approval_expired".into(),
+                message: "The turn this question belongs to has ended.".into(),
+                retryable: false,
+            });
+        };
+        decisions
+            .send((loop_id, skarn_ai::AgentDecision::SetQuestionCountdownPaused(paused)))
+            .map_err(|_| ProtocolErrorDto {
+                code: "approval_expired".into(),
+                message: "The turn this question belongs to has ended.".into(),
+                retryable: false,
+            })
     }
 
     pub(crate) fn set_workspace_root(&self, root: Option<PathBuf>) {
@@ -575,6 +981,17 @@ impl SessionEngine {
             inner.sessions.clear();
             inner.active.clear();
             inner.active_session = None;
+            self.turn_checkpoints
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
+        }
+        match root.as_ref() {
+            Some(path) => {
+                let trusted = self.trust.is_trusted();
+                let _ = self.load_and_cache_rules(path, trusted);
+            }
+            None => self.clear_rules_cache(),
         }
         *current = root;
     }
@@ -860,7 +1277,7 @@ impl SessionEngine {
             )
             .map_err(|error| session_persistence_error(&error))?;
         let mut session = ChatSession::new(title, now);
-        session.mode = AgentModeDto::Execute;
+        session.mode = AgentModeDto::AskBeforeChanges;
         session.model = state.model;
         session.durable = true;
         let mut inner = self
@@ -1400,6 +1817,18 @@ impl SessionEngine {
                             .as_ref()
                             .map(approval_body)
                             .unwrap_or_else(|| (approval.summary.clone(), None, None));
+                        let (action_class, risk) = session
+                            .pending_card
+                            .as_ref()
+                            .map(|c| pending_card_classification(c, self.trust.is_trusted()))
+                            .map(|(c, r)| (Some(c), Some(r)))
+                            .unwrap_or((None, None));
+                        let question_timeout = self
+                            .question_timeouts
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .get(&approval.approval_id)
+                            .cloned();
                         ApprovalNeededDto {
                             request_id: approval.request_id.clone(),
                             session_id: session_id.clone(),
@@ -1412,6 +1841,9 @@ impl SessionEngine {
                             plan: approval.plan.clone(),
                             prompt: approval.decision_prompt.clone(),
                             subagent_id: None,
+                            risk,
+                            action_class,
+                            question_timeout,
                         }
                     })
                     .into_iter()
@@ -1640,6 +2072,7 @@ impl SessionEngine {
                     system_instructions,
                     temperature,
                     editor_context: None,
+                    attachments: Vec::new(),
                 },
                 Some(target),
             )?,
@@ -2097,7 +2530,7 @@ impl SessionEngine {
         // flag lives only in this `ChatSession` and is reset on switch/new.
         session.model = Some(model.id.clone());
         session.mode = persist_mode(payload.mode);
-        session.auto_approve = matches!(payload.mode, AgentModeDto::Auto);
+        session.auto_approve = matches!(payload.mode, AgentModeDto::FullAccess);
         session.durable = true;
         session.updated_at = skarn_ai::now_millis();
         if session.restored_park {
@@ -2107,15 +2540,38 @@ impl SessionEngine {
             session.pending_tool_name = None;
             session.restored_park = false;
         }
-        let auto_approve = session.auto_approve;
         let open_todos = skarn_ai::plan::snapshot(&session.plan_store).todos;
-        let sys_prompt = system_prompt(&payload, &root);
-        let mut conversation: Vec<ChatMessage> = vec![ChatMessage::system(sys_prompt)];
-        conversation.extend(conversation_tail(session));
+        let tail = conversation_tail(session);
         let plan_store = session.plan_store.clone();
         self.subagents.begin_turn(payload.session_id.as_str());
         drop(inner);
+        let rules_dto = self.load_and_cache_rules(&root, self.trust.is_trusted());
+        let rules_instructions = self
+            .rules_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .1
+            .clone();
+        let perm_mode = permission_mode_from_dto(payload.mode);
+        let effective_local_only = self.trust.effective_local_only();
+        let _ = RulesBoundaryPolicy::enforce_immutable_frame(
+            perm_mode,
+            perm_mode,
+            RiskLevel::Low,
+            RiskLevel::Low,
+            effective_local_only,
+            effective_local_only,
+        );
+        let sys_prompt = system_prompt(&payload, &root, &rules_instructions);
+        let mut conversation: Vec<ChatMessage> = vec![ChatMessage::system(sys_prompt)];
+        conversation.extend(tail);
         self.flush_session(&payload.session_id);
+        log.record_session(
+            &app,
+            FrontendEvent::RulesLoaded(rules_dto),
+            Some(request_id.clone()),
+            payload.session_id.clone(),
+        );
 
         // The turn: 5c's loop over 5a's client and 5b's router, rooted and
         // capped exactly like the egui shell's `spawn_agent` (§17.6).
@@ -2125,10 +2581,13 @@ impl SessionEngine {
             max_cost_usd: self.config.agent.max_cost_usd,
             ..TurnCaps::spec_defaults(model.context_window)
         };
+        let cancel_token = DecisionCancelToken::new();
         let mut input = TurnInput::new(model.clone(), conversation)
             .with_caps(caps.clone())
             .with_manifest(manifest_for(payload.mode))
-            .with_auto_approve_writes(auto_approve)
+            .with_permission_mode(perm_mode)
+            .with_question_timeout_secs(skarn_ai::DEFAULT_QUESTION_TIMEOUT_SECS)
+            .with_cancel_token(cancel_token.clone())
             .with_compaction(CompactionConfig::default())
             .with_open_todos(open_todos);
         if let Some(temp) = payload.temperature {
@@ -2137,7 +2596,9 @@ impl SessionEngine {
         if let Some(ref effort) = payload.reasoning_effort {
             input = input.with_reasoning_effort(effort.clone());
         }
-        let tool_settings = agent_tool_settings(&self.config.agent, self.brave_key());
+        let mut tool_settings = agent_tool_settings(&self.config.agent, self.brave_key());
+        tool_settings.workspace_trusted = self.trust.is_trusted();
+        tool_settings.local_only = effective_local_only;
         // §19.3: a child never inherits the parent's command allowlist or
         // session auto-approve grant: `full` means writes and bash still card
         // in the parent session.
@@ -2152,12 +2613,32 @@ impl SessionEngine {
             base_url: self.base_url(),
             api_key: api_key.clone(),
         });
+        let checkpoint_store = self
+            .checkpoint_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let ws_id = workspace_id_for(&root);
         let tools = RouterToolRunner::new(
-            ToolContext::new(root, tool_settings)
+            ToolContext::new(root.clone(), tool_settings)
                 .with_plan(plan_store)
                 .with_subagents(self.subagents.clone(), payload.session_id.as_str())
-                .with_subagent_backend(backend, model.clone(), caps.clone()),
+                .with_subagent_backend(backend, model.clone(), caps.clone())
+                .with_permission_mode(perm_mode)
+                .with_workspace_reader(self.workspace_reader_for(&root))
+                .with_scoped_policy(Arc::clone(&self.scoped_policy))
+                .with_checkpoint_store(
+                    checkpoint_store,
+                    ws_id.as_str(),
+                    payload.session_id.as_str(),
+                    turn_id.as_str(),
+                )
+                .with_cancel_token(cancel_token.clone()),
         );
+        self.active_cancel_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(request_id.clone(), cancel_token);
         let chat = skarn_ai::ClientChatStream::new(skarn_ai::SkarnClient::new(
             &self.base_url(),
             &api_key,
@@ -2387,7 +2868,7 @@ impl SessionEngine {
         envelope_session: Option<SessionId>,
         resolution: Option<skarn_protocol::AgentDecisionResolutionDto>,
     ) -> Result<(), ProtocolErrorDto> {
-        let answer = match (decision, resolution) {
+        let (answer, scoped_resolution) = match (decision, resolution) {
             (
                 DecisionDto::Answer,
                 Some(skarn_protocol::AgentDecisionResolutionDto::Question { option_id, text }),
@@ -2400,7 +2881,7 @@ impl SessionEngine {
                         retryable: false,
                     });
                 }
-                Some(answer)
+                (Some(answer), None)
             }
             (DecisionDto::Answer, _) => {
                 return Err(ProtocolErrorDto {
@@ -2423,11 +2904,21 @@ impl SessionEngine {
                         retryable: false,
                     });
                 }
-                Some(format!(
-                    "Revision requested; remain in plan mode. User feedback: {feedback}"
-                ))
+                (
+                    Some(format!(
+                        "Revision requested; remain in plan mode. User feedback: {feedback}"
+                    )),
+                    None,
+                )
             }
-            _ => None,
+            (
+                _,
+                Some(skarn_protocol::AgentDecisionResolutionDto::Scoped {
+                    grant,
+                    target_pattern,
+                }),
+            ) => (None, Some((grant, target_pattern))),
+            _ => (None, None),
         };
         // Stop applies without a pending card (§17.4: honored regardless of
         // which card it names — the nil id carries no card).
@@ -2551,6 +3042,37 @@ impl SessionEngine {
                 retryable: false,
             });
         }
+        if let Some((grant, _)) = scoped_resolution.as_ref() {
+            let is_allow_grant = matches!(
+                grant,
+                GrantDecisionDto::AllowOnce
+                    | GrantDecisionDto::AllowSession
+                    | GrantDecisionDto::AllowProject
+            );
+            if is_allow_grant != (decision == DecisionDto::Approve) {
+                return Err(ProtocolErrorDto {
+                    code: "invalid_decision".into(),
+                    message: "Scoped grant polarity must match approve or deny decision.".into(),
+                    retryable: false,
+                });
+            }
+            let persistent_allow = matches!(
+                grant,
+                GrantDecisionDto::AllowSession | GrantDecisionDto::AllowProject
+            );
+            let pending_high_risk = session
+                .pending_card
+                .as_ref()
+                .map(|c| pending_card_classification(c, self.trust.is_trusted()).1)
+                .is_some_and(|r| matches!(r, RiskLevelDto::High | RiskLevelDto::Critical));
+            if persistent_allow && pending_high_risk {
+                return Err(ProtocolErrorDto {
+                    code: "grant_exceeds_risk_ceiling".into(),
+                    message: "GrantExceedsRiskCeiling: persistent AllowSession or AllowProject is forbidden on High/Critical risk actions.".into(),
+                    retryable: false,
+                });
+            }
+        }
         // A restored park has no live turn. Consume it exactly once and tell
         // the caller it expired — never execute the restored action.
         if session.restored_park {
@@ -2621,13 +3143,24 @@ impl SessionEngine {
         if envelope_session.is_some_and(|session| session != *owner) {
             return Err(stale_session());
         }
+        let mapped = match scoped_resolution {
+            Some((grant, target_pattern)) => skarn_ai::AgentDecision::Scoped {
+                grant: grant_decision_from_dto(grant),
+                target_pattern,
+            },
+            None => map_decision(decision, answer),
+        };
         let result = decisions
-            .send((loop_id, map_decision(decision, answer)))
+            .send((loop_id, mapped))
             .map_err(|_| ProtocolErrorDto {
                 code: "approval_expired".into(),
                 message: "The turn this approval belongs to has ended.".into(),
                 retryable: false,
             });
+        self.question_timeouts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(approval_id);
         drop(inner);
         self.flush_session(&session_id);
         result
@@ -2751,6 +3284,7 @@ impl SessionEngine {
                 system_instructions: None,
                 temperature: None,
                 editor_context: None,
+                attachments: Vec::new(),
             },
         )
     }
@@ -2942,7 +3476,12 @@ impl SessionEngine {
                 if session.active_request.as_ref() == Some(request_id) {
                     session.active_request = None;
                 }
-                session.pending_approval = None;
+                if let Some(approval) = session.pending_approval.take() {
+                    self.question_timeouts
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&approval.approval_id);
+                }
                 session.pending_card = None;
                 session.pending_tool_name = None;
                 session.restored_park = false;
@@ -2952,6 +3491,10 @@ impl SessionEngine {
                 session.updated_at = skarn_ai::now_millis();
             }
         }
+        self.active_cancel_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(request_id);
         self.flush_session(session_id);
     }
 
@@ -3535,6 +4078,16 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 last_call = Some(call);
             }
             skarn_ai::AgentEvent::ToolResult(result) => {
+                if result.ok
+                    && last_call.as_ref().is_some_and(|call| {
+                        matches!(
+                            call.name.as_str(),
+                            "write_file" | "edit_file" | "delete_file"
+                        )
+                    })
+                {
+                    engine.refresh_workspace_buffers();
+                }
                 match engine.record_tool_result(&session_id, &result) {
                     Ok(()) | Err(TranscriptAppend::Queued) => {}
                     Err(TranscriptAppend::Failed) => {
@@ -3576,13 +4129,33 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                 let (path_or_command, diff_or_input, workflow) = approval_body(&card);
                 let plan = approval_plan(&card);
                 let prompt = approval_prompt(&card);
+                let approval_id_dto = ApprovalId::new(approval_id.to_string())
+                    .expect("uuid string is a valid id");
+                let (action_class_dto, risk_dto) =
+                    pending_card_classification(&card, engine.trust.is_trusted());
+                let question_timeout = if matches!(&card, ApprovalCard::Question(_)) {
+                    let timeout = QuestionTimeoutDto {
+                        deadline_ms: skarn_ai::now_millis()
+                            .saturating_add(skarn_ai::DEFAULT_QUESTION_TIMEOUT_SECS * 1000),
+                        auto_continue_allowed: true,
+                        timed_out: false,
+                        paused: false,
+                    };
+                    engine
+                        .question_timeouts
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(approval_id_dto.clone(), timeout.clone());
+                    Some(timeout)
+                } else {
+                    None
+                };
                 // Park before announcing: the single-use slot exists before
                 // the frontend can possibly answer.
                 engine.set_pending_approval(
                     &session_id,
                     ApprovalDto {
-                        approval_id: ApprovalId::new(approval_id.to_string())
-                            .expect("uuid string is a valid id"),
+                        approval_id: approval_id_dto.clone(),
                         request_id: request_id.clone(),
                         turn_id: turn_id.clone(),
                         session_id: session_id.clone(),
@@ -3605,8 +4178,7 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         request_id: request_id.clone(),
                         session_id: session_id.clone(),
                         turn_id: turn_id.clone(),
-                        approval_id: ApprovalId::new(approval_id.to_string())
-                            .expect("uuid string is a valid id"),
+                        approval_id: approval_id_dto,
                         tool_name,
                         path_or_command,
                         diff_or_input,
@@ -3614,6 +4186,9 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                         plan: approval_plan(&card),
                         prompt,
                         subagent_id: None,
+                        risk: Some(risk_dto),
+                        action_class: Some(action_class_dto),
+                        question_timeout,
                     }),
                     Some(request_id.clone()),
                     session_id.clone(),
@@ -3645,6 +4220,99 @@ async fn agent_relay<R: tauri::Runtime>(ctx: AgentRelayCtx<R>) {
                             .map(|todo| scrub_serializable(todo_dto(todo), &keys))
                             .collect(),
                     }),
+                    Some(request_id.clone()),
+                    session_id.clone(),
+                );
+            }
+            skarn_ai::AgentEvent::DecisionTrace(trace) => {
+                log.record_session(
+                    &app,
+                    FrontendEvent::DecisionTrace(decision_trace_dto(
+                        &request_id,
+                        &session_id,
+                        &turn_id,
+                        &trace,
+                        &keys,
+                    )),
+                    Some(request_id.clone()),
+                    session_id.clone(),
+                );
+            }
+            skarn_ai::AgentEvent::QuestionCountdown {
+                approval_id,
+                deadline_ms,
+                auto_continue_allowed,
+                timed_out,
+                paused,
+            } => {
+                let approval_id_dto = ApprovalId::new(approval_id.to_string())
+                    .expect("uuid string is a valid id");
+                let timeout = QuestionTimeoutDto {
+                    deadline_ms,
+                    auto_continue_allowed,
+                    timed_out,
+                    paused,
+                };
+                if timed_out {
+                    engine
+                        .question_timeouts
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&approval_id_dto);
+                    let mut inner = engine
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(session) = inner.sessions.get_mut(&session_id) {
+                        if session
+                            .pending_approval
+                            .as_ref()
+                            .is_some_and(|p| p.approval_id == approval_id_dto)
+                        {
+                            session.pending_approval = None;
+                            session.pending_card = None;
+                            session.pending_tool_name = None;
+                        }
+                    }
+                    log.consume_agent_approval(&approval_id_dto);
+                } else {
+                    engine
+                        .question_timeouts
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(approval_id_dto.clone(), timeout.clone());
+                }
+                log.record_session(
+                    &app,
+                    FrontendEvent::QuestionCountdownUpdated(QuestionCountdownUpdatedDto {
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        turn_id: turn_id.clone(),
+                        approval_id: approval_id_dto,
+                        timeout,
+                    }),
+                    Some(request_id.clone()),
+                    session_id.clone(),
+                );
+            }
+            skarn_ai::AgentEvent::ScopedGrantsUpdated(entries) => {
+                engine.sync_persisted_grants();
+                let grants: Vec<ScopedGrantDto> = entries.iter().map(scoped_grant_dto).collect();
+                log.record_session(
+                    &app,
+                    FrontendEvent::ScopedGrantsChanged(ScopedGrantsChangedDto {
+                        session_id: Some(session_id.clone()),
+                        grants,
+                    }),
+                    Some(request_id.clone()),
+                    session_id.clone(),
+                );
+            }
+            skarn_ai::AgentEvent::TurnCheckpointRecorded(manifest) => {
+                let summary = engine.record_turn_checkpoint(&session_id, &manifest);
+                log.record_session(
+                    &app,
+                    FrontendEvent::TurnCheckpointUpdated(summary),
                     Some(request_id.clone()),
                     session_id.clone(),
                 );
@@ -4145,6 +4813,8 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                             child_id: child_id.clone(),
                         },
                     );
+                let (action_class_dto, risk_dto) =
+                    pending_card_classification(&card, engine.trust.is_trusted());
                 log.record_session(
                     &app,
                     FrontendEvent::ApprovalNeeded(ApprovalNeededDto {
@@ -4159,6 +4829,9 @@ async fn subagent_relay<R: tauri::Runtime>(ctx: SubagentRelayCtx<R>) {
                         plan,
                         prompt,
                         subagent_id: Some(child_id),
+                        risk: Some(risk_dto),
+                        action_class: Some(action_class_dto),
+                        question_timeout: None,
                     }),
                     Some(request_id),
                     session_id,
@@ -4213,7 +4886,11 @@ impl skarn_ai::SubagentBackend for DesktopSubagentBackend {
 /// reasoning-depth line, the user's extra instructions, and the editor
 /// reference (path/language/selection/dirty — never the file text; the
 /// tools read the bytes).
-fn system_prompt(payload: &skarn_protocol::AgentRequestDto, root: &Path) -> String {
+fn system_prompt(
+    payload: &skarn_protocol::AgentRequestDto,
+    root: &Path,
+    rules_instructions: &str,
+) -> String {
     let depth_instructions = match payload.reasoning_effort.as_deref() {
         Some("none") => "\nReasoning depth: Off. Provide direct answers without extended thinking preamble.",
         Some("max") => "\nReasoning depth: Maximum. Provide deep, rigorous chain of thought. Analyze all edge cases, potential failure modes, and architectural implications before executing actions.",
@@ -4230,12 +4907,66 @@ fn system_prompt(payload: &skarn_protocol::AgentRequestDto, root: &Path) -> Stri
 
     // The prompt must match the mode: auto-applied writes never show the
     // approval card the default prompt describes.
-    let approval_note = if matches!(payload.mode, AgentModeDto::Auto) {
-        "File writes, edits, and deletes apply immediately in this session; bash commands still pause for approval."
-    } else if matches!(payload.mode, AgentModeDto::Explore) {
-        "This session is read-only: inspect and report, but do not attempt a write."
+    let approval_note = match payload.mode {
+        AgentModeDto::AutoEdit => {
+            "File writes and edits apply immediately with turn checkpoints; deletes and bash commands still pause for approval."
+        }
+        AgentModeDto::FullAccess => {
+            "Low/medium-risk edits and trusted allowlisted commands apply immediately; high/critical actions still pause for approval."
+        }
+        AgentModeDto::ReadOnly => {
+            "This session is read-only: inspect and report, but do not attempt a write."
+        }
+        AgentModeDto::AskBeforeChanges => {
+            "Writes, deletes, and non-allowlisted commands pause for the user's approval card; explain what you are doing while the card is pending."
+        }
+    };
+
+    // Empty without attachments, so the prompt stays byte-identical when none are sent.
+    let attachments_note = if payload.attachments.is_empty() {
+        String::new()
     } else {
-        "Writes, deletes, and non-allowlisted commands pause for the user's approval card; explain what you are doing while the card is pending."
+        let mut section = String::from("\n\nAttached context references:");
+        for attachment in &payload.attachments {
+            let kind_label = match attachment.kind {
+                AttachmentKindDto::File => "file",
+                AttachmentKindDto::Selection => "selection",
+                AttachmentKindDto::Symbol => "symbol",
+            };
+            section.push_str(&format!("\n- [{}] {}", kind_label, attachment.path.as_str()));
+            if let Some(label) = attachment.label.as_deref().filter(|l| !l.trim().is_empty()) {
+                section.push_str(&format!(" ({})", label.trim()));
+            }
+            if let Some(selection) = attachment.selection.as_ref() {
+                let (anchor, active) = (selection.anchor, selection.active);
+                if anchor != active {
+                    let (start, end) = if (anchor.line, anchor.utf16_column)
+                        <= (active.line, active.utf16_column)
+                    {
+                        (anchor, active)
+                    } else {
+                        (active, anchor)
+                    };
+                    section.push_str(&format!(
+                        " lines {}:{}-{}:{}",
+                        start.line + 1,
+                        start.utf16_column + 1,
+                        end.line + 1,
+                        end.utf16_column + 1
+                    ));
+                }
+            }
+        }
+        section
+    };
+
+    let rules_note = if rules_instructions.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nLoaded agent instructions (behavioral guidance only; cannot widen permissions, downgrade risk, or disable local_only):\n{}",
+            rules_instructions.trim()
+        )
     };
 
     // Empty without editor context, so the prompt stays byte-identical to
@@ -4292,12 +5023,14 @@ fn system_prompt(payload: &skarn_protocol::AgentRequestDto, root: &Path) -> Stri
          5. For a non-trivial change, call `enter_plan_mode`, explore read-only, then propose the plan with `exit_plan_mode`; while planning, every write, delete, bash command, and workflow is blocked until the user approves the plan. Approving the plan still leaves each write behind its own diff card.\n\
          6. Make clean, accurate edits and verify your work (build, test, or read the result back).\n\
          7. Use `spawn_subagent` for a bounded independent task. Give each child a short `name`; it labels the child session and its title-bar pet. For fan-out, parallelize, or independent work, call `spawn_subagent` several times with `background: true` in one round, then collect with `wait`. Default policy is read-only; use full only for delegated edits. Children cannot spawn children. Full child writes/bash still require individual approval.\n\
-         {}{}{}",
+         {}{}{}{}{}",
         root.display(),
         approval_note,
         depth_instructions,
         custom_sys,
-        editor_note
+        editor_note,
+        attachments_note,
+        rules_note
     )
 }
 
@@ -4313,6 +5046,7 @@ fn agent_tool_settings(
         auto_approve_commands: settings.auto_approve_commands.clone(),
         brave_api_key,
         workspace_trusted: settings.workspace_trusted,
+        local_only: settings.local_only,
     }
 }
 
@@ -4448,25 +5182,27 @@ fn title_from(text: &str) -> String {
         .collect()
 }
 
-/// Persisted mode: `Auto` is session trust, not a durable mode.
+/// Persisted mode: `FullAccess` is session trust, not a durable mode.
 fn persist_mode(mode: AgentModeDto) -> AgentModeDto {
     match mode {
-        AgentModeDto::Auto => AgentModeDto::Execute,
+        AgentModeDto::FullAccess => AgentModeDto::AskBeforeChanges,
         other => other,
     }
 }
 
 fn durable_mode(mode: AgentModeDto) -> AgentSessionMode {
     match persist_mode(mode) {
-        AgentModeDto::Explore => AgentSessionMode::Explore,
-        _ => AgentSessionMode::Execute,
+        AgentModeDto::ReadOnly => AgentSessionMode::Explore,
+        AgentModeDto::AutoEdit => AgentSessionMode::AutoEdit,
+        AgentModeDto::AskBeforeChanges | AgentModeDto::FullAccess => AgentSessionMode::Execute,
     }
 }
 
 fn mode_from_disk(mode: AgentSessionMode) -> AgentModeDto {
     match mode {
-        AgentSessionMode::Explore => AgentModeDto::Explore,
-        AgentSessionMode::Execute | AgentSessionMode::Plan => AgentModeDto::Execute,
+        AgentSessionMode::Explore => AgentModeDto::ReadOnly,
+        AgentSessionMode::AutoEdit => AgentModeDto::AutoEdit,
+        AgentSessionMode::Execute | AgentSessionMode::Plan => AgentModeDto::AskBeforeChanges,
     }
 }
 
@@ -4938,8 +5674,10 @@ pub(crate) fn empty_catalog_protocol_error(base_url: &str) -> ProtocolErrorDto {
 
 fn manifest_for(mode: AgentModeDto) -> Vec<ToolSpec> {
     match mode {
-        AgentModeDto::Execute | AgentModeDto::Auto => skarn_ai::tool_manifest(),
-        AgentModeDto::Explore => skarn_ai::tool_manifest()
+        AgentModeDto::AskBeforeChanges | AgentModeDto::AutoEdit | AgentModeDto::FullAccess => {
+            skarn_ai::tool_manifest()
+        }
+        AgentModeDto::ReadOnly => skarn_ai::tool_manifest()
             .into_iter()
             .filter(|spec| EXPLORE_TOOLS.contains(&spec.name.as_str()))
             .collect(),
@@ -5191,6 +5929,211 @@ fn map_decision(decision: DecisionDto, answer: Option<String>) -> skarn_ai::Agen
             .map(skarn_ai::AgentDecision::Answer)
             .unwrap_or(skarn_ai::AgentDecision::Revise),
         DecisionDto::Stop => skarn_ai::AgentDecision::Stop,
+    }
+}
+
+fn permission_mode_from_dto(mode: AgentModeDto) -> PermissionMode {
+    match mode {
+        AgentModeDto::ReadOnly => PermissionMode::ReadOnly,
+        AgentModeDto::AskBeforeChanges => PermissionMode::AskBeforeChanges,
+        AgentModeDto::AutoEdit => PermissionMode::AutoEdit,
+        AgentModeDto::FullAccess => PermissionMode::FullAccess,
+    }
+}
+
+fn pending_card_classification(card: &ApprovalCard, trusted: bool) -> (ActionClassDto, RiskLevelDto) {
+    match card {
+        ApprovalCard::Diff { .. } => (ActionClassDto::FileEdit, RiskLevelDto::Medium),
+        ApprovalCard::Delete { .. } => (ActionClassDto::FileDelete, RiskLevelDto::High),
+        ApprovalCard::Command { .. } => (
+            ActionClassDto::CommandGated,
+            if trusted {
+                RiskLevelDto::High
+            } else {
+                RiskLevelDto::Critical
+            },
+        ),
+        ApprovalCard::Workflow { .. } => (ActionClassDto::Workflow, RiskLevelDto::High),
+        ApprovalCard::Plan { .. } => (ActionClassDto::PlanControl, RiskLevelDto::High),
+        ApprovalCard::Question(_) => (ActionClassDto::Question, RiskLevelDto::Low),
+    }
+}
+
+fn risk_dto(risk: RiskLevel) -> RiskLevelDto {
+    match risk {
+        RiskLevel::Low => RiskLevelDto::Low,
+        RiskLevel::Medium => RiskLevelDto::Medium,
+        RiskLevel::High => RiskLevelDto::High,
+        RiskLevel::Critical => RiskLevelDto::Critical,
+    }
+}
+
+fn action_class_dto(class: ActionClass) -> ActionClassDto {
+    match class {
+        ActionClass::ReadInspect => ActionClassDto::ReadInspect,
+        ActionClass::FileEdit => ActionClassDto::FileEdit,
+        ActionClass::FileDelete => ActionClassDto::FileDelete,
+        ActionClass::CommandAllowlisted => ActionClassDto::CommandAllowlisted,
+        ActionClass::CommandGated => ActionClassDto::CommandGated,
+        ActionClass::Workflow => ActionClassDto::Workflow,
+        ActionClass::PlanControl => ActionClassDto::PlanControl,
+        ActionClass::Question => ActionClassDto::Question,
+    }
+}
+
+fn action_class_from_dto(class: ActionClassDto) -> ActionClass {
+    match class {
+        ActionClassDto::ReadInspect => ActionClass::ReadInspect,
+        ActionClassDto::FileEdit => ActionClass::FileEdit,
+        ActionClassDto::FileDelete => ActionClass::FileDelete,
+        ActionClassDto::CommandAllowlisted => ActionClass::CommandAllowlisted,
+        ActionClassDto::CommandGated => ActionClass::CommandGated,
+        ActionClassDto::Workflow => ActionClass::Workflow,
+        ActionClassDto::PlanControl => ActionClass::PlanControl,
+        ActionClassDto::Question => ActionClass::Question,
+    }
+}
+
+fn grant_decision_dto(decision: GrantDecision) -> GrantDecisionDto {
+    match decision {
+        GrantDecision::AllowOnce => GrantDecisionDto::AllowOnce,
+        GrantDecision::AllowSession => GrantDecisionDto::AllowSession,
+        GrantDecision::AllowProject => GrantDecisionDto::AllowProject,
+        GrantDecision::DenyOnce => GrantDecisionDto::DenyOnce,
+        GrantDecision::DenySession => GrantDecisionDto::DenySession,
+        GrantDecision::DenyProject => GrantDecisionDto::DenyProject,
+    }
+}
+
+fn grant_decision_from_dto(decision: GrantDecisionDto) -> GrantDecision {
+    match decision {
+        GrantDecisionDto::AllowOnce => GrantDecision::AllowOnce,
+        GrantDecisionDto::AllowSession => GrantDecision::AllowSession,
+        GrantDecisionDto::AllowProject => GrantDecision::AllowProject,
+        GrantDecisionDto::DenyOnce => GrantDecision::DenyOnce,
+        GrantDecisionDto::DenySession => GrantDecision::DenySession,
+        GrantDecisionDto::DenyProject => GrantDecision::DenyProject,
+    }
+}
+
+fn scoped_grant_dto(entry: &ScopedGrantEntry) -> ScopedGrantDto {
+    ScopedGrantDto {
+        action_class: action_class_dto(entry.action_class),
+        target_pattern: entry.target_pattern.clone(),
+        decision: grant_decision_dto(entry.decision),
+        max_risk: risk_dto(entry.max_risk),
+    }
+}
+
+fn execution_tier_dto(tier: ExecutionTier) -> ExecutionTierDto {
+    match tier {
+        ExecutionTier::Tier1Deterministic => ExecutionTierDto::Tier1Deterministic,
+        ExecutionTier::Tier2DecisionModel => ExecutionTierDto::Tier2DecisionModel,
+        ExecutionTier::Tier3GeneralLlm => ExecutionTierDto::Tier3GeneralLlm,
+    }
+}
+
+fn decision_phase_dto(phase: DecisionPhase) -> DecisionPhaseDto {
+    match phase {
+        DecisionPhase::Snapshotted => DecisionPhaseDto::Snapshotted,
+        DecisionPhase::Routed => DecisionPhaseDto::Routed,
+        DecisionPhase::Inferred => DecisionPhaseDto::Inferred,
+        DecisionPhase::SchemaValidated => DecisionPhaseDto::SchemaValidated,
+        DecisionPhase::PolicyEvaluated => DecisionPhaseDto::PolicyEvaluated,
+        DecisionPhase::ApprovalPending => DecisionPhaseDto::ApprovalPending,
+        DecisionPhase::SnapshotRechecked => DecisionPhaseDto::SnapshotRechecked,
+        DecisionPhase::Executed => DecisionPhaseDto::Executed,
+        DecisionPhase::Verified => DecisionPhaseDto::Verified,
+        DecisionPhase::Stale => DecisionPhaseDto::Stale,
+        DecisionPhase::Escalated => DecisionPhaseDto::Escalated,
+        DecisionPhase::Rejected => DecisionPhaseDto::Rejected,
+        DecisionPhase::Cancelled => DecisionPhaseDto::Cancelled,
+        DecisionPhase::Failed => DecisionPhaseDto::Failed,
+    }
+}
+
+fn decision_trace_dto(
+    request_id: &RequestId,
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    trace: &skarn_ai::ToolDecisionTrace,
+    keys: &[String],
+) -> DecisionTraceDto {
+    let expl = &trace.explanation;
+    DecisionTraceDto {
+        request_id: request_id.clone(),
+        session_id: session_id.clone(),
+        turn_id: turn_id.clone(),
+        call_id: redact_with_keys(&trace.call_id, keys),
+        trace_id: redact_with_keys(&expl.trace_id, keys),
+        action_id: redact_with_keys(&trace.action_id, keys),
+        risk: risk_dto(trace.risk),
+        phase: decision_phase_dto(trace.phase),
+        selected_tier: execution_tier_dto(expl.selected_tier),
+        candidate_tiers: expl
+            .candidate_tiers
+            .iter()
+            .copied()
+            .map(execution_tier_dto)
+            .collect(),
+        provider_id: expl
+            .provider_id
+            .as_deref()
+            .map(|p| redact_with_keys(p, keys)),
+        model_id: expl
+            .model_id
+            .as_deref()
+            .map(|m| redact_with_keys(m, keys)),
+        hop_count: expl.hop_count,
+        privacy_blocked_cloud: expl.privacy_blocked_cloud,
+        reason_code: redact_with_keys(&expl.reason_code, keys),
+        calibrated_threshold: expl.calibrated_threshold,
+        raw_confidence: expl.raw_confidence,
+        fsm_path: expl
+            .fsm_path
+            .iter()
+            .copied()
+            .map(decision_phase_dto)
+            .collect(),
+    }
+}
+
+fn rule_source_dto(source: &skarn_decision::RuleSource) -> RuleSourceDto {
+    RuleSourceDto {
+        path: source.path.clone(),
+        scope: match source.scope {
+            RuleScope::Global => RuleScopeDto::Global,
+            RuleScope::Workspace => RuleScopeDto::Workspace,
+        },
+        active: source.active,
+        inactive_reason: source.reason.clone(),
+        digest: source.digest.clone(),
+    }
+}
+
+fn checkpoint_summary_dto(
+    session_id: &SessionId,
+    manifest: &TurnCheckpointManifest,
+    undone: bool,
+    conflicts: Vec<UndoConflictDto>,
+) -> TurnCheckpointSummaryDto {
+    TurnCheckpointSummaryDto {
+        session_id: session_id.clone(),
+        turn_id: TurnId::new(manifest.turn_id.clone()).unwrap_or_else(|_| {
+            TurnId::new("turn-unknown").expect("fallback turn id is valid")
+        }),
+        created_at_ms: manifest.created_at_ms,
+        files: manifest
+            .files
+            .iter()
+            .map(|f| TurnCheckpointFileDto {
+                path: f.rel_path.clone(),
+                existed_before: f.existed_before,
+                existed_after: f.existed_after,
+            })
+            .collect(),
+        undone,
+        conflicts,
     }
 }
 
@@ -5480,11 +6423,12 @@ mod tests {
                 session_id: SessionId::new(session).expect("valid id"),
                 prompt: prompt.into(),
                 model_id: Some("test-model".into()),
-                mode: AgentModeDto::Execute,
+                mode: AgentModeDto::AskBeforeChanges,
                 reasoning_effort: None,
                 system_instructions: None,
                 temperature: None,
                 editor_context: None,
+                attachments: Vec::new(),
             },
         }
     }
@@ -6069,7 +7013,11 @@ mod tests {
         // The wire order: two deltas then the completion, monotonic, all
         // bound to the request and the session.
         assert_eq!(
-            events.iter().map(tag).collect::<Vec<_>>(),
+            events
+                .iter()
+                .map(tag)
+                .filter(|t| !t.starts_with("other:"))
+                .collect::<Vec<_>>(),
             vec!["delta:Hello", "delta: world", "completed"]
         );
         assert_eq!(
@@ -6419,7 +7367,11 @@ mod tests {
 
         // The exact wire order (the contract the dock renders against).
         assert_eq!(
-            events.iter().map(tag).collect::<Vec<_>>(),
+            events
+                .iter()
+                .map(tag)
+                .filter(|t| !t.starts_with("other:"))
+                .collect::<Vec<_>>(),
             vec![
                 "state:thinking",
                 "delta:Reading the notes first.",
@@ -6741,7 +7693,7 @@ mod tests {
 
         let mut command = send_agent("agent-auto", "session-auto", "append a line");
         if let FrontendCommand::SendAgent { request, .. } = &mut command {
-            request.mode = AgentModeDto::Auto;
+            request.mode = AgentModeDto::AutoEdit;
         }
         state
             .dispatch(&app, envelope(&state, command))
@@ -6920,7 +7872,7 @@ mod tests {
 
         let mut command = send_agent("agent-1", "session-1", "explore the notes");
         if let FrontendCommand::SendAgent { request, .. } = &mut command {
-            request.mode = AgentModeDto::Explore;
+            request.mode = AgentModeDto::ReadOnly;
         }
         state
             .dispatch(&app, envelope(&state, command))
@@ -7690,11 +8642,12 @@ mod tests {
             session_id: SessionId::new("session-1").expect("valid id"),
             prompt: "do the thing".into(),
             model_id: Some("test-model".into()),
-            mode: AgentModeDto::Execute,
+            mode: AgentModeDto::AskBeforeChanges,
             reasoning_effort: None,
             system_instructions: None,
             temperature: None,
             editor_context,
+            attachments: Vec::new(),
         }
     }
 
@@ -7717,7 +8670,7 @@ mod tests {
             dirty: true,
         }));
 
-        let prompt = system_prompt(&payload, Path::new("C:/repo"));
+        let prompt = system_prompt(&payload, Path::new("C:/repo"), "");
         assert!(
             prompt.contains("Active file (workspace-relative): crates/selora-ai/src/agent/turn.rs")
         );
@@ -7732,7 +8685,7 @@ mod tests {
     fn system_prompt_without_editor_context_is_unchanged() {
         let payload = agent_payload(None);
 
-        let prompt = system_prompt(&payload, Path::new("C:/repo"));
+        let prompt = system_prompt(&payload, Path::new("C:/repo"), "");
         assert!(!prompt.contains("Editor context"));
 
         // Today's prompt, hard-coded: root `C:/repo`, execute mode, standard
@@ -7779,7 +8732,7 @@ mod tests {
             dirty: false,
         }));
 
-        let prompt = system_prompt(&payload, Path::new("C:/repo"));
+        let prompt = system_prompt(&payload, Path::new("C:/repo"), "");
         // A collapsed caret is not a selection, and no edits means no
         // status line — never `0:0-0:0` or an empty range.
         assert!(!prompt.contains("Selection:"));
@@ -9265,12 +10218,13 @@ mod tests {
                 skarn_protocol::AgentRequestDto {
                     session_id: session_id.clone(),
                     prompt: "edit".into(),
-                    mode: skarn_protocol::AgentModeDto::Execute,
+                    mode: skarn_protocol::AgentModeDto::AskBeforeChanges,
                     model_id: Some("chat/only".into()),
                     reasoning_effort: None,
                     system_instructions: None,
                     temperature: None,
                     editor_context: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect_err("unsupported model blocked for agent");
@@ -9314,12 +10268,13 @@ mod tests {
                 skarn_protocol::AgentRequestDto {
                     session_id: session_id.clone(),
                     prompt: "hi".into(),
-                    mode: skarn_protocol::AgentModeDto::Execute,
+                    mode: skarn_protocol::AgentModeDto::AskBeforeChanges,
                     model_id: Some("meta/muse-glimmer-30b".into()),
                     reasoning_effort: None,
                     system_instructions: None,
                     temperature: None,
                     editor_context: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect_err("retired model unavailable");
@@ -9336,12 +10291,13 @@ mod tests {
                     skarn_protocol::AgentRequestDto {
                         session_id: session_id.clone(),
                         prompt: format!("run {idx}"),
-                        mode: skarn_protocol::AgentModeDto::Execute,
+                        mode: skarn_protocol::AgentModeDto::AskBeforeChanges,
                         model_id: Some("unknown/probed-ok".into()),
                         reasoning_effort: None,
                         system_instructions: None,
                         temperature: None,
                         editor_context: None,
+                        attachments: Vec::new(),
                     },
                 )
                 .expect("probed/cached unknown model dispatches");
@@ -9358,5 +10314,781 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(15));
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 3 Integration Tests (Section D invariants & end-to-end)
+    // ------------------------------------------------------------------
+
+    fn temp_settings_file(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "skarn-s3-settings-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("settings dir");
+        dir.join("settings.json")
+    }
+
+    fn write_settings_file(path: &Path, settings: &skarn_settings::Settings) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("settings parent");
+        }
+        settings.save_to(path).expect("save isolated settings");
+    }
+
+    fn desktop_with_settings_path(settings_path: PathBuf) -> DesktopState {
+        let state = DesktopState::from_settings_path_with_mutable_key(
+            settings_path,
+            Arc::new(Mutex::new(Ok(Some("sk-gw-desktop-test-key".into())))),
+        );
+        seed_supported_test_model(&state);
+        state
+    }
+
+    #[test]
+    fn agent_mutation_rejects_dirty_buffer_and_refreshes_clean_buffer() {
+        let app = mock_app_handle();
+        let root = temp_workspace("s3-dirty-refresh");
+        std::fs::write(root.join("dirty.txt"), "dirty-before\n").expect("seed dirty");
+        std::fs::write(root.join("clean.txt"), "clean-before\n").expect("seed clean");
+
+        let rounds = vec![
+            (
+                "write-clean-2",
+                answer_round_sse("dirty rejected and clean refreshed", 0.001),
+            ),
+            (
+                "write-dirty-1",
+                tool_round_sse(
+                    &[(
+                        "write-clean-2",
+                        "write_file",
+                        r#"{"path":"clean.txt","content":"clean-after\n"}"#,
+                    )],
+                    "writing clean",
+                    0.001,
+                ),
+            ),
+            (
+                "dirty and clean test",
+                tool_round_sse(
+                    &[(
+                        "write-dirty-1",
+                        "write_file",
+                        r#"{"path":"dirty.txt","content":"overwritten\n"}"#,
+                    )],
+                    "writing dirty",
+                    0.001,
+                ),
+            ),
+        ];
+        let server = mock_gateway(rounds, true);
+        let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFolderAt {
+                        root: root.to_string_lossy().into_owned(),
+                    },
+                ),
+            )
+            .expect("open folder");
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFile {
+                        path: skarn_protocol::WorkspacePath::new("dirty.txt").unwrap(),
+                    },
+                ),
+            )
+            .expect("open dirty.txt");
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFile {
+                        path: skarn_protocol::WorkspacePath::new("clean.txt").unwrap(),
+                    },
+                ),
+            )
+            .expect("open clean.txt");
+
+        let boot = state.bootstrap();
+        let dirty_buf = boot
+            .buffers
+            .iter()
+            .find(|b| b.path.as_str() == "dirty.txt")
+            .expect("dirty buffer open")
+            .clone();
+        let clean_buf = boot
+            .buffers
+            .iter()
+            .find(|b| b.path.as_str() == "clean.txt")
+            .expect("clean buffer open")
+            .clone();
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::ApplyEditorChange {
+                        buffer_id: dirty_buf.buffer_id,
+                        version: dirty_buf.version,
+                        changes: vec![skarn_protocol::TextChange {
+                            start: TextPosition {
+                                line: 0,
+                                utf16_column: 0,
+                            },
+                            end: TextPosition {
+                                line: 0,
+                                utf16_column: 0,
+                            },
+                            replacement: "unsaved-".into(),
+                        }],
+                    },
+                ),
+            )
+            .expect("dirty edit");
+
+        let mut command = send_agent("req-dirty-refresh", "sess-dirty", "dirty and clean test");
+        if let FrontendCommand::SendAgent { request, .. } = &mut command {
+            request.mode = AgentModeDto::AutoEdit;
+        }
+        state
+            .dispatch(&app, envelope(&state, command))
+            .expect("send_agent");
+
+        let events = wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::AgentTurnDone(_))
+        });
+
+        let dirty_result = events
+            .iter()
+            .find_map(|event| match &event.payload {
+                FrontendEvent::ToolResult(res) if res.call_id == "write-dirty-1" => Some(res),
+                _ => None,
+            })
+            .expect("tool result for dirty write");
+        assert!(dirty_result.is_err, "dirty buffer must reject agent mutation");
+        assert!(
+            dirty_result.result_summary.contains("OpenBufferDirty")
+                || dirty_result.result_summary.to_lowercase().contains("dirty"),
+            "error should report OpenBufferDirty: {}",
+            dirty_result.result_summary
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("dirty.txt")).expect("read dirty.txt"),
+            "dirty-before\n",
+            "dirty target on disk must remain untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("clean.txt")).expect("read clean.txt"),
+            "clean-after\n",
+            "clean target on disk must be updated"
+        );
+        let refreshed_clean = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.payload {
+                FrontendEvent::BufferSnapshot(snap)
+                    if snap.path.as_str() == "clean.txt" && snap.text == "clean-after\n" =>
+                {
+                    Some(snap)
+                }
+                _ => None,
+            })
+            .expect("refresh_clean_buffers must emit updated BufferSnapshot");
+        assert!(refreshed_clean.version > clean_buf.version);
+
+        tauri::async_runtime::block_on(async { server.verify().await });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trust_revocation_mid_turn_aborts_parked_command_and_new_trust_works_without_restart() {
+        let app = mock_app_handle();
+        let root = temp_workspace("s3-trust-revoke");
+        let settings_path = temp_settings_file("s3-trust-revoke");
+        let mut settings = gateway_settings(String::new());
+        let rounds = vec![
+            (
+                "simple follow-up",
+                answer_round_sse("trusted again without restart", 0.001),
+            ),
+            (
+                "run risky cmd",
+                tool_round_sse(
+                    &[(
+                        "cmd-risky-1",
+                        "bash",
+                        r#"{"command":"New-Item touched.txt -ItemType File"}"#,
+                    )],
+                    "running command",
+                    0.001,
+                ),
+            ),
+        ];
+        let server = mock_gateway(rounds, false);
+        settings.skarn.base_url = server.uri();
+        settings.agent.workspace_trusted = true;
+        write_settings_file(&settings_path, &settings);
+
+        let state = desktop_with_settings_path(settings_path.clone());
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFolderAt {
+                        root: root.to_string_lossy().into_owned(),
+                    },
+                ),
+            )
+            .expect("open folder");
+
+        state
+            .dispatch(
+                &app,
+                envelope(&state, send_agent("req-risky-1", "sess-trust", "run risky cmd")),
+            )
+            .expect("send risky turn");
+
+        let parked_events = wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::ApprovalNeeded(_))
+        });
+        let approval = find_payload(&parked_events, |payload| match payload {
+            FrontendEvent::ApprovalNeeded(dto) => Some(dto.clone()),
+            _ => None,
+        });
+        assert_eq!(approval.action_class, Some(skarn_protocol::ActionClassDto::CommandGated));
+        assert_eq!(approval.risk, Some(skarn_protocol::RiskLevelDto::High));
+
+        // Revoke trust live mid-turn while the bash approval card is parked.
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: skarn_protocol::SettingsPatchDto {
+                            workspace_trusted: Some(false),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("revoke trust live");
+
+        let after_revoke = wait_for(&state, |event| {
+            matches!(
+                &event.payload,
+                FrontendEvent::AgentTurnDone(done) if done.request_id.as_str() == "req-risky-1"
+            )
+        });
+        let done_revoked = after_revoke
+            .iter()
+            .find_map(|e| match &e.payload {
+                FrontendEvent::AgentTurnDone(done) if done.request_id.as_str() == "req-risky-1" => {
+                    Some(done.clone())
+                }
+                _ => None,
+            })
+            .expect("turn done after trust revocation");
+        assert!(!done_revoked.completed, "revoked turn must abort");
+        assert!(
+            !root.join("touched.txt").exists(),
+            "revoked bash command must never execute"
+        );
+        assert!(
+            after_revoke.iter().any(|e| matches!(
+                &e.payload,
+                FrontendEvent::DecisionTrace(trace)
+                    if trace.reason_code == "trust_revoked"
+                        && trace.phase == skarn_protocol::DecisionPhaseDto::Rejected
+            )),
+            "DecisionTrace must record trust_revoked rejection"
+        );
+
+        // Re-grant trust live and dispatch a new turn WITHOUT restarting DesktopState.
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: skarn_protocol::SettingsPatchDto {
+                            workspace_trusted: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("re-grant trust live");
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    send_agent("req-trust-2", "sess-trust", "simple follow-up"),
+                ),
+            )
+            .expect("new turn must succeed without restart after live trust toggle");
+
+        let done_events = wait_for(&state, |event| {
+            matches!(
+                &event.payload,
+                FrontendEvent::AgentTurnDone(done) if done.request_id.as_str() == "req-trust-2"
+            )
+        });
+        let done2 = done_events
+            .iter()
+            .find_map(|e| match &e.payload {
+                FrontendEvent::AgentTurnDone(done) if done.request_id.as_str() == "req-trust-2" => {
+                    Some(done.clone())
+                }
+                _ => None,
+            })
+            .expect("follow-up turn done");
+        assert!(done2.completed);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(settings_path.parent().unwrap());
+    }
+
+    #[test]
+    fn turn_checkpoint_aborts_atomically_on_manual_edit_and_roundtrips_clean_undo_reapply() {
+        let app = mock_app_handle();
+        let root = temp_workspace("s3-checkpoint");
+        let settings_path = temp_settings_file("s3-checkpoint");
+
+        let rounds = vec![
+            (
+                "w-new",
+                answer_round_sse("updated NOTES.md and created new_file.txt", 0.001),
+            ),
+            (
+                "checkpoint two files",
+                tool_round_sse(
+                    &[
+                        (
+                            "w-notes",
+                            "write_file",
+                            r#"{"path":"NOTES.md","content":"agent-notes-v2\n"}"#,
+                        ),
+                        (
+                            "w-new",
+                            "write_file",
+                            r#"{"path":"new_file.txt","content":"brand-new-v1\n"}"#,
+                        ),
+                    ],
+                    "editing two files",
+                    0.001,
+                ),
+            ),
+        ];
+        let server = mock_gateway(rounds, true);
+        write_settings_file(&settings_path, &gateway_settings(server.uri()));
+        let state = desktop_with_settings_path(settings_path.clone());
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFolderAt {
+                        root: root.to_string_lossy().into_owned(),
+                    },
+                ),
+            )
+            .expect("open folder");
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFile {
+                        path: skarn_protocol::WorkspacePath::new("NOTES.md").unwrap(),
+                    },
+                ),
+            )
+            .expect("open NOTES.md");
+
+        let mut command = send_agent("req-cp-1", "sess-cp", "checkpoint two files");
+        if let FrontendCommand::SendAgent { request, .. } = &mut command {
+            request.mode = AgentModeDto::AutoEdit;
+        }
+        state
+            .dispatch(&app, envelope(&state, command))
+            .expect("send checkpoint turn");
+
+        let events = wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::AgentTurnDone(_))
+        });
+        let summary = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                FrontendEvent::TurnCheckpointUpdated(cp) => Some(cp.clone()),
+                _ => None,
+            })
+            .expect("TurnCheckpointUpdated emitted");
+        assert!(!summary.undone);
+        assert_eq!(summary.files.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(root.join("NOTES.md")).expect("NOTES.md"),
+            "agent-notes-v2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new_file.txt")).expect("new_file.txt"),
+            "brand-new-v1\n"
+        );
+
+        // Simulate human manual edit on disk: Undo must abort atomically with zero partial mutations!
+        std::fs::write(root.join("NOTES.md"), "human-manual-edit\n").expect("manual edit");
+        let conflict_err = state
+            .dispatch_result(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::UndoAgentTurn {
+                        session_id: summary.session_id.clone(),
+                        turn_id: summary.turn_id.clone(),
+                    },
+                ),
+            )
+            .expect_err("manual edit must trigger atomic conflict abort");
+        assert_eq!(conflict_err.code, "checkpoint_conflict");
+        assert!(
+            root.join("new_file.txt").exists(),
+            "conflict abort must NOT delete new_file.txt (all-or-nothing)"
+        );
+
+        // Restore expected post-turn bytes, then perform clean Undo + Reapply round-trip.
+        std::fs::write(root.join("NOTES.md"), "agent-notes-v2\n").expect("restore after bytes");
+        state
+            .dispatch_result(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::UndoAgentTurn {
+                        session_id: summary.session_id.clone(),
+                        turn_id: summary.turn_id.clone(),
+                    },
+                ),
+            )
+            .expect("clean undo succeeds");
+        assert_eq!(
+            std::fs::read_to_string(root.join("NOTES.md")).expect("undone NOTES.md"),
+            "notes-body-xyz\n"
+        );
+        assert!(
+            !root.join("new_file.txt").exists(),
+            "existed_before == false file must be removed on Undo"
+        );
+
+        state
+            .dispatch_result(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::ReapplyAgentTurn {
+                        session_id: summary.session_id.clone(),
+                        turn_id: summary.turn_id.clone(),
+                    },
+                ),
+            )
+            .expect("clean reapply succeeds");
+        assert_eq!(
+            std::fs::read_to_string(root.join("NOTES.md")).expect("reapplied NOTES.md"),
+            "agent-notes-v2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new_file.txt")).expect("recreated new_file.txt"),
+            "brand-new-v1\n"
+        );
+
+        tauri::async_runtime::block_on(async { server.verify().await });
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(settings_path.parent().unwrap());
+    }
+
+    #[test]
+    fn untrusted_workspace_skips_workspace_rules_and_loads_global_rules_only() {
+        let app = mock_app_handle();
+        let root = temp_workspace("s3-rules");
+        let settings_path = temp_settings_file("s3-rules");
+        let app_data_dir = settings_path.parent().unwrap().to_path_buf();
+
+        std::fs::write(app_data_dir.join("AGENTS.md"), "GLOBAL_RULE_MARKER_777\n")
+            .expect("global AGENTS.md");
+        std::fs::write(root.join("AGENTS.md"), "WORKSPACE_AGENTS_SECRET_888\n")
+            .expect("workspace AGENTS.md");
+        std::fs::create_dir_all(root.join(".skarn")).expect(".skarn dir");
+        std::fs::write(root.join(".skarn").join("rules"), "WORKSPACE_SKARN_RULE_999\n")
+            .expect("workspace .skarn/rules");
+
+        let server = mock_gateway(
+            vec![("rules check", answer_round_sse("ok", 0.001))],
+            true,
+        );
+        let mut settings = gateway_settings(server.uri());
+        settings.agent.workspace_trusted = false;
+        write_settings_file(&settings_path, &settings);
+
+        let state = desktop_with_settings_path(settings_path.clone());
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::OpenFolderAt {
+                        root: root.to_string_lossy().into_owned(),
+                    },
+                ),
+            )
+            .expect("open folder");
+
+        let boot = state.bootstrap();
+        let global = boot
+            .rules_in_effect
+            .iter()
+            .find(|r| r.scope == skarn_protocol::RuleScopeDto::Global)
+            .expect("global rule loaded");
+        assert!(global.active);
+        let ws_rules: Vec<_> = boot
+            .rules_in_effect
+            .iter()
+            .filter(|r| r.scope == skarn_protocol::RuleScopeDto::Workspace)
+            .collect();
+        assert_eq!(ws_rules.len(), 2);
+        assert!(ws_rules
+            .iter()
+            .all(|r| !r.active && r.inactive_reason.as_deref() == Some("workspace_untrusted")));
+
+        let mut cmd = send_agent("req-rules-1", "sess-rules", "rules check");
+        if let FrontendCommand::SendAgent { request, .. } = &mut cmd {
+            request.attachments.push(skarn_protocol::AttachmentDto {
+                path: skarn_protocol::WorkspacePath::new("NOTES.md").unwrap(),
+                kind: skarn_protocol::AttachmentKindDto::File,
+                selection: None,
+                label: Some("Primary note".into()),
+            });
+        }
+        state.dispatch(&app, envelope(&state, cmd)).expect("send_agent");
+        wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::AgentTurnDone(_))
+        });
+
+        let requests =
+            tauri::async_runtime::block_on(async { server.received_requests().await }).unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("GLOBAL_RULE_MARKER_777"));
+        assert!(!body.contains("WORKSPACE_AGENTS_SECRET_888"));
+        assert!(!body.contains("WORKSPACE_SKARN_RULE_999"));
+        assert!(body.contains("[file] NOTES.md (Primary note)"));
+
+        // Grant trust live -> workspace rules become active immediately via RulesLoaded.
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SettingsUpdate {
+                        patch: skarn_protocol::SettingsPatchDto {
+                            workspace_trusted: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+            .expect("trust workspace live");
+        let trusted_boot = state.bootstrap();
+        assert!(trusted_boot
+            .rules_in_effect
+            .iter()
+            .filter(|r| r.scope == skarn_protocol::RuleScopeDto::Workspace)
+            .all(|r| r.active));
+
+        tauri::async_runtime::block_on(async { server.verify().await });
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&app_data_dir);
+    }
+
+    #[test]
+    fn question_countdown_and_high_risk_grant_ceiling_enforced_in_desktop_dispatch() {
+        let app = mock_app_handle();
+        let root = temp_workspace("s3-question-ceiling");
+        let rounds = vec![
+            (
+                "user denied this action",
+                answer_round_sse("understood, not deleting", 0.001),
+            ),
+            (
+                "delete-1",
+                tool_round_sse(
+                    &[("delete-1", "delete_file", r#"{"path":"NOTES.md"}"#)],
+                    "asking delete",
+                    0.001,
+                ),
+            ),
+            (
+                "Choice A",
+                tool_round_sse(
+                    &[("delete-1", "delete_file", r#"{"path":"NOTES.md"}"#)],
+                    "now delete",
+                    0.001,
+                ),
+            ),
+            (
+                "question and delete test",
+                tool_round_sse(
+                    &[(
+                        "q-1",
+                        "ask_user_question",
+                        r#"{"questions":[{"question":"Which option?","options":[{"label":"Choice A","description":"first"}]}]}"#,
+                    )],
+                    "asking question",
+                    0.001,
+                ),
+            ),
+        ];
+        let server = mock_gateway(rounds, false);
+        let state = DesktopState::with_settings(gateway_settings(server.uri()));
+        seed_supported_test_model(&state);
+        state.sessions().set_workspace_root(Some(root.clone()));
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    send_agent("req-qc-1", "sess-qc", "question and delete test"),
+                ),
+            )
+            .expect("send_agent");
+
+        // 1. Non-destructive Question carries 300s countdown + supports retroactive pause.
+        let q_events = wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::ApprovalNeeded(_))
+        });
+        let q_approval = find_payload(&q_events, |payload| match payload {
+            FrontendEvent::ApprovalNeeded(dto) => Some(dto.clone()),
+            _ => None,
+        });
+        assert!(q_approval
+            .question_timeout
+            .as_ref()
+            .is_some_and(|qt| qt.auto_continue_allowed && !qt.paused && !qt.timed_out));
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::SetQuestionCountdown {
+                        request_id: q_approval.request_id.clone(),
+                        approval_id: q_approval.approval_id.clone(),
+                        paused: true,
+                    },
+                ),
+            )
+            .expect("pause countdown");
+        let paused_events = wait_for(&state, |event| {
+            matches!(
+                &event.payload,
+                FrontendEvent::QuestionCountdownUpdated(u) if u.timeout.paused
+            )
+        });
+        assert!(paused_events.iter().any(|e| matches!(
+            &e.payload,
+            FrontendEvent::QuestionCountdownUpdated(u)
+                if u.approval_id == q_approval.approval_id && u.timeout.paused
+        )));
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::AgentDecision {
+                        request_id: q_approval.request_id.clone(),
+                        approval_id: q_approval.approval_id.clone(),
+                        decision: DecisionDto::Answer,
+                        resolution: Some(skarn_protocol::AgentDecisionResolutionDto::Question {
+                            option_id: Some("Choice A".into()),
+                            text: None,
+                        }),
+                    },
+                ),
+            )
+            .expect("answer question");
+
+        // 2. Destructive delete_file NEVER carries auto_continue question_timeout & rejects AllowProject.
+        let d_approval = wait_for_new_approval(&state, Some(q_approval.approval_id.as_str()));
+        let d_events = state.events_after(0);
+        let d_card = d_events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                FrontendEvent::ApprovalNeeded(dto)
+                    if dto.approval_id == d_approval.approval_id =>
+                {
+                    Some(dto.clone())
+                }
+                _ => None,
+            })
+            .expect("delete approval card");
+        assert!(d_card.question_timeout.is_none());
+        assert_eq!(d_card.risk, Some(skarn_protocol::RiskLevelDto::High));
+
+        let ceiling_err = state
+            .dispatch_result(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::AgentDecision {
+                        request_id: d_card.request_id.clone(),
+                        approval_id: d_card.approval_id.clone(),
+                        decision: DecisionDto::Approve,
+                        resolution: Some(skarn_protocol::AgentDecisionResolutionDto::Scoped {
+                            grant: skarn_protocol::GrantDecisionDto::AllowProject,
+                            target_pattern: None,
+                        }),
+                    },
+                ),
+            )
+            .expect_err("High-risk AllowProject must fail with grant_exceeds_risk_ceiling");
+        assert_eq!(ceiling_err.code, "grant_exceeds_risk_ceiling");
+
+        state
+            .dispatch(
+                &app,
+                envelope(
+                    &state,
+                    FrontendCommand::AgentDecision {
+                        request_id: d_card.request_id,
+                        approval_id: d_card.approval_id,
+                        decision: DecisionDto::Deny,
+                        resolution: None,
+                    },
+                ),
+            )
+            .expect("deny delete");
+
+        wait_for(&state, |event| {
+            matches!(event.payload, FrontendEvent::AgentTurnDone(_))
+        });
+        assert!(root.join("NOTES.md").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

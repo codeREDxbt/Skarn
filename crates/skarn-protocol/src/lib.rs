@@ -214,6 +214,29 @@ pub struct AgentRequestDto {
     /// old turn records carry no editor context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_context: Option<EditorContextDto>,
+    /// Stage 3: typed file/selection/symbol attachments (replaces prose header injection).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentDto>,
+}
+/// Stage 3: typed attachment kind for `AgentRequestDto::attachments`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKindDto {
+    #[default]
+    File,
+    Selection,
+    Symbol,
+}
+/// Stage 3: structured attachment reference sent alongside `AgentRequestDto`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentDto {
+    pub path: WorkspacePath,
+    #[serde(default)]
+    pub kind: AttachmentKindDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 /// Where the user is, at the moment the turn was sent. Never the file
 /// contents: the agent reads those with `read_file`, so the prompt stays
@@ -230,17 +253,19 @@ pub struct EditorContextDto {
     /// Whether the buffer has unsaved edits at send time.
     pub dirty: bool,
 }
-/// The `SendAgent` permission mode (Phase Z3). Serde-rejected spellings
-/// never reach a Rust arm — the boundary is the validator.
+/// Canonical 4-mode permission model (Stage 3). Legacy wire names
+/// (`explore`, `execute`, `auto`) deserialize via serde aliases.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentModeDto {
+    #[serde(alias = "explore")]
+    ReadOnly,
     #[default]
-    Execute,
-    Explore,
-    /// Session full access: the full manifest, and file writes/edits/deletes
-    /// apply without an approval card. Bash still cards. Never persisted.
-    Auto,
+    #[serde(alias = "execute")]
+    AskBeforeChanges,
+    #[serde(alias = "auto")]
+    AutoEdit,
+    FullAccess,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -265,6 +290,11 @@ pub enum AgentDecisionResolutionDto {
     Plan {
         decision: String,
         feedback: Option<String>,
+    },
+    Scoped {
+        grant: GrantDecisionDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_pattern: Option<String>,
     },
 }
 
@@ -458,6 +488,15 @@ pub struct SettingsPatchDto {
     /// trust and an approval. `None` leaves the stored value untouched.
     #[serde(default)]
     pub workspace_trusted: Option<bool>,
+    /// Stage 3: global `local_only` privacy mode (blocks cloud decision providers).
+    #[serde(default)]
+    pub local_only: Option<bool>,
+    /// Stage 3: per-workspace `local_only` override for the currently attached workspace.
+    #[serde(default)]
+    pub workspace_local_only: Option<bool>,
+    /// Stage 3: clear the per-workspace `local_only` override so it inherits global.
+    #[serde(default)]
+    pub clear_workspace_local_only: Option<bool>,
 }
 
 /// Default history page size for `GitLog` when the caller omits `limit`.
@@ -777,6 +816,26 @@ pub enum FrontendCommand {
     },
     TerminalClose {
         terminal_id: String,
+    },
+    // Stage 3 — turn checkpoints, scoped grants, and clocked question countdowns.
+    UndoAgentTurn {
+        session_id: SessionId,
+        turn_id: TurnId,
+    },
+    ReapplyAgentTurn {
+        session_id: SessionId,
+        turn_id: TurnId,
+    },
+    RevokeScopedGrant {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+        action_class: ActionClassDto,
+        target_pattern: String,
+    },
+    SetQuestionCountdown {
+        request_id: RequestId,
+        approval_id: ApprovalId,
+        paused: bool,
     },
 }
 
@@ -1207,6 +1266,15 @@ pub struct SettingsViewDto {
     /// commands. Read-only commands on the allowlist run regardless.
     #[serde(default)]
     pub workspace_trusted: bool,
+    /// Stage 3: global `local_only` privacy mode.
+    #[serde(default)]
+    pub local_only: bool,
+    /// Stage 3: per-workspace `local_only` override, if explicitly configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_local_only: Option<bool>,
+    /// Stage 3: effective `local_only` (`workspace_local_only.unwrap_or(local_only)`).
+    #[serde(default)]
+    pub effective_local_only: bool,
 }
 /// Phase Z2 serde defaults (§5.1 / §4.2): every field is defaulted so a
 /// partial or pre-Z2 `LayoutDto` JSON deserializes — the values are §1.1's
@@ -1538,6 +1606,15 @@ pub struct BootstrapState {
     /// resume picker). Read-only projection — switching loads the session.
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionSummaryDto>,
+    /// Stage 3: active scoped grants (session + persisted project grants).
+    #[serde(default)]
+    pub scoped_grants: Vec<ScopedGrantDto>,
+    /// Stage 3: rules sources discovered (global + workspace, with active flags).
+    #[serde(default)]
+    pub rules_in_effect: Vec<RuleSourceDto>,
+    /// Stage 3: turn checkpoints available for Undo/Reapply in the active workspace.
+    #[serde(default)]
+    pub turn_checkpoints: Vec<TurnCheckpointSummaryDto>,
 }
 
 /// The reply shape of `dispatch_command` (P1 state slice).
@@ -1742,6 +1819,188 @@ pub struct ApprovalNeededDto {
     /// subagent's write/bash/question rather than the parent turn's own call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_id: Option<String>,
+    /// Stage 3: effective risk tier of the action (`low`, `medium`, `high`, `critical`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskLevelDto>,
+    /// Stage 3: capability class of the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_class: Option<ActionClassDto>,
+    /// Stage 3: clocked question timeout metadata (present on non-destructive Question cards).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_timeout: Option<QuestionTimeoutDto>,
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 — Decision Engine, Scoped Grants, Rules Boundary & Turn Checkpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevelDto {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionClassDto {
+    ReadInspect,
+    FileEdit,
+    FileDelete,
+    CommandAllowlisted,
+    CommandGated,
+    Workflow,
+    PlanControl,
+    Question,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantDecisionDto {
+    AllowOnce,
+    AllowSession,
+    AllowProject,
+    DenyOnce,
+    DenySession,
+    DenyProject,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScopedGrantDto {
+    pub action_class: ActionClassDto,
+    pub target_pattern: String,
+    pub decision: GrantDecisionDto,
+    pub max_risk: RiskLevelDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScopedGrantsChangedDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    pub grants: Vec<ScopedGrantDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTierDto {
+    Tier1Deterministic,
+    Tier2DecisionModel,
+    Tier3GeneralLlm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionPhaseDto {
+    Snapshotted,
+    Routed,
+    Inferred,
+    SchemaValidated,
+    PolicyEvaluated,
+    ApprovalPending,
+    SnapshotRechecked,
+    Executed,
+    Verified,
+    Stale,
+    Escalated,
+    Rejected,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecisionTraceDto {
+    pub request_id: RequestId,
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub call_id: String,
+    pub trace_id: String,
+    pub action_id: String,
+    pub risk: RiskLevelDto,
+    pub phase: DecisionPhaseDto,
+    pub selected_tier: ExecutionTierDto,
+    pub candidate_tiers: Vec<ExecutionTierDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub hop_count: u8,
+    pub privacy_blocked_cloud: bool,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibrated_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_confidence: Option<f64>,
+    pub fsm_path: Vec<DecisionPhaseDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleScopeDto {
+    Global,
+    Workspace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuleSourceDto {
+    pub path: String,
+    pub scope: RuleScopeDto,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RulesLoadedDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    pub workspace_trusted: bool,
+    pub sources: Vec<RuleSourceDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionTimeoutDto {
+    pub deadline_ms: u64,
+    pub auto_continue_allowed: bool,
+    pub timed_out: bool,
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionCountdownUpdatedDto {
+    pub request_id: RequestId,
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub approval_id: ApprovalId,
+    pub timeout: QuestionTimeoutDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TurnCheckpointFileDto {
+    pub path: String,
+    pub existed_before: bool,
+    pub existed_after: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UndoConflictDto {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TurnCheckpointSummaryDto {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub created_at_ms: u64,
+    pub files: Vec<TurnCheckpointFileDto>,
+    pub undone: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<UndoConflictDto>,
 }
 /// The agent status line's phase (drives the dock's ThinkingOrb state).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2380,6 +2639,12 @@ pub enum FrontendEvent {
     TerminalCreated(TerminalCreatedDto),
     TerminalOutput(TerminalOutputDto),
     TerminalExited(TerminalExitedDto),
+    // Stage 3 — decision traces, turn checkpoints, scoped grants, rules, question timer.
+    DecisionTrace(DecisionTraceDto),
+    TurnCheckpointUpdated(TurnCheckpointSummaryDto),
+    ScopedGrantsChanged(ScopedGrantsChangedDto),
+    RulesLoaded(RulesLoadedDto),
+    QuestionCountdownUpdated(QuestionCountdownUpdatedDto),
     Error(ProtocolErrorDto),
 }
 
@@ -2610,6 +2875,9 @@ mod tests {
                 check_for_updates: true,
                 disabled_providers: vec![],
                 workspace_trusted: false,
+                local_only: false,
+                workspace_local_only: None,
+                effective_local_only: false,
             },
             // §1.1: the Z1 stub values (280/220, agent dock open) were
             // diagnostic placeholders — Z2's fixture carries the table's
@@ -2644,6 +2912,9 @@ mod tests {
             },
             workflows: vec![],
             agent_sessions: vec![],
+            scoped_grants: vec![],
+            rules_in_effect: vec![],
+            turn_checkpoints: vec![],
         }
     }
     #[test]
@@ -3230,15 +3501,16 @@ mod tests {
                     session_id: sid("session-1"),
                     prompt: "fix it".into(),
                     model_id: None,
-                    mode: AgentModeDto::Execute,
+                    mode: AgentModeDto::AskBeforeChanges,
                     reasoning_effort: None,
                     system_instructions: None,
                     temperature: None,
                     editor_context: None,
+                    attachments: vec![],
                 },
             })
             .unwrap(),
-            r#"{"type":"send_agent","payload":{"request_id":"request-1","request":{"session_id":"session-1","prompt":"fix it","model_id":null,"mode":"execute"}}}"#
+            r#"{"type":"send_agent","payload":{"request_id":"request-1","request":{"session_id":"session-1","prompt":"fix it","model_id":null,"mode":"ask_before_changes"}}}"#
         );
         assert_eq!(
             serde_json::to_string(&FrontendCommand::AgentDecision {
@@ -3290,6 +3562,9 @@ mod tests {
                 plan: None,
                 prompt: None,
                 subagent_id: None,
+                risk: None,
+                action_class: None,
+                question_timeout: None,
             }))
             .unwrap(),
             r#"{"type":"approval_needed","payload":{"request_id":"request-1","session_id":"session-1","turn_id":"turn-1","approval_id":"approval-1","tool_name":"write_file","path_or_command":"src/main.rs","diff_or_input":"+fn main() {}"}}"#
@@ -3308,6 +3583,9 @@ mod tests {
                 plan: None,
                 prompt: None,
                 subagent_id: None,
+                risk: None,
+                action_class: None,
+                question_timeout: None,
             }))
             .unwrap(),
             r#"{"type":"approval_needed","payload":{"request_id":"request-1","session_id":"session-1","turn_id":"turn-1","approval_id":"approval-1","tool_name":"bash","path_or_command":"cargo test"}}"#
@@ -3332,6 +3610,9 @@ mod tests {
             plan: None,
             prompt: None,
             subagent_id: None,
+            risk: None,
+            action_class: None,
+            question_timeout: None,
         };
         let workflow_json =
             serde_json::to_string(&FrontendEvent::ApprovalNeeded(workflow_card.clone())).unwrap();
@@ -3543,12 +3824,12 @@ mod tests {
         .unwrap();
         assert_eq!(completed.total_tokens, 0);
         assert_eq!(completed.cost_usd, 0.0);
-        // A pre-Z3 AgentRequestDto (no mode) defaults to execute.
+        // A pre-Z3 AgentRequestDto (no mode) defaults to ask_before_changes.
         let request = serde_json::from_str::<AgentRequestDto>(
             r#"{"session_id":"s","prompt":"p","model_id":null}"#,
         )
         .unwrap();
-        assert!(matches!(request.mode, AgentModeDto::Execute));
+        assert!(matches!(request.mode, AgentModeDto::AskBeforeChanges));
     }
     #[test]
     fn editor_context_round_trips_and_old_payloads_default() {
@@ -3556,7 +3837,7 @@ mod tests {
             session_id: sid("session-1"),
             prompt: "fix it".into(),
             model_id: None,
-            mode: AgentModeDto::Execute,
+            mode: AgentModeDto::AskBeforeChanges,
             reasoning_effort: None,
             system_instructions: None,
             temperature: None,
@@ -3576,6 +3857,7 @@ mod tests {
                 }),
                 dirty: true,
             }),
+            attachments: vec![],
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains(r#""editor_context""#), "{json}");
@@ -4256,6 +4538,9 @@ mod tests {
             }),
             prompt: None,
             subagent_id: None,
+            risk: None,
+            action_class: None,
+            question_timeout: None,
         };
         let json = serde_json::to_string(&FrontendEvent::ApprovalNeeded(card.clone())).unwrap();
         assert!(json.contains("\"plan\""));
@@ -4289,6 +4574,9 @@ mod tests {
                 free_text_placeholder: None,
             }),
             subagent_id: None,
+            risk: None,
+            action_class: None,
+            question_timeout: None,
         };
         let question_json =
             serde_json::to_string(&FrontendEvent::ApprovalNeeded(question_card.clone())).unwrap();
@@ -4503,5 +4791,140 @@ mod tests {
         )
         .unwrap();
         assert_eq!(modern.tool_capability, ToolCapabilityDto::Supported);
+    }
+
+    #[test]
+    fn stage3_agent_modes_aliases_and_wire_dtos_round_trip() {
+        assert_eq!(
+            serde_json::from_str::<AgentModeDto>(r#""explore""#).unwrap(),
+            AgentModeDto::ReadOnly
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentModeDto>(r#""execute""#).unwrap(),
+            AgentModeDto::AskBeforeChanges
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentModeDto>(r#""auto""#).unwrap(),
+            AgentModeDto::AutoEdit
+        );
+        for (mode, wire) in [
+            (AgentModeDto::ReadOnly, r#""read_only""#),
+            (AgentModeDto::AskBeforeChanges, r#""ask_before_changes""#),
+            (AgentModeDto::AutoEdit, r#""auto_edit""#),
+            (AgentModeDto::FullAccess, r#""full_access""#),
+        ] {
+            let encoded = serde_json::to_string(&mode).unwrap();
+            assert_eq!(encoded, wire);
+            assert_eq!(serde_json::from_str::<AgentModeDto>(&encoded).unwrap(), mode);
+        }
+
+        assert_command_wire(
+            FrontendCommand::UndoAgentTurn {
+                session_id: sid("session-1"),
+                turn_id: tid("turn-1"),
+            },
+            r#"{"type":"undo_agent_turn","payload":{"session_id":"session-1","turn_id":"turn-1"}}"#,
+        );
+        assert_command_wire(
+            FrontendCommand::ReapplyAgentTurn {
+                session_id: sid("session-1"),
+                turn_id: tid("turn-1"),
+            },
+            r#"{"type":"reapply_agent_turn","payload":{"session_id":"session-1","turn_id":"turn-1"}}"#,
+        );
+        assert_command_wire(
+            FrontendCommand::RevokeScopedGrant {
+                session_id: Some(sid("session-1")),
+                action_class: ActionClassDto::FileEdit,
+                target_pattern: "src/*".into(),
+            },
+            r#"{"type":"revoke_scoped_grant","payload":{"session_id":"session-1","action_class":"file_edit","target_pattern":"src/*"}}"#,
+        );
+        assert_command_wire(
+            FrontendCommand::SetQuestionCountdown {
+                request_id: rid("request-1"),
+                approval_id: aid("approval-1"),
+                paused: true,
+            },
+            r#"{"type":"set_question_countdown","payload":{"request_id":"request-1","approval_id":"approval-1","paused":true}}"#,
+        );
+
+        let trace = FrontendEvent::DecisionTrace(DecisionTraceDto {
+            request_id: rid("request-1"),
+            session_id: sid("session-1"),
+            turn_id: tid("turn-1"),
+            call_id: "call_1".into(),
+            trace_id: "trace-1".into(),
+            action_id: "edit_file".into(),
+            risk: RiskLevelDto::Medium,
+            phase: DecisionPhaseDto::Verified,
+            selected_tier: ExecutionTierDto::Tier1Deterministic,
+            candidate_tiers: vec![ExecutionTierDto::Tier1Deterministic],
+            provider_id: None,
+            model_id: None,
+            hop_count: 0,
+            privacy_blocked_cloud: false,
+            reason_code: "auto_edit_checkpointed".into(),
+            calibrated_threshold: None,
+            raw_confidence: None,
+            fsm_path: vec![
+                DecisionPhaseDto::Snapshotted,
+                DecisionPhaseDto::Routed,
+                DecisionPhaseDto::Verified,
+            ],
+        });
+        assert_eq!(
+            serde_json::from_str::<FrontendEvent>(&serde_json::to_string(&trace).unwrap()).unwrap(),
+            trace
+        );
+
+        let checkpoint = FrontendEvent::TurnCheckpointUpdated(TurnCheckpointSummaryDto {
+            session_id: sid("session-1"),
+            turn_id: tid("turn-1"),
+            created_at_ms: 12345,
+            files: vec![TurnCheckpointFileDto {
+                path: "src/lib.rs".into(),
+                existed_before: true,
+                existed_after: true,
+            }],
+            undone: false,
+            conflicts: vec![],
+        });
+        assert_eq!(
+            serde_json::from_str::<FrontendEvent>(&serde_json::to_string(&checkpoint).unwrap())
+                .unwrap(),
+            checkpoint
+        );
+
+        let grants = FrontendEvent::ScopedGrantsChanged(ScopedGrantsChangedDto {
+            session_id: Some(sid("session-1")),
+            grants: vec![ScopedGrantDto {
+                action_class: ActionClassDto::FileEdit,
+                target_pattern: "src/lib.rs".into(),
+                decision: GrantDecisionDto::AllowSession,
+                max_risk: RiskLevelDto::Medium,
+            }],
+        });
+        assert_eq!(
+            serde_json::from_str::<FrontendEvent>(&serde_json::to_string(&grants).unwrap())
+                .unwrap(),
+            grants
+        );
+
+        let rules = FrontendEvent::RulesLoaded(RulesLoadedDto {
+            session_id: Some(sid("session-1")),
+            workspace_trusted: false,
+            sources: vec![RuleSourceDto {
+                path: "AGENTS.md".into(),
+                scope: RuleScopeDto::Workspace,
+                active: false,
+                inactive_reason: Some("workspace_untrusted".into()),
+                digest: None,
+            }],
+        });
+        assert_eq!(
+            serde_json::from_str::<FrontendEvent>(&serde_json::to_string(&rules).unwrap()).unwrap(),
+            rules
+        );
     }
 }
