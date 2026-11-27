@@ -8,11 +8,13 @@ import { makeBootstrap } from '../../testing/fixtures';
 const harness = vi.hoisted(() => ({
   updateSettings: vi.fn(),
   restartLsp: vi.fn(),
+  revokeScopedGrant: vi.fn(),
 }));
 
 vi.mock('../../bridge/bridge', () => ({
   updateSettings: harness.updateSettings,
   restartLsp: harness.restartLsp,
+  revokeScopedGrant: harness.revokeScopedGrant,
 }));
 
 import { SettingsPanelView } from './SettingsPanelView';

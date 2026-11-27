@@ -86,6 +86,12 @@ export type SettingsView = {
    * on the read-only allowlist run regardless.
    */
   workspace_trusted?: boolean;
+  /** Stage 3: global `local_only` privacy mode. */
+  local_only?: boolean;
+  /** Stage 3: per-workspace `local_only` override, if explicitly configured. */
+  workspace_local_only?: boolean | null;
+  /** Stage 3: effective `local_only` (`workspace_local_only ?? local_only`). */
+  effective_local_only?: boolean;
 };
 
 /** The backend-supported writable subset of `SettingsView` (SettingsPatchDto). */
@@ -107,6 +113,12 @@ export type SettingsPatch = {
   disabled_providers?: string[];
   /** Grant or revoke risky agent shell commands for this workspace. */
   workspace_trusted?: boolean;
+  /** Stage 3: global `local_only` privacy mode (blocks cloud decision providers). */
+  local_only?: boolean;
+  /** Stage 3: per-workspace `local_only` override for the currently attached workspace. */
+  workspace_local_only?: boolean;
+  /** Stage 3: clear the per-workspace `local_only` override so it inherits global. */
+  clear_workspace_local_only?: boolean;
 };
 
 // --- DTOs referenced by the full FrontendEvent union ------------------------
@@ -215,6 +227,12 @@ export type BootstrapState = {
   workflows?: WorkflowPersistedRun[];
   /** Phase 9d: durable sessions for the resume picker (newest first). */
   agent_sessions?: AgentSessionSummary[];
+  /** Stage 3: active scoped grants (session + persisted project grants). */
+  scoped_grants?: ScopedGrantDto[];
+  /** Stage 3: rules sources discovered (global + workspace, with active flags). */
+  rules_in_effect?: RuleSourceDto[];
+  /** Stage 3: turn checkpoints available for Undo/Reapply in the active workspace. */
+  turn_checkpoints?: TurnCheckpointSummaryDto[];
 };
 
 /** One durable agent session in the resume picker (`.selora/agent-sessions`). */
@@ -276,6 +294,140 @@ export type AgentMode =
   | 'explore'
   | 'auto';
 export type AgentPhase = 'thinking' | 'running_tool' | 'awaiting_approval' | 'done';
+
+export type AttachmentKindDto = 'file' | 'selection' | 'symbol';
+
+export type AttachmentDto = {
+  path: string;
+  kind: AttachmentKindDto;
+  selection?: Selection;
+  label?: string;
+};
+
+export type RiskLevelDto = 'low' | 'medium' | 'high' | 'critical';
+
+export type ActionClassDto =
+  | 'read_inspect'
+  | 'file_edit'
+  | 'file_delete'
+  | 'command_allowlisted'
+  | 'command_gated'
+  | 'workflow'
+  | 'plan_control'
+  | 'question';
+
+export type GrantDecisionDto =
+  | 'allow_once'
+  | 'allow_session'
+  | 'allow_project'
+  | 'deny_once'
+  | 'deny_session'
+  | 'deny_project';
+
+export type ScopedGrantDto = {
+  action_class: ActionClassDto;
+  target_pattern: string;
+  decision: GrantDecisionDto;
+  max_risk: RiskLevelDto;
+};
+
+export type ScopedGrantsChangedDto = {
+  session_id?: Id | null;
+  grants: ScopedGrantDto[];
+};
+
+export type ExecutionTierDto =
+  | 'tier1_deterministic'
+  | 'tier2_decision_model'
+  | 'tier3_general_llm';
+
+export type DecisionPhaseDto =
+  | 'snapshotted'
+  | 'routed'
+  | 'inferred'
+  | 'schema_validated'
+  | 'policy_evaluated'
+  | 'approval_pending'
+  | 'snapshot_rechecked'
+  | 'executed'
+  | 'verified'
+  | 'stale'
+  | 'escalated'
+  | 'rejected'
+  | 'cancelled'
+  | 'failed';
+
+export type DecisionTraceDto = {
+  request_id: Id;
+  session_id: Id;
+  turn_id: Id;
+  call_id: string;
+  trace_id: string;
+  action_id: string;
+  risk: RiskLevelDto;
+  phase: DecisionPhaseDto;
+  selected_tier: ExecutionTierDto;
+  candidate_tiers: ExecutionTierDto[];
+  provider_id?: string | null;
+  model_id?: string | null;
+  hop_count: number;
+  privacy_blocked_cloud: boolean;
+  reason_code: string;
+  calibrated_threshold?: number | null;
+  raw_confidence?: number | null;
+  fsm_path: DecisionPhaseDto[];
+};
+
+export type RuleScopeDto = 'global' | 'workspace';
+
+export type RuleSourceDto = {
+  path: string;
+  scope: RuleScopeDto;
+  active: boolean;
+  inactive_reason?: string | null;
+  digest?: string | null;
+};
+
+export type RulesLoadedDto = {
+  session_id?: Id | null;
+  workspace_trusted: boolean;
+  sources: RuleSourceDto[];
+};
+
+export type QuestionTimeoutDto = {
+  deadline_ms: number;
+  auto_continue_allowed: boolean;
+  timed_out: boolean;
+  paused?: boolean;
+};
+
+export type QuestionCountdownUpdatedDto = {
+  request_id: Id;
+  session_id: Id;
+  turn_id: Id;
+  approval_id: Id;
+  timeout: QuestionTimeoutDto;
+};
+
+export type TurnCheckpointFileDto = {
+  path: string;
+  existed_before: boolean;
+  existed_after: boolean;
+};
+
+export type UndoConflictDto = {
+  path: string;
+  reason: string;
+};
+
+export type TurnCheckpointSummaryDto = {
+  session_id: Id;
+  turn_id: Id;
+  created_at_ms: number;
+  files: TurnCheckpointFileDto[];
+  undone: boolean;
+  conflicts?: UndoConflictDto[];
+};
 
 export type ToolCallStartedPayload = {
   request_id: Id;
@@ -348,6 +500,11 @@ export type AgentDecisionResolution =
       decision: 'approve' | 'request_changes';
       /** Required for `request_changes`; the revision note for the agent. */
       feedback?: string;
+    }
+  | {
+      kind: 'scoped';
+      grant: GrantDecisionDto;
+      target_pattern?: string;
     };
 
 export type ApprovalNeededPayload = {
@@ -373,6 +530,12 @@ export type ApprovalNeededPayload = {
   /** §19.3: the background child that raised this card, when it is a
    * subagent's write/bash/question rather than the parent turn's own call. */
   subagent_id?: string;
+  /** Stage 3: effective risk tier of the action (`low`, `medium`, `high`, `critical`). */
+  risk?: RiskLevelDto;
+  /** Stage 3: capability class of the action. */
+  action_class?: ActionClassDto;
+  /** Stage 3: clocked question timeout metadata (present on non-destructive Question cards). */
+  question_timeout?: QuestionTimeoutDto;
 };
 
 export type PlanStateChangedPayload = {
@@ -504,6 +667,8 @@ export type AgentRequestDto = {
   system_instructions?: string;
   temperature?: number;
   editor_context?: EditorContextDto;
+  /** Stage 3: typed file/selection/symbol attachments (replaces prose header injection). */
+  attachments?: AttachmentDto[];
 };
 
 export type AgentQueueItemDto = {
@@ -717,7 +882,7 @@ export type FrontendCommand =
   | { type: 'settings_update'; payload: { patch: SettingsPatch } }
   | { type: 'send_chat'; payload: { request_id: Id; request: { session_id: Id; message: string; model_id: string | null } } }
   | { type: 'stop_chat'; payload: { request_id: Id } }
-  | { type: 'send_agent'; payload: { request_id: Id; request: { session_id: Id; prompt: string; model_id: string | null; mode: AgentMode; reasoning_effort?: 'none' | 'quick' | 'standard' | 'max'; system_instructions?: string; temperature?: number; editor_context?: EditorContextDto } } }
+  | { type: 'send_agent'; payload: { request_id: Id; request: { session_id: Id; prompt: string; model_id: string | null; mode: AgentMode; reasoning_effort?: 'none' | 'quick' | 'standard' | 'max'; system_instructions?: string; temperature?: number; editor_context?: EditorContextDto; attachments?: AttachmentDto[] } } }
   | { type: 'agent_decision'; payload: { request_id: Id; approval_id: Id; decision: Decision; resolution?: AgentDecisionResolution } }
   | { type: 'retry_message'; payload: { session_id: Id; message_id: Id } }
   | { type: 'switch_session'; payload: { session_id: Id } }
@@ -791,6 +956,10 @@ export type FrontendCommand =
   | { type: 'terminal_input'; payload: { terminal_id: Id; data: string } }
   | { type: 'terminal_resize'; payload: { terminal_id: Id; cols: number; rows: number } }
   | { type: 'terminal_close'; payload: { terminal_id: Id } }
+  | { type: 'undo_agent_turn'; payload: { session_id: Id; turn_id: Id } }
+  | { type: 'reapply_agent_turn'; payload: { session_id: Id; turn_id: Id } }
+  | { type: 'revoke_scoped_grant'; payload: { session_id?: Id | null; action_class: ActionClassDto; target_pattern: string } }
+  | { type: 'set_question_countdown'; payload: { request_id: Id; approval_id: Id; paused: boolean } }
   | { type: 'open_external'; payload: { url: string } }
   | { type: 'open_logs' };
 
@@ -866,11 +1035,11 @@ export type FrontendEvent =
   | { type: 'terminal_exited'; payload: TerminalExitedPayload }
   | { type: 'toast'; payload: { severity: ToastSeverity; message: string } }
   | { type: 'error'; payload: ProtocolError }
-  | { type: 'decision_trace'; payload: Record<string, unknown> }
-  | { type: 'turn_checkpoint_updated'; payload: Record<string, unknown> }
-  | { type: 'scoped_grants_changed'; payload: Record<string, unknown> }
-  | { type: 'rules_loaded'; payload: Record<string, unknown> }
-  | { type: 'question_countdown_updated'; payload: Record<string, unknown> };
+  | { type: 'decision_trace'; payload: DecisionTraceDto }
+  | { type: 'turn_checkpoint_updated'; payload: TurnCheckpointSummaryDto }
+  | { type: 'scoped_grants_changed'; payload: ScopedGrantsChangedDto }
+  | { type: 'rules_loaded'; payload: RulesLoadedDto }
+  | { type: 'question_countdown_updated'; payload: QuestionCountdownUpdatedDto };
 
 /** The seven workflow progress events, narrowed out of `FrontendEvent`. */
 export type WorkflowEvent =
@@ -1290,6 +1459,7 @@ export const sendAgent = (
     systemInstructions?: string;
     temperature?: number;
     editorContext?: EditorContextDto;
+    attachments?: AttachmentDto[];
   },
 ): { requestId: string; promise: Promise<unknown> } => {
   const requestId = newRequestId();
@@ -1303,6 +1473,7 @@ export const sendAgent = (
     system_instructions?: string;
     temperature?: number;
     editor_context?: EditorContextDto;
+    attachments?: AttachmentDto[];
   } = {
     session_id: sessionId,
     prompt,
@@ -1320,6 +1491,9 @@ export const sendAgent = (
   }
   if (options?.editorContext !== undefined && options.editorContext.path.trim() !== '') {
     request.editor_context = options.editorContext;
+  }
+  if (options?.attachments !== undefined && options.attachments.length > 0) {
+    request.attachments = options.attachments;
   }
   return {
     requestId,
@@ -1421,6 +1595,60 @@ export const retryMessage = (
   dispatchZ2Command(
     { type: 'retry_message', payload: { session_id: sessionId, message_id: messageId } },
     ctx,
+  );
+
+// --- Stage 3: Turn Checkpoints, Scoped Grants & Question Countdown ----------
+
+export const undoAgentTurn = (
+  sessionId: Id,
+  turnId: Id,
+  ctx: EnvelopeContext,
+): Promise<unknown> =>
+  dispatchZ2Command(
+    { type: 'undo_agent_turn', payload: { session_id: sessionId, turn_id: turnId } },
+    { ...ctx, session_id: null },
+  );
+
+export const reapplyAgentTurn = (
+  sessionId: Id,
+  turnId: Id,
+  ctx: EnvelopeContext,
+): Promise<unknown> =>
+  dispatchZ2Command(
+    { type: 'reapply_agent_turn', payload: { session_id: sessionId, turn_id: turnId } },
+    { ...ctx, session_id: null },
+  );
+
+export const revokeScopedGrant = (
+  actionClass: ActionClassDto,
+  targetPattern: string,
+  ctx: EnvelopeContext,
+  sessionId?: Id | null,
+): Promise<unknown> =>
+  dispatchZ2Command(
+    {
+      type: 'revoke_scoped_grant',
+      payload: {
+        ...(sessionId ? { session_id: sessionId } : {}),
+        action_class: actionClass,
+        target_pattern: targetPattern,
+      },
+    },
+    { ...ctx, session_id: null },
+  );
+
+export const setQuestionCountdown = (
+  requestId: Id,
+  approvalId: Id,
+  paused: boolean,
+  ctx: EnvelopeContext,
+): Promise<unknown> =>
+  dispatchZ2Command(
+    {
+      type: 'set_question_countdown',
+      payload: { request_id: requestId, approval_id: approvalId, paused },
+    },
+    { ...ctx, session_id: null },
   );
 
 // --- Phase 8 workflow commands (ARCHITECTURE §18.4) -------------------------

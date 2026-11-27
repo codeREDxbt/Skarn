@@ -8,7 +8,7 @@ import { AgentComposer } from '../features/agent/components/AgentComposer';
 let workspaceId: string;
 let fixtureNumber = 0;
 const props = {
-  inFlight: false, streamingActivityLevel: 0, permissionMode: 'ask_before_change' as const,
+  inFlight: false, streamingActivityLevel: 0, permissionMode: 'ask_before_changes' as const,
   reasoningEffort: 'standard' as const, promptHistory: [],
 };
 

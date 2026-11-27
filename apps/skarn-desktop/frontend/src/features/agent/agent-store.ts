@@ -44,6 +44,11 @@ import {
   getAgentPreferences,
   updateAgentPreferences,
   subscribeAgentPreferences,
+  undoAgentTurn,
+  reapplyAgentTurn,
+  revokeScopedGrant as bridgeRevokeScopedGrant,
+  setQuestionCountdown as bridgeSetQuestionCountdown,
+  type ActionClassDto,
   type AgentPreferencesDto,
   type AgentRequestDto,
   type AgentQueueItemDto,
@@ -55,15 +60,23 @@ import {
   type AgentTurnDonePayload,
   type Approval,
   type ApprovalNeededPayload,
+  type AttachmentDto,
   type BootstrapState,
   type ChatCompletedPayload,
   type ChatTodoDto,
+  type DecisionTraceDto,
   type EditorContextDto,
   type EnvelopeContext,
+  type GrantDecisionDto,
   type Model,
   type PlanApproval,
   type PlanPhase,
   type PlanStateChangedPayload,
+  type QuestionCountdownUpdatedDto,
+  type RuleSourceDto,
+  type RulesLoadedDto,
+  type ScopedGrantDto,
+  type ScopedGrantsChangedDto,
   type SubagentActivityPayload,
   type SubagentCompletedPayload,
   type TodoItem,
@@ -71,6 +84,8 @@ import {
   type ToolCallStartedPayload,
   type ToolResultPayload,
   type TodoDto,
+  type TurnCheckpointSummaryDto,
+  type UndoConflictDto,
   type WorkflowApproval,
 } from '../../bridge/bridge';
 import { toastStore } from '../toasts/toast-store';
@@ -128,6 +143,32 @@ export type AgentState = {
   sessionBusy: boolean;
   /** Truthful session-command failure (unsupported slice, transport, ...). */
   sessionError: string | null;
+  /** Stage 3: active & skipped rules sources (global + workspace). */
+  rulesInEffect: RuleSourceDto[];
+  /** Stage 3: whether the current workspace is trusted. */
+  workspaceTrusted: boolean;
+  /** Stage 3: effective local-only privacy flag (`workspace_local_only ?? local_only`). */
+  effectiveLocalOnly: boolean;
+  /** Stage 3: active scoped grants (session + persisted project grants). */
+  scopedGrants: ScopedGrantDto[];
+  /** Stage 3: turn checkpoints available for Undo/Reapply. */
+  turnCheckpoints: TurnCheckpointSummaryDto[];
+  /** Stage 3: decision traces keyed by call_id. */
+  decisionTracesByCallId: Record<string, DecisionTraceDto>;
+  /** Stage 3: ordered decision traces for the active session. */
+  sessionTraces: DecisionTraceDto[];
+  /** Stage 3: per-session trace history. */
+  tracesBySession: Record<string, DecisionTraceDto[]>;
+  /** Stage 3: explicit checkpoint conflict state when manual edits prevent atomic Undo/Reapply. */
+  checkpointConflict: {
+    sessionId: string;
+    turnId: string;
+    action: 'undo' | 'reapply';
+    conflicts: UndoConflictDto[];
+    message?: string;
+  } | null;
+  /** Stage 3: turn_id currently executing Undo or Reapply. */
+  checkpointBusyTurnId: string | null;
 };
 
 const STORED_SETTINGS_KEY = 'skarn:model_settings';
@@ -226,7 +267,7 @@ export function isUserStoppedTurn(completed: boolean, endMessage?: string | null
  * Session-scoped permission default (Phase 9): auto-approve is never a
  * persisted trust grant. A restart, a reset, or a new session starts here.
  */
-const DEFAULT_PERMISSION_MODE: PermissionMode = 'ask_before_change';
+const DEFAULT_PERMISSION_MODE: PermissionMode = 'ask_before_changes';
 
 function loadStoredSettings(): ModelSettings {
   try {
@@ -293,18 +334,15 @@ export function resolveModelId(snapshot: AgentState): string | null {
 
 /** Store permission mode → the AgentMode the backend understands. */
 export function toAgentMode(mode: PermissionMode): AgentMode {
-  if (mode === 'full_access') return 'full_access';
-  if (mode === 'full') return 'auto_edit';
-  if (mode === 'ask_before_change') return 'ask_before_changes';
-  return 'read_only';
+  return mode;
 }
 
 /** Backend AgentMode (canonical Stage 3 + legacy aliases) → store permission mode. */
 export function fromAgentMode(mode: AgentMode | string | null | undefined): PermissionMode {
   if (mode === 'full_access') return 'full_access';
-  if (mode === 'auto_edit' || mode === 'auto') return 'full';
-  if (mode === 'read_only' || mode === 'explore') return 'plan_only';
-  return 'ask_before_change';
+  if (mode === 'auto_edit' || mode === 'auto') return 'auto_edit';
+  if (mode === 'read_only' || mode === 'explore') return 'read_only';
+  return 'ask_before_changes';
 }
 
 /**
@@ -409,6 +447,16 @@ let state: AgentState = {
   promptQueue: [],
   sessionBusy: false,
   sessionError: null,
+  rulesInEffect: [],
+  workspaceTrusted: false,
+  effectiveLocalOnly: false,
+  scopedGrants: [],
+  turnCheckpoints: [],
+  decisionTracesByCallId: {},
+  sessionTraces: [],
+  tracesBySession: {},
+  checkpointConflict: null,
+  checkpointBusyTurnId: null,
 };
 
 /** Protocol todo → the plan-spine row shape. Text is the task; no invented fields. */
@@ -1009,12 +1057,18 @@ function queueFromDto(queue: AgentQueueItemDto[]): QueuedPrompt[] {
   }));
 }
 
-function capturedRequest(text: string, mode = state.permissionMode, editorContext?: EditorContextDto): AgentRequestDto {
+function capturedRequest(
+  text: string,
+  mode = state.permissionMode,
+  editorContext?: EditorContextDto,
+  attachments?: AttachmentDto[],
+): AgentRequestDto {
   return {
     session_id: state.activeSessionId, prompt: text, model_id: resolveModelId(state),
     mode: toAgentMode(mode), reasoning_effort: state.reasoningEffort,
     system_instructions: state.modelSettings.systemInstructions, temperature: state.modelSettings.temperature,
     ...(editorContext ? { editor_context: editorContext } : {}),
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
   };
 }
 
@@ -1037,6 +1091,7 @@ function selectSessionView(sessionId: string, clearChildSelection = false) {
     promptQueue: view?.promptQueue ?? [],
     streamingActivityLevel: view?.streamingActivityLevel ?? 0,
     permissionMode: view?.permissionMode ?? DEFAULT_PERMISSION_MODE,
+    sessionTraces: state.tracesBySession[sessionId] ?? [],
   };
 }
 
@@ -1437,24 +1492,31 @@ export const agentStore = {
               const tool: WorkflowToolCall = {
                 id: call.call_id, toolName: call.tool_name, argsSummary, argsRaw,
                 status: 'running', startedAt: 0,
+                requestId: call.request_id,
+                turnId: call.turn_id,
+                decisionTrace: state.decisionTracesByCallId[call.call_id],
                 workflow: call.tool_name === 'run_workflow' ? workflowApprovalFromArgs(argsRaw) : undefined,
                 plan: call.tool_name === 'exit_plan_mode' ? planApprovalFromArgs(argsRaw) : undefined,
               };
+              message.turnId = call.turn_id;
               message.toolCalls = [...(message.toolCalls ?? []).filter((entry) => entry.id !== tool.id), tool];
               break;
             }
             case 'tool_result': {
               const result = event.payload;
+              message.turnId = message.turnId ?? result.turn_id;
               message.toolCalls = message.toolCalls?.map((call) => call.id === result.call_id
                 ? { ...call, status: result.is_err ? 'error' : 'completed', resultSummary: result.result_summary } : call);
               break;
             }
             case 'chat_completed':
+              message.turnId = event.payload.turn_id;
               message.content = event.payload.text;
               message.status = 'complete';
               terminalRequests.add(event.payload.request_id);
               break;
             case 'chat_failed':
+              message.turnId = message.turnId ?? event.payload.turn_id;
               message.content = message.content ? `${message.content}\n\n[Error: ${event.payload.error.message}]` : `[Error: ${event.payload.error.message}]`;
               message.status = 'error';
               terminalRequests.add(event.payload.request_id);
@@ -1462,6 +1524,7 @@ export const agentStore = {
             case 'agent_turn_done': {
               const done = event.payload;
               const stopped = isUserStoppedTurn(done.completed, done.end_message);
+              message.turnId = done.turn_id;
               if (!message.content) message.content = done.end_message;
               message.status = done.completed || stopped ? 'complete' : 'error';
               if (stopped) (message as CancelledChatMessage).cancelled = true;
@@ -1932,6 +1995,12 @@ export const agentStore = {
       subagents,
     );
 
+    const effectiveLocalOnly =
+      bootstrap.settings.effective_local_only ??
+      bootstrap.settings.workspace_local_only ??
+      bootstrap.settings.local_only ??
+      false;
+
     state = {
       ...state,
       availableModels: models,
@@ -1958,6 +2027,12 @@ export const agentStore = {
       streamingActivityLevel: liveSessions.has(activeSessionId) ? state.streamingActivityLevel : 0,
       sessionBusy: false,
       sessionError: null,
+      scopedGrants: bootstrap.scoped_grants ?? [],
+      rulesInEffect: bootstrap.rules_in_effect ?? [],
+      workspaceTrusted: bootstrap.settings.workspace_trusted ?? false,
+      effectiveLocalOnly,
+      turnCheckpoints: bootstrap.turn_checkpoints ?? [],
+      sessionTraces: state.tracesBySession[activeSessionId] ?? [],
     };
     const previousView = sessionViews.get(activeSessionId);
     if (previousView && state.inFlight) {
@@ -2034,6 +2109,16 @@ export const agentStore = {
       sessionBusy: false,
       sessionError: null,
       resumableSessions: [],
+      rulesInEffect: [],
+      workspaceTrusted: false,
+      effectiveLocalOnly: false,
+      scopedGrants: [],
+      turnCheckpoints: [],
+      decisionTracesByCallId: {},
+      sessionTraces: [],
+      tracesBySession: {},
+      checkpointConflict: null,
+      checkpointBusyTurnId: null,
     };
     notify();
   },
@@ -2792,9 +2877,15 @@ export const agentStore = {
     notify();
   },
 
-  sendUserMessage(text: string, isSteer = false, editorContext?: EditorContextDto): boolean {
+  sendUserMessage(
+    text: string,
+    isSteer = false,
+    editorContext?: EditorContextDto,
+    attachments?: AttachmentDto[],
+  ): boolean {
     const trimmed = text.trim();
-    if (!trimmed) return false;
+    const hasAttachments = Boolean(attachments && attachments.length > 0);
+    if (!trimmed && !hasAttachments) return false;
 
     // Refuse to start a turn without a real workspace and a real catalog
     // model. The composer surfaces the same message and disables send.
@@ -2803,13 +2894,14 @@ export const agentStore = {
     const modelToSend = resolveModelId(state);
     if (!gate.ready || !sessionContext || !modelToSend) return false;
 
-    this.addPromptToHistory(trimmed);
+    const displayPrompt = trimmed || 'Please review the attached workspace files.';
+    this.addPromptToHistory(displayPrompt);
 
     const targetSessionId = sessionContext.session_id ?? 'sess_default';
     const userMsg: ChatMessage = {
       id: `msg_${Date.now()}_u`,
       role: 'user',
-      content: trimmed,
+      content: displayPrompt,
       isSteer: isSteer || undefined,
       status: 'complete',
       timestamp: Date.now(),
@@ -2825,8 +2917,8 @@ export const agentStore = {
     };
 
     const promptToSend = isSteer
-      ? `[STEERING DIRECTIVE - IMMEDIATE COURSE CORRECTION]: ${trimmed}`
-      : trimmed;
+      ? `[STEERING DIRECTIVE - IMMEDIATE COURSE CORRECTION]: ${displayPrompt}`
+      : displayPrompt;
 
     const mode = toAgentMode(state.permissionMode);
 
@@ -2840,6 +2932,7 @@ export const agentStore = {
         systemInstructions: state.modelSettings.systemInstructions,
         temperature: state.modelSettings.temperature,
         ...(editorContext ? { editorContext } : {}),
+        ...(hasAttachments ? { attachments } : {}),
       },
     );
     activeRequestId = requestId;
@@ -2925,9 +3018,10 @@ export const agentStore = {
     return true;
   },
 
-  async steerActiveTurn(text: string): Promise<void> {
+  async steerActiveTurn(text: string, attachments?: AttachmentDto[]): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    const hasAttachments = Boolean(attachments && attachments.length > 0);
+    if (!trimmed && !hasAttachments) return;
     if (state.inFlight) {
       const sessionContext = sessionEnvelopeContext();
       if (sessionContext && activeRequestId) {
@@ -2946,7 +3040,7 @@ export const agentStore = {
       state = { ...state, messages: markActiveMessageCancelled(state.messages) };
       activeRequestId = null;
     }
-    this.sendUserMessage(trimmed, true);
+    this.sendUserMessage(trimmed, true, undefined, attachments);
   },
 
   async copyPrompt(text: string): Promise<boolean> {
@@ -3016,13 +3110,20 @@ export const agentStore = {
     this.sendUserMessage(trimmed);
   },
 
-  async queuePrompt(text: string, mode?: PermissionMode, editorContext?: EditorContextDto): Promise<string> {
+  async queuePrompt(
+    text: string,
+    mode?: PermissionMode,
+    editorContext?: EditorContextDto,
+    attachments?: AttachmentDto[],
+  ): Promise<string> {
     const trimmed = text.trim();
-    if (!trimmed) return '';
+    const hasAttachments = Boolean(attachments && attachments.length > 0);
+    if (!trimmed && !hasAttachments) return '';
     const ctx = sessionEnvelopeContext();
     if (!ctx || !getComposerGate(state).ready) return '';
     const id = crypto.randomUUID();
-    await queueAgentPrompt(capturedRequest(trimmed, mode, editorContext), ctx, id);
+    const prompt = trimmed || 'Please review the attached workspace files.';
+    await queueAgentPrompt(capturedRequest(prompt, mode, editorContext, attachments), ctx, id);
     return id;
   },
 
@@ -3154,6 +3255,66 @@ export const agentStore = {
 
     state = { ...state, messages: newMessages, thinkingState: 'working' };
     notify();
+  },
+
+  handleScopedApprovalDecision(
+    approvalId: string,
+    grant: GrantDecisionDto,
+    targetPattern?: string,
+  ): Promise<boolean> {
+    const target = findApprovalCard(approvalId) as WorkflowToolCall | undefined;
+    if (!target || target.status !== 'needs_approval') return Promise.resolve(false);
+    if (
+      (target.risk === 'high' || target.risk === 'critical') &&
+      (grant === 'allow_session' || grant === 'allow_project')
+    ) {
+      updateToolCallCard(approvalId, {
+        decisionError: 'High/critical risk actions only permit Allow once or Deny.',
+      });
+      return Promise.resolve(false);
+    }
+    const requestId = pendingApprovalRequests.get(approvalId) ?? target.requestId ?? activeRequestId;
+    const childOwner = childApprovalOwners.get(approvalId);
+    const sessionContext = requestId
+      ? childOwner && context
+        ? { ...context, session_id: childOwner.parentSessionId }
+        : sessionEnvelopeContext()
+      : null;
+    if (!requestId || !sessionContext) return Promise.resolve(false);
+
+    const isAllow = grant.startsWith('allow');
+    const decision = isAllow ? 'approve' : 'deny';
+    const resolution: AgentDecisionResolution = {
+      kind: 'scoped',
+      grant,
+      ...(targetPattern ? { target_pattern: targetPattern } : {}),
+    };
+
+    updateToolCallCard(approvalId, { decisionSubmitting: true, decisionError: undefined });
+    return agentDecision(requestId, approvalId, decision, sessionContext, resolution)
+      .then(() => {
+        pendingApprovalRequests.delete(approvalId);
+        childApprovalOwners.delete(approvalId);
+        updateToolCallCard(approvalId, {
+          status: isAllow ? 'approved' : 'denied',
+          resolution,
+          decisionSubmitting: false,
+          decisionError: undefined,
+        });
+        state = {
+          ...state,
+          thinkingState: isAllow ? 'solving' : 'breathing',
+        };
+        notify();
+        return true;
+      })
+      .catch((error: unknown) => {
+        updateToolCallCard(approvalId, {
+          decisionSubmitting: false,
+          decisionError: decisionErrorMessage(error),
+        });
+        return false;
+      });
   },
 
   handleApprovalDecision(
@@ -3296,7 +3457,12 @@ export const agentStore = {
     const lastIndex = state.messages.length - 1;
     if (lastIndex >= 0 && state.messages[lastIndex]?.role === 'assistant') {
       const messages = [...state.messages];
-      messages[lastIndex] = { ...messages[lastIndex]!, id: payload.message_id, content: payload.text };
+      messages[lastIndex] = {
+        ...messages[lastIndex]!,
+        id: payload.message_id,
+        content: payload.text,
+        turnId: payload.turn_id,
+      };
       state = { ...state, messages };
     }
     this.completeActiveTurn({
@@ -3361,6 +3527,9 @@ export const agentStore = {
         : plan?.summary || (plan ? `${plan.steps.length}-step plan` : argsSummary),
       argsRaw: parsedArgs,
       status: 'running',
+      requestId: payload.request_id,
+      turnId: payload.turn_id,
+      decisionTrace: state.decisionTracesByCallId[payload.call_id],
       // A workflow grant renders from this payload even before its approval.
       workflow,
       plan,
@@ -3372,6 +3541,7 @@ export const agentStore = {
       const lastMsg = state.messages[lastMsgIndex]!;
       const updated = {
         ...lastMsg,
+        turnId: lastMsg.turnId ?? payload.turn_id,
         toolCalls: [...(lastMsg.toolCalls || []), toolCall],
       };
       const newMessages = [...state.messages];
@@ -3464,6 +3634,11 @@ export const agentStore = {
       argsSummary: plan?.summary || payload.path_or_command,
       status: 'needs_approval',
       approvalId: payload.approval_id,
+      requestId: payload.request_id,
+      turnId: payload.turn_id,
+      risk: payload.risk,
+      actionClass: payload.action_class,
+      questionTimeout: payload.question_timeout,
       backgroundChild: Boolean(childTarget) || backgroundChildEvent,
       workflow,
       decisionPrompt: payload.prompt,
@@ -3515,6 +3690,7 @@ export const agentStore = {
 
     const updated = {
       ...lastMsg,
+      turnId: lastMsg.turnId ?? payload.turn_id,
       toolCalls,
     };
     const newMessages = [...state.messages];
@@ -3591,6 +3767,7 @@ export const agentStore = {
       const updated: CancelledChatMessage = {
         ...lastMsg,
         content,
+        turnId: lastMsg.turnId ?? payload.turn_id,
         // A user stop is a lifecycle end, not a failure: keep the partial
         // text, flag the row cancelled, and only real errors use `error`.
         status: payload.completed || stoppedByUser ? 'complete' : 'error',
@@ -3607,6 +3784,7 @@ export const agentStore = {
         id: `msg_${payload.request_id}_a`,
         role: 'assistant',
         content: fallbackContent,
+        turnId: payload.turn_id,
         status: payload.completed || stoppedByUser ? 'complete' : 'error',
         cancelled: stoppedByUser || undefined,
         timestamp: Date.now(),
@@ -3774,5 +3952,251 @@ export const agentStore = {
     };
     state = { ...state, artifacts: [newArt, ...state.artifacts] };
     notify();
+  },
+
+  // --- Stage 3: Decision traces, checkpoints, grants, rules & countdowns ----
+
+  handleDecisionTrace(payload: DecisionTraceDto): void {
+    const decisionTracesByCallId = {
+      ...state.decisionTracesByCallId,
+      [payload.call_id]: payload,
+    };
+    const existingList = state.tracesBySession[payload.session_id] ?? [];
+    const nextList = existingList.some((entry) => entry.trace_id === payload.trace_id && entry.call_id === payload.call_id)
+      ? existingList.map((entry) =>
+          entry.trace_id === payload.trace_id && entry.call_id === payload.call_id ? payload : entry,
+        )
+      : [...existingList, payload];
+    const tracesBySession = {
+      ...state.tracesBySession,
+      [payload.session_id]: nextList,
+    };
+
+    const attachTrace = (messages: ChatMessage[]): ChatMessage[] =>
+      messages.map((message) => {
+        if (!message.toolCalls?.some((call) => call.id === payload.call_id)) return message;
+        return {
+          ...message,
+          turnId: message.turnId ?? payload.turn_id,
+          toolCalls: message.toolCalls.map((call) =>
+            call.id === payload.call_id
+              ? { ...call, decisionTrace: payload, risk: call.risk ?? payload.risk, turnId: call.turnId ?? payload.turn_id }
+              : call,
+          ),
+        };
+      });
+
+    const targetTranscript = state.transcripts[payload.session_id];
+    state = {
+      ...state,
+      decisionTracesByCallId,
+      tracesBySession,
+      sessionTraces: payload.session_id === state.activeSessionId ? nextList : state.sessionTraces,
+      messages: payload.session_id === state.activeSessionId ? attachTrace(state.messages) : state.messages,
+      ...(targetTranscript
+        ? { transcripts: { ...state.transcripts, [payload.session_id]: attachTrace(targetTranscript) } }
+        : {}),
+    };
+    notify();
+  },
+
+  handleTurnCheckpointUpdated(payload: TurnCheckpointSummaryDto): void {
+    const exists = state.turnCheckpoints.some(
+      (cp) => cp.session_id === payload.session_id && cp.turn_id === payload.turn_id,
+    );
+    const turnCheckpoints = exists
+      ? state.turnCheckpoints.map((cp) =>
+          cp.session_id === payload.session_id && cp.turn_id === payload.turn_id ? payload : cp,
+        )
+      : [...state.turnCheckpoints, payload];
+    const conflicts = payload.conflicts ?? [];
+    state = {
+      ...state,
+      turnCheckpoints,
+      ...(conflicts.length > 0
+        ? {
+            checkpointConflict: {
+              sessionId: payload.session_id,
+              turnId: payload.turn_id,
+              action: payload.undone ? 'reapply' : 'undo',
+              conflicts,
+            },
+          }
+        : {}),
+    };
+    notify();
+  },
+
+  handleScopedGrantsChanged(payload: ScopedGrantsChangedDto): void {
+    state = {
+      ...state,
+      scopedGrants: payload.grants,
+    };
+    notify();
+  },
+
+  handleRulesLoaded(payload: RulesLoadedDto): void {
+    state = {
+      ...state,
+      rulesInEffect: payload.sources,
+      workspaceTrusted: payload.workspace_trusted,
+    };
+    notify();
+  },
+
+  handleQuestionCountdownUpdated(payload: QuestionCountdownUpdatedDto): void {
+    if (payload.timeout.timed_out) {
+      pendingApprovalRequests.delete(payload.approval_id);
+    }
+    const apply = (messages: ChatMessage[]): ChatMessage[] =>
+      messages.map((message) => {
+        if (!message.toolCalls?.some((call) => call.approvalId === payload.approval_id)) return message;
+        return {
+          ...message,
+          toolCalls: message.toolCalls.map((call) => {
+            if (call.approvalId !== payload.approval_id) return call;
+            return {
+              ...call,
+              questionTimeout: payload.timeout,
+              requestId: call.requestId ?? payload.request_id,
+              turnId: call.turnId ?? payload.turn_id,
+              ...(payload.timeout.timed_out
+                ? {
+                    status: 'completed' as const,
+                    decisionSubmitting: false,
+                    resultSummary: call.resultSummary ?? 'Unanswered, auto-continued',
+                  }
+                : {}),
+            };
+          }),
+        };
+      });
+
+    const view = sessionViews.get(payload.session_id);
+    if (view) {
+      sessionViews.set(payload.session_id, { ...view, messages: apply(view.messages) });
+    }
+    const targetTranscript = state.transcripts[payload.session_id];
+    state = {
+      ...state,
+      messages: payload.session_id === state.activeSessionId ? apply(state.messages) : state.messages,
+      ...(targetTranscript
+        ? { transcripts: { ...state.transcripts, [payload.session_id]: apply(targetTranscript) } }
+        : {}),
+      subagents: state.subagents.map((child) =>
+        child.messages?.some((msg) => msg.toolCalls?.some((call) => call.approvalId === payload.approval_id))
+          ? { ...child, messages: apply(child.messages) }
+          : child,
+      ),
+    };
+    notify();
+  },
+
+  dismissCheckpointConflict(): void {
+    if (!state.checkpointConflict) return;
+    state = { ...state, checkpointConflict: null };
+    notify();
+  },
+
+  async undoTurn(turnId: string): Promise<boolean> {
+    if (!context || !state.activeSessionId) return false;
+    const sessionId = state.activeSessionId;
+    state = { ...state, checkpointBusyTurnId: turnId, checkpointConflict: null };
+    notify();
+    try {
+      await undoAgentTurn(sessionId, turnId, context);
+      state = { ...state, checkpointBusyTurnId: null, checkpointConflict: null };
+      notify();
+      return true;
+    } catch (error) {
+      const updatedSummary = state.turnCheckpoints.find(
+        (cp) => cp.session_id === sessionId && cp.turn_id === turnId,
+      );
+      const conflicts = updatedSummary?.conflicts ?? [];
+      const message = decisionErrorMessage(error);
+      state = {
+        ...state,
+        checkpointBusyTurnId: null,
+        checkpointConflict: {
+          sessionId,
+          turnId,
+          action: 'undo',
+          conflicts,
+          message,
+        },
+      };
+      notify();
+      return false;
+    }
+  },
+
+  async reapplyTurn(turnId: string): Promise<boolean> {
+    if (!context || !state.activeSessionId) return false;
+    const sessionId = state.activeSessionId;
+    state = { ...state, checkpointBusyTurnId: turnId, checkpointConflict: null };
+    notify();
+    try {
+      await reapplyAgentTurn(sessionId, turnId, context);
+      state = { ...state, checkpointBusyTurnId: null, checkpointConflict: null };
+      notify();
+      return true;
+    } catch (error) {
+      const updatedSummary = state.turnCheckpoints.find(
+        (cp) => cp.session_id === sessionId && cp.turn_id === turnId,
+      );
+      const conflicts = updatedSummary?.conflicts ?? [];
+      const message = decisionErrorMessage(error);
+      state = {
+        ...state,
+        checkpointBusyTurnId: null,
+        checkpointConflict: {
+          sessionId,
+          turnId,
+          action: 'reapply',
+          conflicts,
+          message,
+        },
+      };
+      notify();
+      return false;
+    }
+  },
+
+  async revokeScopedGrant(
+    actionClass: ActionClassDto,
+    targetPattern: string,
+    sessionId?: string | null,
+  ): Promise<boolean> {
+    if (!context) return false;
+    try {
+      await bridgeRevokeScopedGrant(actionClass, targetPattern, context, sessionId ?? null);
+      return true;
+    } catch (error) {
+      toastStore.pushLocal('error', `Could not revoke scoped grant: ${decisionErrorMessage(error)}`);
+      return false;
+    }
+  },
+
+  async setQuestionCountdownPaused(approvalId: string, paused: boolean): Promise<boolean> {
+    if (!context) return false;
+    const card = findApprovalCard(approvalId);
+    const requestId = pendingApprovalRequests.get(approvalId) ?? card?.requestId ?? activeRequestId;
+    if (!requestId) return false;
+    try {
+      await bridgeSetQuestionCountdown(requestId, approvalId, paused, context);
+      if (card?.questionTimeout) {
+        this.handleQuestionCountdownUpdated({
+          request_id: requestId,
+          session_id: state.activeSessionId,
+          turn_id: card.turnId ?? 'turn_live',
+          approval_id: approvalId,
+          timeout: { ...card.questionTimeout, paused },
+        });
+      }
+      return true;
+    } catch (error) {
+      updateToolCallCard(approvalId, { decisionError: decisionErrorMessage(error) });
+      return false;
+    }
   },
 };

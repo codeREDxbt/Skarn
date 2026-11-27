@@ -2412,3 +2412,60 @@ button.git-section-header {
   background: var(--err);
   color: var(--surface-canvas);
 }
+
+/* Stage 3: Settings secondary action & Scoped Grants list */
+.settings-secondary-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+  color: var(--fg-default);
+  border: 1px solid var(--hairline-faint);
+  cursor: pointer;
+  transition: background-color var(--dur-instant) var(--ease-calm),
+    border-color var(--dur-instant) var(--ease-calm);
+}
+
+.settings-secondary-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--hairline-active);
+}
+
+.settings-secondary-btn:focus-visible {
+  outline: var(--border-focus);
+  outline-offset: 1px;
+}
+
+.settings-secondary-btn:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.settings-grants-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-grant-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-1);
+  background: var(--surface-sunken);
+  border: 1px solid var(--hairline-faint);
+}
+
+.settings-grant-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}

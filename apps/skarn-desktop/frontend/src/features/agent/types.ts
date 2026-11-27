@@ -1,7 +1,14 @@
 // Selora IDE — Phase Z3 Agentic Window Types
 // Traceable to DESIGN_TOKENS.md, ROADMAP.md Phase 5/9, and ZCode benchmark.
 
-import type { AgentDecisionPrompt, AgentDecisionResolution } from '../../bridge/bridge';
+import type {
+  ActionClassDto,
+  AgentDecisionPrompt,
+  AgentDecisionResolution,
+  DecisionTraceDto,
+  QuestionTimeoutDto,
+  RiskLevelDto,
+} from '../../bridge/bridge';
 
 export type ThinkingState =
   | 'breathing'
@@ -14,7 +21,7 @@ export type ThinkingState =
   | 'composing'
   | 'shaping';
 
-export type PermissionMode = 'full' | 'full_access' | 'plan_only' | 'ask_before_change';
+export type PermissionMode = 'read_only' | 'ask_before_changes' | 'auto_edit' | 'full_access';
 
 /**
  * The workspace the agent is allowed to read/write. Only ever populated from
@@ -93,6 +100,17 @@ export type AgentToolCall = {
   decisionSubmitting?: boolean;
   /** Truthful failure text from the decision route (card stays parked). */
   decisionError?: string;
+  /** Stage 3: effective risk tier of the action. */
+  risk?: RiskLevelDto;
+  /** Stage 3: capability class of the action. */
+  actionClass?: ActionClassDto;
+  /** Stage 3: clocked question timeout metadata. */
+  questionTimeout?: QuestionTimeoutDto;
+  /** Stage 3: request & turn correlation for question countdown / decision trace. */
+  requestId?: string;
+  turnId?: string;
+  /** Stage 3: attached decision trace for this tool call. */
+  decisionTrace?: DecisionTraceDto;
 };
 
 export type MessageRole = 'user' | 'assistant' | 'system';
@@ -109,6 +127,8 @@ export type ChatMessage = {
   isSteer?: boolean;
   isEdited?: boolean;
   forkedFromSessionId?: string;
+  /** Stage 3: backend turn id associated with this turn's assistant message. */
+  turnId?: string;
 };
 
 export type QueuedPrompt = {

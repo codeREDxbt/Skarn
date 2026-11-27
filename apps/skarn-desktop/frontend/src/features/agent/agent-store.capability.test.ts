@@ -153,7 +153,7 @@ describe('agent-store capability gating & model preservation', () => {
       createElement(AgentComposer, {
         inFlight: false,
         streamingActivityLevel: 0,
-        permissionMode: 'full',
+        permissionMode: 'auto_edit',
         reasoningEffort: 'standard',
         promptHistory: [],
       }),

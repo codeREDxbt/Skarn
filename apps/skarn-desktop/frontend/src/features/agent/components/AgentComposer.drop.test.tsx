@@ -14,7 +14,7 @@ describe('workspace file drops', () => {
 
   it('attaches only absolute files inside the workspace and deduplicates them', () => {
     const { container } = render(
-      <AgentComposer inFlight={false} streamingActivityLevel={0} permissionMode="full" reasoningEffort="standard" promptHistory={[]} />,
+      <AgentComposer inFlight={false} streamingActivityLevel={0} permissionMode="auto_edit" reasoningEffort="standard" promptHistory={[]} />,
     );
     const composer = container.querySelector('.agent-composer')!;
     fireEvent.drop(composer, { dataTransfer: { files: [

@@ -38,7 +38,7 @@ import {
   FileText,
 } from '../../../components/icons';
 import { VoiceBeam } from '../presence/VoiceBeam';
-import type { FileTreeNode, Model, ToolCapability } from '../../../bridge/bridge';
+import type { AttachmentDto, FileTreeNode, Model, ToolCapability } from '../../../bridge/bridge';
 import type { PermissionMode, ReasoningEffort } from '../types';
 import { agentStore, getComposerGate, resolveModelId } from '../agent-store';
 import { activeEditorContext, editorStore } from '../../editor/editor-store';
@@ -79,21 +79,21 @@ const MODE_OPTIONS: Array<{
   colorClass: string;
 }> = [
   {
-    id: 'plan_only',
+    id: 'read_only',
     label: 'Read-only',
     description: 'Explores and plans without writing any files.',
     icon: Lightbulb,
     colorClass: 'mode-icon-plan',
   },
   {
-    id: 'ask_before_change',
+    id: 'ask_before_changes',
     label: 'Ask before changes',
     description: 'Every file write and bash command pauses for your approval.',
     icon: ShieldAlert,
     colorClass: 'mode-icon-ask',
   },
   {
-    id: 'full',
+    id: 'auto_edit',
     label: 'Auto-edit',
     description:
       'File writes, edits and deletes apply immediately for this session. Bash commands still ask for approval.',
@@ -118,13 +118,10 @@ const EFFORT_OPTIONS: Array<{ id: ReasoningEffort; label: string; desc: string }
 ];
 
 /**
- * Attachments are workspace-relative paths, not uploaded bytes. The backend
- * contract is explicit: `editor_context` never carries file contents and the
- * agent reads files itself with `read_file` (selora-protocol lib.rs). So the
- * prompt names the files and the agent reads the same bytes its tools see.
+ * Attachments are typed workspace-relative references (`AttachmentDto[]`) sent
+ * directly in `AgentRequestDto.attachments` without mutating user prompt prose.
  */
 const MAX_ATTACHMENTS = 8;
-const ATTACHMENT_HEADER = 'Attached workspace files (read them with read_file before answering):';
 
 function flattenFileTree(node: FileTreeNode | null, out: string[] = []): string[] {
   if (!node || out.length >= 5000) return out;
@@ -133,17 +130,17 @@ function flattenFileTree(node: FileTreeNode | null, out: string[] = []): string[
   return out;
 }
 
-const ATTACHMENTS_ONLY_PROMPT = 'Please review the attached workspace files.';
-
-function composePrompt(text: string, attachments: readonly string[]): string {
-  if (attachments.length === 0) return text;
-  const intro = text.trim() ? text : ATTACHMENTS_ONLY_PROMPT;
-  return `${intro}\n\n${ATTACHMENT_HEADER}\n${attachments.map((path) => `- ${path}`).join('\n')}`;
-}
-
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+function toAttachmentDtos(paths: readonly string[]): AttachmentDto[] {
+  return paths.map((path) => ({
+    path,
+    kind: 'file',
+    label: baseName(path),
+  }));
 }
 
 /** Provider label derived from the real backend model id (no fake metadata). */
@@ -247,6 +244,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
   const [modelError, setModelError] = useState<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachQuery, setAttachQuery] = useState('');
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const workspaceRoot = storeState.workspace?.root ?? null;
 
@@ -354,6 +352,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
       ) {
         setActiveMenu(null);
         setAttachOpen(false);
+        setRulesOpen(false);
       }
     };
     document.addEventListener('pointerdown', handleClickOutside);
@@ -400,13 +399,15 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     if (!trimmed && attachments.length === 0) return;
     const revision = draftRef.current.revision;
     const context = surface === 'main' ? activeEditorContext() ?? undefined : undefined;
-    const queued = await agentStore.queuePrompt(composePrompt(trimmed, attachments), permissionMode, context);
+    const attachmentDtos = attachments.length > 0 ? toAttachmentDtos(attachments) : undefined;
+    const queued = await agentStore.queuePrompt(trimmed, permissionMode, context, attachmentDtos);
     if (!queued) return;
     clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
+    setRulesOpen(false);
   }, [gate.ready, text, permissionMode, attachments, surface, clearAcceptedDraft]);
 
   const handleSteer = useCallback(async () => {
@@ -414,15 +415,17 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     const revision = draftRef.current.revision;
-    const prompt = composePrompt(trimmed, attachments);
+    const attachmentDtos = attachments.length > 0 ? toAttachmentDtos(attachments) : undefined;
+    const expectedPrompt = trimmed || 'Please review the attached workspace files.';
     const previousMessages = agentStore.getSnapshot().messages;
-    await agentStore.steerActiveTurn(prompt);
-    if (!agentStore.getSnapshot().messages.some((message) => message.role === 'user' && message.content === prompt && !previousMessages.includes(message))) return;
+    await agentStore.steerActiveTurn(trimmed, attachmentDtos);
+    if (!agentStore.getSnapshot().messages.some((message) => message.role === 'user' && message.content === expectedPrompt && !previousMessages.includes(message))) return;
     clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
+    setRulesOpen(false);
   }, [gate.ready, text, attachments, clearAcceptedDraft]);
 
   const handleSubmit = useCallback(() => {
@@ -439,19 +442,30 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
     if (!gate.ready) return;
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
-    const prompt = composePrompt(trimmed, attachments);
     const context = surface === 'main' ? activeEditorContext() ?? undefined : undefined;
     const revision = draftRef.current.revision;
-    const accepted = agentStore.sendUserMessage(prompt, false, context);
+    const accepted =
+      attachments.length > 0
+        ? agentStore.sendUserMessage(trimmed, false, context, toAttachmentDtos(attachments))
+        : agentStore.sendUserMessage(trimmed, false, context);
     if (!accepted) return;
     clearAcceptedDraft(revision);
     setHistoryIndex(-1);
     setSavedDraft('');
     setActiveMenu(null);
     setAttachOpen(false);
+    setRulesOpen(false);
   }, [inFlight, gate.ready, text, attachments, handleQueue, surface, clearAcceptedDraft]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault();
+      const idx = MODE_OPTIONS.findIndex((m) => m.id === permissionMode);
+      const next = MODE_OPTIONS[(idx + 1) % MODE_OPTIONS.length]!;
+      agentStore.setPermissionMode(next.id);
+      return;
+    }
+
     if (e.key === 'Enter') {
       if (e.shiftKey) {
         // Shift+Enter inserts newline
@@ -579,6 +593,8 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
 
   const sendBlocked = !inFlight && !gate.ready;
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
+  const rulesInEffect = storeState.rulesInEffect;
+  const activeRulesCount = rulesInEffect.filter((rule) => rule.active).length;
 
   return (
     <div
@@ -943,6 +959,62 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
         </div>
       )}
 
+      {/* 4c. Rules in effect popover (active global/workspace vs untrusted-skipped) */}
+      {rulesOpen && (
+        <div
+          id="composer-rules-popover"
+          className="composer-rules-popover"
+          role="dialog"
+          aria-label="Rules in effect"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation();
+              setRulesOpen(false);
+            }
+          }}
+        >
+          <div className="composer-rules-header">
+            <span className="composer-rules-title">Rules in effect ({activeRulesCount})</span>
+            <span
+              className={`composer-rules-trust-pill ${
+                storeState.workspaceTrusted ? 'is-trusted' : 'is-untrusted'
+              }`}
+            >
+              {storeState.workspaceTrusted ? 'Trusted workspace' : 'Untrusted workspace'}
+            </span>
+          </div>
+          {rulesInEffect.length === 0 ? (
+            <p className="composer-rules-empty">No AGENTS.md or .skarn/rules sources loaded.</p>
+          ) : (
+            <ul className="composer-rules-list">
+              {rulesInEffect.map((rule) => (
+                <li
+                  key={`${rule.scope}:${rule.path}`}
+                  className={`composer-rule-item ${rule.active ? 'is-active' : 'is-skipped'}`}
+                >
+                  <div className="composer-rule-row">
+                    <span className="composer-rule-scope">{rule.scope}</span>
+                    <span className="composer-rule-path" title={rule.path}>
+                      {rule.path}
+                    </span>
+                    <span className={`composer-rule-status ${rule.active ? 'is-active' : 'is-skipped'}`}>
+                      {rule.active
+                        ? 'Active'
+                        : rule.inactive_reason === 'workspace_untrusted' || !storeState.workspaceTrusted
+                        ? 'Skipped (untrusted)'
+                        : rule.inactive_reason ?? 'Skipped'}
+                    </span>
+                  </div>
+                  {rule.digest && (
+                    <span className="composer-rule-digest">{rule.digest.slice(0, 12)}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* 5. Bottom Toolbar */}
       <div className="composer-toolbar">
         <div className="toolbar-left">
@@ -973,7 +1045,7 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
             type="button"
             className="composer-pill mode-pill"
             onClick={() => setActiveMenu((cur) => (cur === 'mode' ? null : 'mode'))}
-            title="Toggle permission policy"
+            title="Toggle permission policy (Shift+Tab to cycle)"
             aria-haspopup="menu"
             aria-expanded={activeMenu === 'mode'}
             aria-controls={activeMenu === 'mode' ? 'composer-mode-menu' : undefined}
@@ -981,6 +1053,20 @@ const SessionAgentComposer: React.FC<AgentComposerProps> = ({
             <CurrentModeIcon size={13} className={currentMode.colorClass} />
             <span className="pill-text">{currentMode.label}</span>
             <ChevronDown size={11} className="pill-chevron" />
+          </button>
+
+          {/* Rules in effect chip */}
+          <button
+            type="button"
+            className={`composer-pill rules-pill${rulesOpen ? ' is-open' : ''}`}
+            onClick={() => setRulesOpen((open) => !open)}
+            title="Inspect loaded AGENTS.md and .skarn/rules sources"
+            aria-haspopup="dialog"
+            aria-expanded={rulesOpen}
+            aria-controls={rulesOpen ? 'composer-rules-popover' : undefined}
+          >
+            <FileText size={12} />
+            <span className="pill-text">Rules in effect ({activeRulesCount})</span>
           </button>
 
           {/* Prompt word count (measured, not estimated) */}

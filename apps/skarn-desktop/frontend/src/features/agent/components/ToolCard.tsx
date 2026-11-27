@@ -5,7 +5,7 @@
 // - Header with tool icon, tool name, target path chip with copy button, elapsed duration badge
 // - Diff View overhaul: split / unified toggle, crisp line-by-line diff styling, syntax highlight
 // - Approval buttons: "Accept (Enter)" with functional green glow, "Reject (Esc)" with subtle red hover
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import {
   FileText,
   FileEdit,
@@ -28,6 +28,7 @@ import { agentStore, type WorkflowToolCall } from '../agent-store';
 import { WorkflowCard } from './WorkflowCard';
 import { AgentQuestionCard } from './AgentQuestionCard';
 import { AgentPlanCard } from './AgentPlanCard';
+import { DecisionTraceDrawer } from './DecisionTraceDrawer';
 
 export type ToolCardProps = {
   /** A workflow card carries the §18.1 confirmation payload on the call. */
@@ -186,10 +187,16 @@ function extractTargetInfo(tool: AgentToolCall): { path: string; isCommand: bool
 }
 
 export const ToolCard: React.FC<ToolCardProps> = ({ tool }) => {
+  const storeSnapshot = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
   const [expanded, setExpanded] = useState(tool.status === 'needs_approval');
   const [diffViewMode, setDiffViewMode] = useState<'unified' | 'split'>('unified');
   const [pathCopied, setPathCopied] = useState(false);
   const [runningElapsed, setRunningElapsed] = useState<number>(0);
+
+  const trace = tool.decisionTrace ?? storeSnapshot.decisionTracesByCallId[tool.id];
+  const effectiveRisk = tool.risk ?? trace?.risk;
+  const highOrCriticalRisk = effectiveRisk === 'high' || effectiveRisk === 'critical';
+  const persistentAllowAllowed = effectiveRisk === 'low' || effectiveRisk === 'medium';
 
   const isRunning = tool.status === 'running';
   const isApproval = tool.status === 'needs_approval';
@@ -258,11 +265,11 @@ export const ToolCard: React.FC<ToolCardProps> = ({ tool }) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      agentStore.handleApprovalDecision(tool.approvalId, 'approve');
+      void agentStore.handleScopedApprovalDecision(tool.approvalId, 'allow_once', targetInfo?.path);
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      agentStore.handleApprovalDecision(tool.approvalId, 'deny');
+      void agentStore.handleScopedApprovalDecision(tool.approvalId, 'deny_once', targetInfo?.path);
     }
   };
 
@@ -375,6 +382,17 @@ export const ToolCard: React.FC<ToolCardProps> = ({ tool }) => {
         </div>
 
         <div className="tool-header-telemetry">
+          {/* Risk level badge */}
+          {effectiveRisk && (
+            <span
+              className={`tool-risk-badge risk-${effectiveRisk}`}
+              title={`Action risk level: ${effectiveRisk}`}
+              data-testid="tool-risk-badge"
+            >
+              {effectiveRisk}
+            </span>
+          )}
+
           {/* Diff badge if present (+X -Y) */}
           {tool.diff && (
             <span className="tool-diff-badge" title={`+${tool.diff.added} / -${tool.diff.removed}`}>
@@ -445,6 +463,10 @@ export const ToolCard: React.FC<ToolCardProps> = ({ tool }) => {
                 submitting={tool.decisionSubmitting}
                 error={tool.decisionError}
                 resolution={tool.resolution}
+                questionTimeout={tool.questionTimeout}
+                onToggleCountdownPaused={(paused) =>
+                  void agentStore.setQuestionCountdownPaused(tool.approvalId!, paused)
+                }
                 onAnswer={(optionId, text) =>
                   void agentStore.answerQuestion(tool.approvalId!, optionId, text)
                 }
@@ -587,50 +609,126 @@ export const ToolCard: React.FC<ToolCardProps> = ({ tool }) => {
                 </div>
               )}
 
-              {/* Action Buttons */}
-              <div className="approval-actions">
-                <button
-                  type="button"
-                  className="btn-deny"
-                  onClick={() =>
-                    agentStore.handleApprovalDecision(tool.approvalId!, 'deny')
-                  }
-                  title="Reject this tool execution (Esc)"
-                  aria-label="Reject (Esc)"
-                >
-                  <X size={12} className="btn-icon" />
-                  <span>Reject (Esc)</span>
-                </button>
-
-                {!tool.backgroundChild && (
+              {/* Scoped Approval Actions */}
+              {tool.decisionError && (
+                <p className="agent-decision-error" role="alert">
+                  {tool.decisionError}
+                </p>
+              )}
+              {highOrCriticalRisk && (
+                <div className="approval-risk-ceiling" data-testid="approval-risk-ceiling">
+                  <ShieldAlert size={11} aria-hidden="true" />
+                  <span>{effectiveRisk} risk: persistent session/project allow disabled</span>
+                </div>
+              )}
+              <div className="approval-actions approval-actions-scoped">
+                <div className="approval-actions-deny-group">
                   <button
                     type="button"
-                    className="btn-approve-all"
+                    className="btn-deny"
+                    disabled={tool.decisionSubmitting}
                     onClick={() =>
-                      agentStore.handleApprovalDecision(tool.approvalId!, 'approve_all')
+                      void agentStore.handleScopedApprovalDecision(
+                        tool.approvalId!,
+                        'deny_once',
+                        targetInfo?.path,
+                      )
                     }
-                    title="Approve all remaining tools in this turn"
-                    aria-label="Approve All"
+                    title="Deny this action once (Esc)"
                   >
-                    Approve All
+                    <X size={12} className="btn-icon" />
+                    <span>Deny once</span>
                   </button>
-                )}
+                  <button
+                    type="button"
+                    className="btn-deny btn-deny-scoped"
+                    disabled={tool.decisionSubmitting}
+                    onClick={() =>
+                      void agentStore.handleScopedApprovalDecision(
+                        tool.approvalId!,
+                        'deny_session',
+                        targetInfo?.path,
+                      )
+                    }
+                    title="Always deny matching target for this session"
+                  >
+                    <span>Always deny (session)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-deny btn-deny-scoped"
+                    disabled={tool.decisionSubmitting}
+                    onClick={() =>
+                      void agentStore.handleScopedApprovalDecision(
+                        tool.approvalId!,
+                        'deny_project',
+                        targetInfo?.path,
+                      )
+                    }
+                    title="Always deny matching target for this project"
+                  >
+                    <span>Always deny (project)</span>
+                  </button>
+                </div>
 
-                <button
-                  type="button"
-                  className="btn-approve"
-                  onClick={() =>
-                    agentStore.handleApprovalDecision(tool.approvalId!, 'approve')
-                  }
-                  title="Accept and apply changes (Enter)"
-                  aria-label="Accept (Enter)"
-                >
-                  <Check size={12} className="btn-icon" />
-                  <span>Accept (Enter)</span>
-                </button>
+                <div className="approval-actions-allow-group">
+                  {persistentAllowAllowed && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-approve-all"
+                        disabled={tool.decisionSubmitting}
+                        onClick={() =>
+                          void agentStore.handleScopedApprovalDecision(
+                            tool.approvalId!,
+                            'allow_session',
+                            targetInfo?.path,
+                          )
+                        }
+                        title="Always allow matching target for this session"
+                      >
+                        <span>Always allow (session)</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-approve-all"
+                        disabled={tool.decisionSubmitting}
+                        onClick={() =>
+                          void agentStore.handleScopedApprovalDecision(
+                            tool.approvalId!,
+                            'allow_project',
+                            targetInfo?.path,
+                          )
+                        }
+                        title="Always allow matching target for this project"
+                      >
+                        <span>Always allow (project)</span>
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-approve"
+                    disabled={tool.decisionSubmitting}
+                    onClick={() =>
+                      void agentStore.handleScopedApprovalDecision(
+                        tool.approvalId!,
+                        'allow_once',
+                        targetInfo?.path,
+                      )
+                    }
+                    title="Allow this action once (Enter)"
+                  >
+                    <Check size={12} className="btn-icon" />
+                    <span>Allow once</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
+
+          {/* Collapsible Decision Trace Drawer */}
+          {trace && <DecisionTraceDrawer trace={trace} />}
         </div>
       )}
     </div>

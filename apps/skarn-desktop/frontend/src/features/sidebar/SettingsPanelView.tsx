@@ -4,6 +4,8 @@ import { localEditorPreferences } from '../editor/local-preferences';
 import {
   updateSettings,
   restartLsp,
+  revokeScopedGrant,
+  type ActionClassDto,
   type BootstrapState,
   type EnvelopeContext,
   type SettingsPatch,
@@ -153,6 +155,22 @@ const restartServer = (language: string): void => {
   };
 
   const lspServers = bootstrap.lsp_servers ?? [];
+  const scopedGrants = bootstrap.scoped_grants ?? [];
+  const globalLocalOnly = settings.local_only ?? false;
+  const workspaceLocalOnly = settings.workspace_local_only ?? null;
+  const effectiveLocalOnly =
+    settings.effective_local_only ??
+    (workspaceLocalOnly !== null ? workspaceLocalOnly : globalLocalOnly);
+  const workspaceLocalOnlySelectValue =
+    workspaceLocalOnly === null ? 'inherit' : workspaceLocalOnly ? 'true' : 'false';
+
+  const handleRevokeGrant = (actionClass: ActionClassDto, targetPattern: string): void => {
+    setSettingsError(null);
+    setSaving(true);
+    void revokeScopedGrant(actionClass, targetPattern, context)
+      .catch((cause: unknown) => setSettingsError(formatError(cause)))
+      .finally(() => setSaving(false));
+  };
 
   const commitFontSize = (): void => {
     const value = Number(fontSizeDraft);
@@ -396,6 +414,120 @@ const restartServer = (language: string): void => {
               Restart Skarn after changing this setting; it is read at startup, and
               agent turns pause until the restart.
             </span>
+          </div>
+
+          {/* Stage 3: Global & Per-Workspace Local-Only Privacy Mode */}
+          <div className="settings-card" data-testid="local-only-card">
+            <div className="settings-card-header">
+              <span className="settings-card-title">Privacy &amp; Local-Only Mode</span>
+              <span
+                className={`settings-status-pill ${
+                  effectiveLocalOnly ? 'is-connected' : 'is-disconnected'
+                }`}
+                data-testid="effective-local-only-status"
+              >
+                {effectiveLocalOnly ? 'Local-only active' : 'Cloud allowed'}
+              </span>
+            </div>
+            <p className="settings-card-hint">
+              Blocks cloud decision providers at the orchestrator boundary when active.
+            </p>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="settings-local-only">
+                Global local-only mode
+              </label>
+              <label className="settings-switch">
+                <input
+                  id="settings-local-only"
+                  type="checkbox"
+                  checked={globalLocalOnly}
+                  disabled={saving}
+                  onChange={(e) => persist({ local_only: e.target.checked })}
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="settings-workspace-local-only">
+                Workspace local-only override
+              </label>
+              <select
+                id="settings-workspace-local-only"
+                className="settings-select"
+                value={workspaceLocalOnlySelectValue}
+                disabled={saving}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'inherit') {
+                    persist({ clear_workspace_local_only: true });
+                  } else {
+                    persist({ workspace_local_only: val === 'true' });
+                  }
+                }}
+              >
+                <option value="inherit">Inherit global</option>
+                <option value="true">Force local-only</option>
+                <option value="false">Allow cloud</option>
+              </select>
+            </div>
+            {workspaceLocalOnly !== null && (
+              <div className="settings-row">
+                <span className="settings-card-hint">
+                  Workspace override is active ({workspaceLocalOnly ? 'Local-only' : 'Cloud allowed'}).
+                </span>
+                <button
+                  type="button"
+                  className="settings-secondary-btn"
+                  disabled={saving}
+                  onClick={() => persist({ clear_workspace_local_only: true })}
+                >
+                  Clear override
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Stage 3: Scoped Grants with one-click revocation */}
+          <div className="settings-card" data-testid="scoped-grants-card">
+            <div className="settings-card-header">
+              <span className="settings-card-title">Scoped Grants</span>
+              <span className="settings-card-hint">{scopedGrants.length} active</span>
+            </div>
+            <p className="settings-card-hint">
+              Session and project-level approval/denial rules. High and critical risk actions never persist allow grants.
+            </p>
+            {scopedGrants.length === 0 ? (
+              <p className="settings-card-hint" role="status">
+                No active scoped grants.
+              </p>
+            ) : (
+              <ul className="settings-grants-list">
+                {scopedGrants.map((grant) => (
+                  <li
+                    key={`${grant.action_class}:${grant.target_pattern}:${grant.decision}`}
+                    className="settings-grant-item"
+                  >
+                    <div className="settings-grant-info">
+                      <span className="settings-label">
+                        {grant.action_class} · <code>{grant.target_pattern}</code>
+                      </span>
+                      <span className="settings-card-hint">
+                        {grant.decision} · max risk: {grant.max_risk}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={saving}
+                      aria-label={`Revoke ${grant.action_class} ${grant.target_pattern}`}
+                      onClick={() => handleRevokeGrant(grant.action_class, grant.target_pattern)}
+                    >
+                      Revoke
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}

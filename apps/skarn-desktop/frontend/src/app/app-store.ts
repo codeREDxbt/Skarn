@@ -680,10 +680,52 @@ case 'plan_state_changed':
       terminalStore.handleExited(payload.payload);
       return;
     case 'decision_trace':
+      agentStore.handleDecisionTrace(payload.payload);
+      return;
     case 'turn_checkpoint_updated':
+      agentStore.handleTurnCheckpointUpdated(payload.payload);
+      if (state.bootstrap) {
+        const existing = state.bootstrap.turn_checkpoints ?? [];
+        const updated = payload.payload;
+        const idx = existing.findIndex(
+          (cp) => cp.session_id === updated.session_id && cp.turn_id === updated.turn_id,
+        );
+        state.bootstrap = {
+          ...state.bootstrap,
+          turn_checkpoints:
+            idx >= 0
+              ? existing.map((cp, at) => (at === idx ? updated : cp))
+              : [...existing, updated],
+        };
+        notify();
+      }
+      return;
     case 'scoped_grants_changed':
+      agentStore.handleScopedGrantsChanged(payload.payload);
+      if (state.bootstrap) {
+        state.bootstrap = {
+          ...state.bootstrap,
+          scoped_grants: payload.payload.grants,
+        };
+        notify();
+      }
+      return;
     case 'rules_loaded':
+      agentStore.handleRulesLoaded(payload.payload);
+      if (state.bootstrap) {
+        state.bootstrap = {
+          ...state.bootstrap,
+          rules_in_effect: payload.payload.sources,
+          settings: {
+            ...state.bootstrap.settings,
+            workspace_trusted: payload.payload.workspace_trusted,
+          },
+        };
+        notify();
+      }
+      return;
     case 'question_countdown_updated':
+      agentStore.handleQuestionCountdownUpdated(payload.payload);
       return;
     default: {
       // Phase 8 workflow progress: one pure mapper decides which protocol

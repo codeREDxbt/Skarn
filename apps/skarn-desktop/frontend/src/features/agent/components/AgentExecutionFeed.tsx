@@ -5,8 +5,9 @@
 // - Tool Execution Cards with glowing status borders & overhauled diffs
 // - Markdown Code Blocks with language badges, copy feedback, & "Apply to Editor"
 // - User message bubble actions: Copy, Rewind, Edit, Retry with sleek tooltips
-import React, { useRef, useEffect, useLayoutEffect, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import {
+  AlertCircle,
   BrainCircuit,
   ChevronDown,
   Copy,
@@ -17,6 +18,7 @@ import {
   X,
 } from '../../../components/icons';
 import type { ChatMessage, ThinkingState, AgentMetrics, QueuedPrompt } from '../types';
+import type { TurnCheckpointSummaryDto } from '../../../bridge/bridge';
 import { ToolCard } from './ToolCard';
 import { ReasoningAccordion } from './ReasoningAccordion';
 import { MarkdownMessage } from './MarkdownMessage';
@@ -60,8 +62,25 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBuffer, setEditBuffer] = useState<string>('');
+  const storeState = useSyncExternalStore(agentStore.subscribe, agentStore.getSnapshot);
 
-  const activeQueue = promptQueue ?? agentStore.getSnapshot().promptQueue;
+  const activeQueue = promptQueue ?? storeState.promptQueue;
+  const sessionCheckpoints = storeState.turnCheckpoints.filter(
+    (cp) => !storeState.activeSessionId || cp.session_id === storeState.activeSessionId,
+  );
+  const checkpointByTurnId = new Map<string, TurnCheckpointSummaryDto>(
+    sessionCheckpoints.map((cp) => [cp.turn_id, cp]),
+  );
+  const matchedCheckpointTurns = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== 'user' && msg.turnId && checkpointByTurnId.has(msg.turnId)) {
+      matchedCheckpointTurns.add(msg.turnId);
+    }
+  }
+  const unattachedCheckpoints = sessionCheckpoints.filter(
+    (cp) => !matchedCheckpointTurns.has(cp.turn_id),
+  );
+  const checkpointConflict = storeState.checkpointConflict;
 
   const handleScroll = () => {
     const list = listRef.current;
@@ -414,11 +433,127 @@ export const AgentExecutionFeed: React.FC<AgentExecutionFeedProps> = ({
                       </p>
                     </div>
                   ) : null}
+
+                  {/* 4. Per-turn Undo / Reapply checkpoint control */}
+                  {msg.turnId && checkpointByTurnId.has(msg.turnId) && (() => {
+                    const cp = checkpointByTurnId.get(msg.turnId)!;
+                    const busy = storeState.checkpointBusyTurnId === cp.turn_id;
+                    return (
+                      <div className="turn-checkpoint-actions" data-testid={`turn-checkpoint-${cp.turn_id}`}>
+                        <span className="turn-checkpoint-files">
+                          {cp.files.length} {cp.files.length === 1 ? 'file' : 'files'}
+                          {cp.undone ? ' · undone' : ''}
+                        </span>
+                        {cp.undone ? (
+                          <button
+                            type="button"
+                            className="turn-checkpoint-btn"
+                            disabled={busy || inFlight}
+                            onClick={() => void agentStore.reapplyTurn(cp.turn_id)}
+                          >
+                            <RotateLeft size={11} aria-hidden="true" />
+                            <span>{busy ? 'Reapplying…' : 'Reapply'}</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="turn-checkpoint-btn"
+                            disabled={busy || inFlight}
+                            onClick={() => void agentStore.undoTurn(cp.turn_id)}
+                          >
+                            <RotateLeft size={11} aria-hidden="true" />
+                            <span>{busy ? 'Undoing…' : 'Undo turn'}</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
           );
         })}
+
+        {/* Unattached Turn Checkpoints (e.g. restored from bootstrap) */}
+        {unattachedCheckpoints.length > 0 && (
+          <div className="turn-checkpoints-strip" aria-label="Turn Checkpoints">
+            {unattachedCheckpoints.map((cp) => {
+              const busy = storeState.checkpointBusyTurnId === cp.turn_id;
+              return (
+                <div
+                  key={`${cp.session_id}:${cp.turn_id}`}
+                  className="turn-checkpoint-actions"
+                  data-testid={`turn-checkpoint-${cp.turn_id}`}
+                >
+                  <span className="turn-checkpoint-files">
+                    Turn {cp.turn_id} · {cp.files.map((f) => f.path).join(', ')}
+                    {cp.undone ? ' (undone)' : ''}
+                  </span>
+                  {cp.undone ? (
+                    <button
+                      type="button"
+                      className="turn-checkpoint-btn"
+                      disabled={busy || inFlight}
+                      onClick={() => void agentStore.reapplyTurn(cp.turn_id)}
+                    >
+                      <RotateLeft size={11} aria-hidden="true" />
+                      <span>{busy ? 'Reapplying…' : 'Reapply'}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="turn-checkpoint-btn"
+                      disabled={busy || inFlight}
+                      onClick={() => void agentStore.undoTurn(cp.turn_id)}
+                    >
+                      <RotateLeft size={11} aria-hidden="true" />
+                      <span>{busy ? 'Undoing…' : 'Undo turn'}</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Explicit CheckpointConflict Dialog on manual human edits */}
+        {checkpointConflict && (
+          <div
+            className="checkpoint-conflict-dialog"
+            role="alertdialog"
+            aria-labelledby="checkpoint-conflict-title"
+            data-testid="checkpoint-conflict-dialog"
+          >
+            <div className="checkpoint-conflict-header">
+              <AlertCircle size={13} aria-hidden="true" />
+              <strong id="checkpoint-conflict-title">
+                {checkpointConflict.action === 'undo' ? 'Undo turn' : 'Reapply'} aborted — manual edits detected
+              </strong>
+            </div>
+            {checkpointConflict.message && (
+              <p className="checkpoint-conflict-message">{checkpointConflict.message}</p>
+            )}
+            {checkpointConflict.conflicts.length > 0 && (
+              <ul className="checkpoint-conflict-list">
+                {checkpointConflict.conflicts.map((conflict) => (
+                  <li key={`${conflict.path}:${conflict.reason}`} className="checkpoint-conflict-item">
+                    <span className="checkpoint-conflict-path">{conflict.path}</span>
+                    <span className="checkpoint-conflict-reason">{conflict.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="checkpoint-conflict-actions">
+              <button
+                type="button"
+                className="checkpoint-conflict-dismiss"
+                onClick={() => agentStore.dismissCheckpointConflict()}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 4. Prompt Queue Tray (shows all queued instructions scheduled to run next) */}
         {activeQueue && activeQueue.length > 0 && (

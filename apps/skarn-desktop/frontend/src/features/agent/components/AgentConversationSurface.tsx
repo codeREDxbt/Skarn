@@ -50,6 +50,7 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
   );
 
   const [activeTab, setActiveTab] = useState<'feed' | 'plan'>('feed');
+  const [tracePopoverOpen, setTracePopoverOpen] = useState(false);
   const [windowError, setWindowError] = useState<string | null>(null);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
 
@@ -66,7 +67,7 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
       ? state.workspace.displayName
       : null;
   const gate = getComposerGate(state);
-  const autoApplyArmed = state.permissionMode === 'full' || state.permissionMode === 'full_access';
+  const autoApplyArmed = state.permissionMode === 'auto_edit' || state.permissionMode === 'full_access';
   const activeSessionTabId = activeSession
     ? `agent-session-tab-${activeSession.id}`
     : undefined;
@@ -185,6 +186,17 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
             {state.todos.length})
           </button>
 
+          <button
+            type="button"
+            className={`agent-view-tab ${tracePopoverOpen ? 'is-active' : ''}`}
+            onClick={() => setTracePopoverOpen((open) => !open)}
+            aria-expanded={tracePopoverOpen}
+            aria-controls={tracePopoverOpen ? 'session-trace-popover' : undefined}
+            title="Inspect session decision traces"
+          >
+            Trace ({state.sessionTraces.length})
+          </button>
+
           <button type="button" className="agent-exit-btn" aria-label="Open Agents window"
             title="Open this conversation in the Agents window"
             onClick={() => {
@@ -221,6 +233,49 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
         </div>
       </header>
       {windowError && <p className="agent-session-error" role="alert">{windowError}</p>}
+
+      {tracePopoverOpen && (
+        <div
+          id="session-trace-popover"
+          className="session-trace-popover"
+          role="dialog"
+          aria-label="Session decision traces"
+        >
+          <div className="session-trace-popover-header">
+            <span className="session-trace-popover-title">
+              Session Decision Traces ({state.sessionTraces.length})
+            </span>
+            <button
+              type="button"
+              className="session-trace-close"
+              onClick={() => setTracePopoverOpen(false)}
+              aria-label="Close trace inspector"
+            >
+              Close
+            </button>
+          </div>
+          {state.sessionTraces.length === 0 ? (
+            <p className="session-trace-empty">No decision traces recorded in this session yet.</p>
+          ) : (
+            <ul className="session-trace-list">
+              {state.sessionTraces.map((trace) => (
+                <li key={`${trace.trace_id}:${trace.call_id}`} className="session-trace-item">
+                  <div className="session-trace-item-head">
+                    <span className="session-trace-action">{trace.action_id}</span>
+                    <span className={`tool-risk-badge risk-${trace.risk}`}>{trace.risk}</span>
+                    <span className="decision-trace-pill">{trace.selected_tier}</span>
+                    <span className={`decision-trace-pill phase-${trace.phase}`}>{trace.phase}</span>
+                  </div>
+                  <div className="session-trace-item-meta">
+                    <span>{trace.fsm_path.join(' → ')}</span>
+                    <span> · {trace.reason_code}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* 2. Backend session tabs (new / select via real protocol commands). */}
       <AgentSessionTabs
