@@ -100,6 +100,14 @@ const MODE_OPTIONS: Array<{
     icon: ShieldCheck,
     colorClass: 'mode-icon-full',
   },
+  {
+    id: 'full_access',
+    label: 'Full access',
+    description:
+      'File edits and trusted workspace commands run without pausing (high-risk actions still ask).',
+    icon: Zap,
+    colorClass: 'mode-icon-full',
+  },
 ];
 
 const EFFORT_OPTIONS: Array<{ id: ReasoningEffort; label: string; desc: string }> = [

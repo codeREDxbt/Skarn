@@ -267,7 +267,14 @@ export type ApiKeyStatus = {
 };
 
 export type Decision = 'approve' | 'answer' | 'deny' | 'approve_all_this_turn' | 'revise' | 'stop';
-export type AgentMode = 'execute' | 'explore' | 'auto';
+export type AgentMode =
+  | 'read_only'
+  | 'ask_before_changes'
+  | 'auto_edit'
+  | 'full_access'
+  | 'execute'
+  | 'explore'
+  | 'auto';
 export type AgentPhase = 'thinking' | 'running_tool' | 'awaiting_approval' | 'done';
 
 export type ToolCallStartedPayload = {
@@ -858,7 +865,12 @@ export type FrontendEvent =
   | { type: 'terminal_output'; payload: TerminalOutputPayload }
   | { type: 'terminal_exited'; payload: TerminalExitedPayload }
   | { type: 'toast'; payload: { severity: ToastSeverity; message: string } }
-  | { type: 'error'; payload: ProtocolError };
+  | { type: 'error'; payload: ProtocolError }
+  | { type: 'decision_trace'; payload: Record<string, unknown> }
+  | { type: 'turn_checkpoint_updated'; payload: Record<string, unknown> }
+  | { type: 'scoped_grants_changed'; payload: Record<string, unknown> }
+  | { type: 'rules_loaded'; payload: Record<string, unknown> }
+  | { type: 'question_countdown_updated'; payload: Record<string, unknown> };
 
 /** The seven workflow progress events, narrowed out of `FrontendEvent`. */
 export type WorkflowEvent =

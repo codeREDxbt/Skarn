@@ -14,7 +14,7 @@ export type ThinkingState =
   | 'composing'
   | 'shaping';
 
-export type PermissionMode = 'full' | 'plan_only' | 'ask_before_change';
+export type PermissionMode = 'full' | 'full_access' | 'plan_only' | 'ask_before_change';
 
 /**
  * The workspace the agent is allowed to read/write. Only ever populated from

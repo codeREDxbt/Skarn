@@ -66,7 +66,7 @@ export function AgentConversationSurface({ bootstrap, onExit, presentation = 'si
       ? state.workspace.displayName
       : null;
   const gate = getComposerGate(state);
-  const autoApplyArmed = state.permissionMode === 'full';
+  const autoApplyArmed = state.permissionMode === 'full' || state.permissionMode === 'full_access';
   const activeSessionTabId = activeSession
     ? `agent-session-tab-${activeSession.id}`
     : undefined;

@@ -293,9 +293,18 @@ export function resolveModelId(snapshot: AgentState): string | null {
 
 /** Store permission mode → the AgentMode the backend understands. */
 export function toAgentMode(mode: PermissionMode): AgentMode {
-  if (mode === 'full') return 'auto';
-  if (mode === 'ask_before_change') return 'execute';
-  return 'explore';
+  if (mode === 'full_access') return 'full_access';
+  if (mode === 'full') return 'auto_edit';
+  if (mode === 'ask_before_change') return 'ask_before_changes';
+  return 'read_only';
+}
+
+/** Backend AgentMode (canonical Stage 3 + legacy aliases) → store permission mode. */
+export function fromAgentMode(mode: AgentMode | string | null | undefined): PermissionMode {
+  if (mode === 'full_access') return 'full_access';
+  if (mode === 'auto_edit' || mode === 'auto') return 'full';
+  if (mode === 'read_only' || mode === 'explore') return 'plan_only';
+  return 'ask_before_change';
 }
 
 /**
@@ -994,7 +1003,7 @@ async function patchPreferences(patch: Partial<Omit<AgentPreferencesDto, 'revisi
 function queueFromDto(queue: AgentQueueItemDto[]): QueuedPrompt[] {
   return queue.map((item) => ({
     id: item.request_id, text: item.request.prompt, createdAt: item.created_at,
-    mode: item.request.mode === 'auto' ? 'full' : item.request.mode === 'explore' ? 'plan_only' : 'ask_before_change',
+    mode: fromAgentMode(item.request.mode),
     request: item.request,
     status: item.status, error: item.error,
   }));
@@ -1481,7 +1490,7 @@ export const agentStore = {
         const thinkingState = session.state === 'running_tool' ? 'solving'
           : session.state === 'thinking' ? 'working' : 'breathing';
         const promptQueue = queueFromDto(session.queue);
-        const permissionMode = session.mode === 'auto' ? 'full' : session.mode === 'explore' ? 'plan_only' : 'ask_before_change';
+        const permissionMode = fromAgentMode(session.mode);
         state = { ...state, activeSessionId: session.session_id, messages: visibleMessages,
           todos, plan, planPhase, inFlight, thinkingState, metrics,
           streamingActivityLevel: session.active_request_id ? 0.5 : 0, promptQueue,

@@ -679,6 +679,12 @@ case 'plan_state_changed':
     case 'terminal_exited':
       terminalStore.handleExited(payload.payload);
       return;
+    case 'decision_trace':
+    case 'turn_checkpoint_updated':
+    case 'scoped_grants_changed':
+    case 'rules_loaded':
+    case 'question_countdown_updated':
+      return;
     default: {
       // Phase 8 workflow progress: one pure mapper decides which protocol
       // events the Workflows panel consumes. Everything else stays explicitly
