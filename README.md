@@ -1,91 +1,76 @@
 ﻿# Skarn
 
-Skarn is a Windows desktop code editor with a workspace explorer, Git tools, an embedded terminal, language intelligence, and an AI agent workbench.
+Skarn is a Windows desktop code editor and AI agent workbench built with Rust, WebView2, and CodeMirror 6. It combines a workspace explorer, Git tools, an embedded ConPTY terminal, Rust/TypeScript language intelligence, and a deterministic, checkpointed AI agent runtime.
 
-This project began as Selora IDE.
+This project began as Selora IDE and is currently on the `skarn/migration-baseline` branch (Stages 0–3 implemented).
 
-## Download
+---
 
-<https://github.com/codeREDxbt/Skarn/releases/latest>
+## Why Skarn?
 
-Run `Skarn-Setup-1.0.0.exe`. The installer is per-user and does not need
-administrator access. It installs WebView2 when Windows does not already have it.
+Most AI coding tools either bolt chat onto an editor without real execution boundaries, or run autonomous loops where a bad edit or command is hard to audit and harder to roll back. Skarn is built around a few core ideas:
 
-## First run
+- **Deterministic decision kernel (`skarn-decision`)**: Permission checks, trust levels, and mode rules live in a standalone Rust kernel with property-based (`proptest`) proofs and shadow replay rather than scattered UI conditionals.
+- **Content-addressed filesystem mutations & turn undo**: Agent file writes go through a CAS-backed checkpoint layer so any turn can be cleanly undone without relying solely on `git checkout`.
+- **Explicit 4-mode control**: Users choose between **Ask**, **Plan**, **Agent**, and **Auto**—each with clear, enforced boundaries on what the agent can read, write, or execute.
+- **Scoped approvals & observability**: Approvals can be scoped rather than all-or-nothing, and the trace drawer exposes what the agent and decision kernel actually did.
+
+---
+
+## Current Status: Honest Pros & Cons
+
+### Pros (Implemented Now)
+- **Fast native shell**: Rust backend + WebView2 frontend with low overhead compared to Electron.
+- **Real 4-mode agent workbench**: **Ask**, **Plan**, **Agent**, and **Auto** modes wired end-to-end with scoped approvals, clocked questions, turn undo/checkpoints, and a trace drawer.
+- **Solid core editor**: CodeMirror 6 with multi-file tabs, breadcrumbs, minimap, Find/Replace, workspace regex search, and Rust/TypeScript LSP diagnostics + go-to-definition.
+- **Built-in Git & ConPTY terminal**: Stage/unstage/commit, branch/stash management, unified/split diffs, Ours/Theirs conflict resolution, and PowerShell 7 / Windows PowerShell tabs.
+- **Multi-provider AI gateway**: Presets for Anthropic, OpenAI, DeepSeek, OpenRouter, GLM, Ollama, and custom OpenAI-compatible endpoints, with keys stored in Windows Credential Manager when available.
+
+### Cons & Current Limitations
+- **Windows-only**: Built around WebView2, Windows ConPTY, and Windows Credential Manager; no macOS or Linux builds yet.
+- **Permanent file deletion**: Explorer **Delete** bypasses the Recycle Bin and deletes permanently.
+- **Unsaved buffers are not persisted**: Open file tabs restore after restart, but unsaved editor contents do not.
+- **Limited LSP coverage**: Language intelligence currently targets Rust and TypeScript; other languages rely on syntax highlighting only.
+- **Limited keybinding customization**: Only four shortcuts are currently rebindable.
+- **Active migration**: The codebase is still mid-migration from Selora IDE (`skarn/migration-baseline`); some internal docs and legacy naming are still being cleaned up.
+
+---
+
+## Currently Implemented (Stages 0–3)
+
+### Stage 0–2: Foundation, Rebrand & UI Cleanup
+- Isolated updater and removed legacy Selora gateway.
+- Mechanical rename (`selora` → `skarn`) and v1.0.0 identity.
+- Consolidated stylesheets, repaired `tokens.css` craft constitution, enforced region routing, and removed duplicate home views.
+
+### Stage 3: Decision Kernel & 4-Mode Workbench
+- Standalone `skarn-decision` Rust crate with `proptest` proofs and shadow replay.
+- CAS-backed filesystem mutations, live trust tracking, and per-turn checkpoints/undo.
+- 4-mode composer (**Ask**, **Plan**, **Agent**, **Auto**), scoped approval cards, clocked questions, and trace drawer.
+- Multi-session chat, subagent sessions (with title-bar pet indicators), and multi-phase workflow scripts with token/cost accounting.
+
+---
+
+## Planned in Next Stages
+
+- **Recycle Bin & safer file ops**: Move Explorer deletions to the Windows Recycle Bin instead of permanent delete.
+- **Unsaved buffer recovery**: Persist dirty/unsaved editor buffers across restarts.
+- **Expanded LSP & language support**: Add language server support beyond Rust and TypeScript.
+- **Full keybinding customization**: Make all editor and workbench shortcuts rebindable.
+- **Release & updater polish**: Finalize signed `Skarn-Setup` installer releases and automated update verification.
+
+---
+
+## First Run
 
 1. Open Skarn.
 2. Choose **Open Folder** and select a project.
 3. Open a file from the **Files** sidebar.
 4. Press `Ctrl+S` to save, or `Ctrl+L` to open the agent dock.
 
-AI features need a provider key. Open **Settings > AI Gateway** or **Connect**,
-choose a provider, enter the gateway URL and key, then test the connection.
-Presets cover Anthropic, OpenAI, DeepSeek, OpenRouter, GLM,
-Ollama, and custom OpenAI-compatible gateways.
+AI features require a provider key. Open **Settings > AI Gateway** or **Connect**, choose a provider, enter the gateway URL and key, and test the connection.
 
-## Features
-
-### Editor and workspace
-
-- CodeMirror 6 editor with multi-file tabs, dirty-state indicators, save, and
-  optional Auto Save.
-- Syntax highlighting for Rust, JavaScript, TypeScript, JSX/TSX, CSS, JSON, and
-  Markdown, plus breadcrumbs, a minimap, and editor preferences.
-- Find and Replace in the editor search panel, with Replace All.
-- Workspace search with case-sensitive, whole-word, and regular-expression
-  options. Results open at the matching line.
-- Explorer actions to create files and folders, rename, and delete. **Delete is
-  permanent** and does not use the Recycle Bin.
-- Command palette, File/Edit/View/Help menus, and a searchable shortcut
-  reference. Open files restore after restart; unsaved contents do not.
-
-### Terminal
-
-Embedded terminal tabs run through Windows ConPTY, using PowerShell 7 when
-installed and Windows PowerShell otherwise. Shells start in the workspace root,
-text can be copied and pasted, and file paths in output open in the editor.
-
-### Git
-
-Stage, unstage, discard, and commit changes. Create, switch, merge, and delete
-local branches; fetch, pull, and push; save, apply, pop, and drop stashes.
-Browse commit history and open commit details. Changed files open as
-syntax-highlighted unified or split diffs. Merge conflicts can be resolved with
-**Ours** or **Theirs**, or opened in the editor.
-
-### Agent workbench
-
-- Multi-session chat with persisted transcripts and session switching.
-- Session permission modes: **Ask**, **Agent**, and **Plan**. Agent mode applies
-  file writes immediately; commands still require approval. Plan is read-only.
-- Approval cards for file changes, commands, plans, and workflow scripts.
-- Plan cards, live todos, reasoning details, markdown replies, syntax-highlighted
-  code blocks, copy, retry, and prompt rewind/edit.
-- Attach workspace files to a prompt by drag and drop.
-- Subagent sessions with live transcripts and artifacts. Running children appear
-  as clickable pets in the title bar; clicking one opens its session.
-
-### Workflows
-
-Agent-requested workflow scripts run as multi-phase jobs with named agents,
-per-step status, approvals, artifacts, and a run log. The Workflows panel shows
-the phase graph, step progress, run list, and token and cost accounting. Runs can
-be stopped or resumed; resume warns when earlier side effects may exist.
-
-### Language intelligence and diagnostics
-
-Rust and TypeScript language servers provide hover, go-to-definition, and
-completion. Diagnostics appear inline in the editor and in the Problems panel,
-which filters by severity and text. Clicking a problem opens the file at its line.
-
-### Settings and themes
-
-Settings sections: AI Gateway, Editor, Theme, and Keybindings. Themes are Skarn
-Dark, Skarn Galaxy, Skarn Daylight (Light), and System. Settings also cover reduced
-motion, automatic update checks, editor preferences, and LSP restarts. Four
-shortcuts are rebindable, with conflict warnings and a searchable shortcut table.
-
-## Keyboard shortcuts
+## Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
@@ -98,10 +83,9 @@ shortcuts are rebindable, with conflict warnings and a searchable shortcut table
 | `Ctrl+F` | Find in editor |
 | `F12` | Go to definition |
 
-## Build from source
+## Build from Source
 
-Requirements: Windows 10 or 11 (64-bit) with WebView2, Rust stable with the MSVC
-toolchain, Node.js 22, and Inno Setup 6.3 or newer for the installer.
+Requirements: Windows 10 or 11 (64-bit) with WebView2, Rust stable with the MSVC toolchain, Node.js 22, and Inno Setup 6.3+ for the installer.
 
 ```powershell
 npm --prefix apps/skarn-desktop/frontend ci
@@ -109,13 +93,11 @@ npm --prefix apps/skarn-desktop/frontend run build
 cargo build --release -p skarn-desktop --locked
 ```
 
-Run the built app with `start.bat`. Build the installer with
-`installer\prebuild.bat`; the output is written to `installer\output\`.
+Run the built app with `start.bat`. Build the installer with `installer\prebuild.bat`; output is written to `installer\output\`.
 
-## Privacy and credentials
+## Privacy & Credentials
 
-Do not commit API keys or `.env` files. Skarn stores provider credentials in
-Windows Credential Manager when available.
+Do not commit API keys or `.env` files. Skarn stores provider credentials in Windows Credential Manager when available.
 
 ## License
 
