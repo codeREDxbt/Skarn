@@ -1043,7 +1043,7 @@ pub fn compacted_conversation(
         todos_text.push_str("- (none)\n");
     }
     let system = format!(
-        "You are continuing a compacted Selora coding-agent session. The full history is on \
+        "You are continuing a compacted Skarn coding-agent session. The full history is on \
          disk; this is the carried-forward state.\n\n\
          ## Summary of earlier work\n{summary}\n\n\
          ## Open todos\n{todos_text}"

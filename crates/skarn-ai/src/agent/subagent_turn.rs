@@ -509,7 +509,7 @@ fn child_system_prompt(name: &str, policy: SubagentPolicy, persona: Option<&str>
         }
     };
     let mut prompt = format!(
-        "You are the `{name}` subagent in Selora IDE. You were spawned by a parent agent to \
+        "You are the `{name}` subagent in Skarn. You were spawned by a parent agent to \
          complete one mission.\n\n{policy_line}\n\n\
          Stay inside the workspace root. Do not spawn nested subagents or ask the user direct \
          questions; report evidence and answer the mission. Never claim to have changed a file \

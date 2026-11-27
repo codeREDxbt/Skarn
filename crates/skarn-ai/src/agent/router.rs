@@ -551,7 +551,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             "run_workflow",
             "Write a JavaScript workflow that orchestrates subagents and \
              deterministic command gates, then run it once the user confirms. \
-             The script executes against Selora's fixed workflow facade only: \
+             The script executes against Skarn's fixed workflow facade only: \
              agent(name?, persona?) -> { ask(type?, instructions) }, \
              phase(name), world.run(cmd, args, { timeoutMs? }), \
              files.glob/grep/read, git.changedFiles/diff/status/log, \

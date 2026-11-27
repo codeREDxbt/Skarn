@@ -5011,7 +5011,7 @@ fn system_prompt(
     };
 
     format!(
-        "You are Selora, an autonomous coding agent in Selora IDE.\n\
+        "You are Skarn, an autonomous coding agent in Skarn.\n\
          Operating System: Windows. Shell: PowerShell.\n\
          Workspace Root: {}\n\
          Available tools: read_file, list_dir, fuzzy_find, search_files, write_file, edit_file, delete_file, bash, web_search, web_fetch, run_workflow, enter_plan_mode, exit_plan_mode, todo_read, todo_write, spawn_subagent, wait, send_message, ask_user_question.\n\
@@ -8691,7 +8691,7 @@ mod tests {
         // Today's prompt, hard-coded: root `C:/repo`, execute mode, standard
         // depth, no custom instructions, and the empty editor slot.
         let expected = format!(
-            "You are Selora, an autonomous coding agent in Selora IDE.\n\
+            "You are Skarn, an autonomous coding agent in Skarn.\n\
              Operating System: Windows. Shell: PowerShell.\n\
              Workspace Root: {}\n\
              Available tools: read_file, list_dir, fuzzy_find, search_files, write_file, edit_file, delete_file, bash, web_search, web_fetch, run_workflow, enter_plan_mode, exit_plan_mode, todo_read, todo_write, spawn_subagent, wait, send_message, ask_user_question.\n\
